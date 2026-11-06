@@ -109,6 +109,7 @@
     "client.curios.SPacketSyncStackMixin",
     "client.ConnectScreenAccess",
     "client.ConnectScreenMixin",
+    "client.FogRendererMixin",
     "client.ForgeGuiMixin",
     "client.GuiMixin",
     "client.IngameGuiAccess",

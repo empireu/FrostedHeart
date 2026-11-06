@@ -25,6 +25,7 @@ import com.teammoeg.frostedheart.infrastructure.config.FHConfig;
 import com.teammoeg.frostedheart.bootstrap.reference.FHParticleTypes;
 import com.teammoeg.frostedheart.bootstrap.reference.FHSoundEvents;
 import com.teammoeg.frostedheart.content.climate.render.InfraredViewRenderer;
+import com.teammoeg.frostedheart.content.climate.render.sky.CalculatedSkyRenderer;
 import com.teammoeg.frostedheart.content.climate.render.weather.ClientWeatherFrame;
 import com.teammoeg.frostedheart.content.climate.render.weather.ClientWeatherState;
 import com.teammoeg.frostedheart.content.climate.render.weather.SpatialWeatherRenderer;
@@ -118,6 +119,15 @@ public abstract class LevelRendererMixin {
         var cameraPosition = pCamera.getPosition();
         ClientWeatherFrame.INSTANCE.begin(ClientWeatherState.INSTANCE, mode,
                 cameraPosition.x, cameraPosition.y, cameraPosition.z, pPartialTick);
+    }
+
+    /**
+     * Draws the calculated sky over the vanilla sky dome, so vanilla still draws the sun, moon, and stars on top.
+     */
+    @Inject(method = "renderSky", at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/vertex/VertexBuffer;unbind()V", ordinal = 0, shift = At.Shift.AFTER))
+    private void frostedheart$drawCalculatedSky(PoseStack poseStack, Matrix4f projectionMatrix, float partialTick,
+                                                Camera camera, boolean isFoggy, Runnable skyFogSetup, CallbackInfo ci) {
+        CalculatedSkyRenderer.render(level, poseStack, projectionMatrix, partialTick, camera);
     }
 
     /**

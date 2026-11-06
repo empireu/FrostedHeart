@@ -50,6 +50,13 @@ public class FHShaders extends Shaders {
 
     }
     private static RegionShaders REGION;
+    private static Shader CALCULATED_SKY;
+    public static Shader getCalculatedSky() {
+        if (CALCULATED_SKY == null) {
+            runAndAddReloadListener(() -> CALCULATED_SKY = load(Shader.ShaderType.FRAGMENT, FHMain.rl("calculated_sky")));
+        }
+        return CALCULATED_SKY;
+    }
     public static Shader getInfraredView() {
         if (INFRARED_VIEW == null) {
         	runAndAddReloadListener(()->INFRARED_VIEW = load(Shader.ShaderType.FRAGMENT, FHMain.rl("infrared_view")));

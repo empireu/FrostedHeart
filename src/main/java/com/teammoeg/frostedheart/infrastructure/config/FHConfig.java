@@ -23,6 +23,7 @@ import com.electronwill.nightconfig.core.file.CommentedFileConfig;
 import com.teammoeg.chorda.client.cui.screenadapter.OverlayPositioner;
 import com.teammoeg.chorda.math.Colors;
 import com.teammoeg.frostedheart.content.climate.FHTemperatureDifficulty;
+import com.teammoeg.frostedheart.content.climate.render.sky.SkySettings;
 import com.teammoeg.frostedheart.content.climate.render.weather.WeatherRenderingMode;
 import com.teammoeg.frostedheart.content.climate.gamedata.climate.ClimateEventModel;
 import com.teammoeg.frostedheart.content.climate.gamedata.climate.WorldClockSource;
@@ -75,6 +76,12 @@ public class FHConfig {
 		public final ForgeConfigSpec.BooleanValue snowSounds;
 		public final ForgeConfigSpec.BooleanValue windSounds;
 		public final ForgeConfigSpec.BooleanValue skyRenderChanges;
+		public final ForgeConfigSpec.BooleanValue calculatedSky;
+		public final ForgeConfigSpec.DoubleValue calculatedSkyExposure;
+		public final ForgeConfigSpec.DoubleValue calculatedSkyNanobotOpticalDepth;
+		public final ForgeConfigSpec.DoubleValue calculatedSkyNanobotMedianNanometers;
+		public final ForgeConfigSpec.DoubleValue calculatedSkyNanobotSpread;
+		public final ForgeConfigSpec.DoubleValue calculatedSkyIceOpticalDepth;
 		public final ForgeConfigSpec.IntValue scenarioRenderQuality;
 		public final ForgeConfigSpec.IntValue scenarioRenderThread;
 		public final ForgeConfigSpec.BooleanValue scenarioAntiAliasing;
@@ -198,6 +205,27 @@ public class FHConfig {
 			skyRenderChanges = builder
 				.comment("Changes the sky renderer to one which does not render sunrise or sunset effects during a snowstorm.")
 				.define("skyRenderChanges", true);
+			builder.pop();
+
+			builder.push("CalculatedSky");
+			calculatedSky = builder
+				.comment("Draws the overworld sky from light scattered by air, titanium dioxide nanobots, and ice crystals. Off when a shader pack is active.")
+				.define("enabled", false);
+			calculatedSkyExposure = builder
+				.comment("Display exposure of the calculated sky.")
+				.defineInRange("exposure", SkySettings.DEFAULT_EXPOSURE, SkySettings.MINIMUM_EXPOSURE, SkySettings.MAXIMUM_EXPOSURE);
+			calculatedSkyNanobotOpticalDepth = builder
+				.comment("Vertical optical depth of the nanobot layer at 550 nm. 0.25 is about 30 megatons worldwide at the default size.")
+				.defineInRange("nanobotOpticalDepth", SkySettings.DEFAULT.nanobotOpticalDepth(), 0.0, SkySettings.MAXIMUM_NANOBOT_OPTICAL_DEPTH);
+			calculatedSkyNanobotMedianNanometers = builder
+				.comment("Median nanobot diameter in nanometres.")
+				.defineInRange("nanobotMedianNanometers", SkySettings.DEFAULT.nanobotMedianNanometers(), SkySettings.MINIMUM_NANOBOT_MEDIAN_NANOMETERS, SkySettings.MAXIMUM_NANOBOT_MEDIAN_NANOMETERS);
+			calculatedSkyNanobotSpread = builder
+				.comment("Geometric standard deviation of nanobot diameter. Narrow sizes give coloured skies, wide sizes give white haze.")
+				.defineInRange("nanobotSpread", SkySettings.DEFAULT.nanobotSpread(), SkySettings.MINIMUM_NANOBOT_SPREAD, SkySettings.MAXIMUM_NANOBOT_SPREAD);
+			calculatedSkyIceOpticalDepth = builder
+				.comment("Vertical optical depth of the ice crystal layer, which also draws the 22 degree halo.")
+				.defineInRange("iceOpticalDepth", SkySettings.DEFAULT.iceOpticalDepth(), 0.0, SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH);
 			builder.pop();
 
 
