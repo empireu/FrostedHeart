@@ -202,8 +202,9 @@ public final class CalculatedSkyGameTests {
                 new IceHaloProfile(data, blurSigma), new IceHaloMap(data, sunElevation, blurSigma));
         float[] towardSun = new float[SkyAtmosphere.CHANNEL_COUNT];
         float[] awayFromSun = new float[SkyAtmosphere.CHANNEL_COUNT];
-        view.horizonDisplayColor(0.0, 1.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, towardSun);
-        view.horizonDisplayColor(Math.PI, 1.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, awayFromSun);
+        SkyView.horizonDisplayColor(view, view, 0.0, 0.0, 1.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, towardSun);
+        SkyView.horizonDisplayColor(view, view, 0.0, Math.PI, 1.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F,
+                awayFromSun);
         helper.assertTrue(towardSun[0] / towardSun[2] > 1.1F * awayFromSun[0] / awayFromSun[2],
                 "Fog toward a sun at 4.5 degrees is warmer than away from it, red over blue "
                         + towardSun[0] / towardSun[2] + " against " + awayFromSun[0] / awayFromSun[2]);
@@ -214,12 +215,44 @@ public final class CalculatedSkyGameTests {
 
         float[] upTowardSun = new float[SkyAtmosphere.CHANNEL_COUNT];
         float[] upAwayFromSun = new float[SkyAtmosphere.CHANNEL_COUNT];
-        view.horizonDisplayColor(0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, upTowardSun);
-        view.horizonDisplayColor(Math.PI, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, upAwayFromSun);
+        SkyView.horizonDisplayColor(view, view, 0.0, 0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, upTowardSun);
+        SkyView.horizonDisplayColor(view, view, 0.0, Math.PI, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F,
+                upAwayFromSun);
         for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
             helper.assertTrue(upTowardSun[channel] == upAwayFromSun[channel],
                     "Looking straight up uses the mean horizon in every direction, channel " + channel);
         }
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void sunReddensTowardTheHorizonAndSetsBelowIt(GameTestHelper helper) {
+        float[] sunRadiance = new SkyTables(SkySettings.DEFAULT).sunRadiance();
+        double redOverBlueAt2 = Double.NaN;
+        double redOverBlueAt30 = Double.NaN;
+        for (int row = 0; row < SkyTables.VIEW_HEIGHT; row++) {
+            double elevationDegrees = Math.toDegrees(SkyTables.rowElevation(row));
+            float red = sunRadiance[row * SkyAtmosphere.CHANNEL_COUNT];
+            float green = sunRadiance[row * SkyAtmosphere.CHANNEL_COUNT + 1];
+            float blue = sunRadiance[row * SkyAtmosphere.CHANNEL_COUNT + 2];
+            if (elevationDegrees < -Math.toDegrees(SkyAtmosphere.HORIZON_DIP_RADIANS)) {
+                helper.assertTrue(red == 0.0F && green == 0.0F && blue == 0.0F,
+                        "The sun is hidden below the horizon at elevation " + elevationDegrees);
+                continue;
+            }
+            helper.assertTrue(red > 0.0F && red >= green && green >= blue && blue >= 0.0F,
+                    "The sun at elevation " + elevationDegrees + " is " + red + ", " + green + ", " + blue
+                            + ", where red should be at least green and green at least blue");
+            if (Double.isNaN(redOverBlueAt2) && elevationDegrees >= 2.0) {
+                redOverBlueAt2 = red / blue;
+            }
+            if (Double.isNaN(redOverBlueAt30) && elevationDegrees >= 30.0) {
+                redOverBlueAt30 = red / blue;
+            }
+        }
+        helper.assertTrue(redOverBlueAt2 > 10.0 * redOverBlueAt30,
+                "Red over blue of the sun is " + redOverBlueAt2 + " at 2 degrees and " + redOverBlueAt30
+                        + " at 30 degrees");
         helper.succeed();
     }
 

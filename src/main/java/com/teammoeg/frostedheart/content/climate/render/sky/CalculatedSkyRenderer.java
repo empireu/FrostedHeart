@@ -58,22 +58,24 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
 /**
- * Draws the calculated sky over the vanilla sky dome, before vanilla draws the sun, moon, and stars.
+ * Draws the calculated sky and its sun over the vanilla sky dome, before vanilla draws the moon and stars.
  * Tables are built on Minecraft's background executor and uploaded on the render thread.
- * Halo maps exist for sun elevations on a grid of HALO_MAP_STEP_DEGREES, and the two around the sun are blended
- * by the exact sun elevation, so only the missing end is built when the sun leaves them.
+ * Halo maps exist for sun elevations on a grid of HALO_MAP_STEP_DEGREES and sky views on a grid of VIEW_STEP_DEGREES.
+ * The two of each around the sun are blended by the exact sun elevation, so only the missing end is built when the
+ * sun leaves them.
  * Builds reuse one workspace and refill the halo map and view that the previous state dropped, so following the sun
  * allocates no tables.
  */
 @OnlyIn(Dist.CLIENT)
 public final class CalculatedSkyRenderer {
     private static final Logger LOGGER = LogUtils.getLogger();
-    private static final double SUN_REFRESH_RADIANS = Math.toRadians(0.25);
-    private static final double NIGHT_ELEVATION_RADIANS = Math.toRadians(-18.0);
+    private static final double VIEW_STEP_DEGREES = 0.25;
+    private static final double LOWEST_VIEW_SUN_DEGREES = -18.0;
+    private static final double HIGHEST_VIEW_SUN_DEGREES = 90.0;
     private static final double HALO_MAP_STEP_DEGREES = 0.5;
     private static final double LOWEST_HALO_SUN_DEGREES = -6.0;
     private static final double HIGHEST_HALO_SUN_DEGREES = 90.0;
-    private static final int TEXTURE_UNITS = 5;
+    private static final int TEXTURE_UNITS = 8;
     private static final boolean OCULUS_LOADED = ModList.get().isLoaded("oculus");
     private static final Matrix4f inverseViewProjection = new Matrix4f();
     private static final float[] reusedFogColor = new float[SkyAtmosphere.CHANNEL_COUNT];
@@ -91,6 +93,7 @@ public final class CalculatedSkyRenderer {
     private static IceHaloMap.Workspace haloWorkspace;
     /**
      * A halo map and a view that no state uses any more, handed to the next build to fill. Render thread only.
+     * A build that needs both ends of a grid step allocates the second one.
      */
     @Nullable
     private static IceHaloMap spareHalo;
@@ -102,23 +105,27 @@ public final class CalculatedSkyRenderer {
     private static ShaderProgram program;
     @Nullable
     private static Shader programShader;
-    private static int skyTexture;
-    private static int iceTexture;
+    private static int lowSkyTexture;
+    private static int highSkyTexture;
+    private static int lowIceTexture;
+    private static int highIceTexture;
     private static int lowHaloTexture;
     private static int highHaloTexture;
     private static int haloProfileTexture;
+    private static int sunTexture;
     private static boolean failed;
+    private static boolean sunDrawn;
     private static double lastTablesMilliseconds = Double.NaN;
     private static double lastViewMilliseconds = Double.NaN;
     private static double lastHaloProfileMilliseconds = Double.NaN;
     private static double lastHaloMapMilliseconds = Double.NaN;
 
     /**
-     * Everything the sky is drawn from. The low halo map is for the sun elevation of the halo index on the grid,
-     * and the high one for the next grid step.
+     * Everything the sky is drawn from. The low halo map is for the sun elevation of the halo index on its grid,
+     * and the high one for the next grid step. The views are on their own grid in the same way.
      */
     private record SkyState(SkyTables tables, IceHaloProfile haloProfile, int haloIndex, IceHaloMap lowHalo,
-            IceHaloMap highHalo, SkyView view) {
+            IceHaloMap highHalo, int viewIndex, SkyView lowView, SkyView highView) {
         @Nullable
         IceHaloMap haloAt(int index) {
             if (index == haloIndex) {
@@ -126,6 +133,17 @@ public final class CalculatedSkyRenderer {
             }
             if (index == haloIndex + 1) {
                 return highHalo;
+            }
+            return null;
+        }
+
+        @Nullable
+        SkyView viewAt(int index) {
+            if (index == viewIndex) {
+                return lowView;
+            }
+            if (index == viewIndex + 1) {
+                return highView;
             }
             return null;
         }
@@ -151,8 +169,16 @@ public final class CalculatedSkyRenderer {
         return OCULUS_LOADED && OculusShaderPack.isInUse();
     }
 
+    /**
+     * Whether the calculated sky drew its sun in the current call of LevelRenderer.renderSky, so vanilla's is hidden.
+     */
+    public static boolean isSunDrawn() {
+        return sunDrawn;
+    }
+
     public static void render(ClientLevel level, PoseStack poseStack, Matrix4f projection, float partialTick,
             Camera camera) {
+        sunDrawn = false;
         if (!isAllowed(level)) {
             return;
         }
@@ -163,6 +189,7 @@ public final class CalculatedSkyRenderer {
                 return;
             }
             draw(state, level, poseStack, projection, partialTick, timeOfDayAngle);
+            sunDrawn = true;
         } catch (RuntimeException exception) {
             fail("drawing", exception);
         }
@@ -182,8 +209,11 @@ public final class CalculatedSkyRenderer {
         double horizontalFraction = Math.min(1.0, Math.sqrt(look.x() * look.x() + look.z() * look.z()));
         double timeOfDayAngle = level.getTimeOfDay(partialTick) * Math.PI * 2.0;
         double azimuth = Math.atan2(look.z(), look.x() * sunSide(timeOfDayAngle));
-        current.view().horizonDisplayColor(azimuth, horizontalFraction, FHConfig.CLIENT.calculatedSkyExposure.get(),
-                level.getRainLevel(partialTick), level.getThunderLevel(partialTick), reusedFogColor);
+        float viewBlend = blendWeight(Math.asin(Math.cos(timeOfDayAngle)), current.lowView().sunElevationRadians(),
+                current.highView().sunElevationRadians());
+        SkyView.horizonDisplayColor(current.lowView(), current.highView(), viewBlend, azimuth, horizontalFraction,
+                FHConfig.CLIENT.calculatedSkyExposure.get(), level.getRainLevel(partialTick),
+                level.getThunderLevel(partialTick), reusedFogColor);
         return reusedFogColor;
     }
 
@@ -195,17 +225,25 @@ public final class CalculatedSkyRenderer {
     }
 
     /**
-     * The grid index of the halo map at or below the sun, clamped so that the next index is still on the grid.
+     * The index on a grid of sun elevations at or below the sun, clamped so that the next index is still on the grid.
      */
-    private static int haloIndex(double sunElevationRadians) {
-        int lowest = (int) Math.round(LOWEST_HALO_SUN_DEGREES / HALO_MAP_STEP_DEGREES);
-        int highest = (int) Math.round(HIGHEST_HALO_SUN_DEGREES / HALO_MAP_STEP_DEGREES) - 1;
-        int index = (int) Math.floor(Math.toDegrees(sunElevationRadians) / HALO_MAP_STEP_DEGREES);
+    private static int gridIndex(double sunElevationRadians, double stepDegrees, double lowestDegrees,
+            double highestDegrees) {
+        int lowest = (int) Math.round(lowestDegrees / stepDegrees);
+        int highest = (int) Math.round(highestDegrees / stepDegrees) - 1;
+        int index = (int) Math.floor(Math.toDegrees(sunElevationRadians) / stepDegrees);
         return Math.max(lowest, Math.min(highest, index));
     }
 
-    private static double haloSunElevation(int index) {
-        return Math.toRadians(index * HALO_MAP_STEP_DEGREES);
+    private static double gridSunElevation(int index, double stepDegrees) {
+        return Math.toRadians(index * stepDegrees);
+    }
+
+    /**
+     * How far the sun is from the low elevation toward the high one, clamped to the range from 0 to 1.
+     */
+    private static float blendWeight(double sunElevation, double lowElevation, double highElevation) {
+        return (float) Math.max(0.0, Math.min(1.0, (sunElevation - lowElevation) / (highElevation - lowElevation)));
     }
 
     private static void updateTables(double sunElevation) {
@@ -242,18 +280,19 @@ public final class CalculatedSkyRenderer {
         SkyState current = state;
         SkySettings settings = configSettings();
         boolean settingsChanged = current == null || !current.tables().settings().equals(settings);
-        int haloIndex = haloIndex(sunElevation);
+        int haloIndex = gridIndex(sunElevation, HALO_MAP_STEP_DEGREES, LOWEST_HALO_SUN_DEGREES,
+                HIGHEST_HALO_SUN_DEGREES);
+        int viewIndex = gridIndex(sunElevation, VIEW_STEP_DEGREES, LOWEST_VIEW_SUN_DEGREES, HIGHEST_VIEW_SUN_DEGREES);
         boolean haloMoved = current != null && current.haloIndex() != haloIndex;
-        boolean sunMoved = current != null
-                && Math.abs(sunElevation - current.view().sunElevationRadians()) > SUN_REFRESH_RADIANS
-                && Math.max(sunElevation, current.view().sunElevationRadians()) > NIGHT_ELEVATION_RADIANS;
-        if (!settingsChanged && !haloMoved && !sunMoved) {
+        boolean viewMoved = current != null && current.viewIndex() != viewIndex;
+        if (!settingsChanged && !haloMoved && !viewMoved) {
             return;
         }
         SkyState previous = settingsChanged ? null : current;
         boolean haloNeeded = previous == null || previous.haloAt(haloIndex) == null
                 || previous.haloAt(haloIndex + 1) == null;
-        boolean viewNeeded = previous == null || sunMoved;
+        boolean viewNeeded = previous == null || previous.viewAt(viewIndex) == null
+                || previous.viewAt(viewIndex + 1) == null;
         IceHaloMap recycledHalo = haloNeeded ? spareHalo : null;
         SkyView recycledView = viewNeeded ? spareView : null;
         if (haloNeeded) {
@@ -262,8 +301,8 @@ public final class CalculatedSkyRenderer {
         if (viewNeeded) {
             spareView = null;
         }
-        pendingBuild = CompletableFuture.supplyAsync(() -> build(previous, settings, sunElevation, haloIndex,
-                viewNeeded, recycledHalo, recycledView), Util.backgroundExecutor());
+        pendingBuild = CompletableFuture.supplyAsync(() -> build(previous, settings, haloIndex, viewIndex,
+                recycledHalo, recycledView), Util.backgroundExecutor());
     }
 
     /**
@@ -276,9 +315,8 @@ public final class CalculatedSkyRenderer {
         }
         keepSpareHalo(previous.lowHalo(), next);
         keepSpareHalo(previous.highHalo(), next);
-        if (spareView == null && previous.view() != next.view()) {
-            spareView = previous.view();
-        }
+        keepSpareView(previous.lowView(), next);
+        keepSpareView(previous.highView(), next);
     }
 
     private static void keepSpareHalo(IceHaloMap halo, SkyState next) {
@@ -287,12 +325,18 @@ public final class CalculatedSkyRenderer {
         }
     }
 
+    private static void keepSpareView(SkyView view, SkyState next) {
+        if (spareView == null && view != next.lowView() && view != next.highView()) {
+            spareView = view;
+        }
+    }
+
     /**
      * Builds the next state, reusing what the previous state already has and filling the recycled map and view when
      * given. Without a previous state everything is built for the given settings.
      */
-    private static BuildResult build(@Nullable SkyState previous, SkySettings settings, double sunElevation,
-            int haloIndex, boolean viewNeeded, @Nullable IceHaloMap recycledHalo, @Nullable SkyView recycledView) {
+    private static BuildResult build(@Nullable SkyState previous, SkySettings settings, int haloIndex, int viewIndex,
+            @Nullable IceHaloMap recycledHalo, @Nullable SkyView recycledView) {
         long start = System.nanoTime();
         SkyTables tables = previous != null ? previous.tables() : new SkyTables(settings);
         double tablesMilliseconds = previous != null ? Double.NaN : (System.nanoTime() - start) / 1.0e6;
@@ -314,30 +358,47 @@ public final class CalculatedSkyRenderer {
             start = System.nanoTime();
             lowHalo = unusedHalo != null ? unusedHalo : new IceHaloMap();
             unusedHalo = null;
-            lowHalo.build(haloWorkspace, haloSunElevation(haloIndex), blurSigma);
+            lowHalo.build(haloWorkspace, gridSunElevation(haloIndex, HALO_MAP_STEP_DEGREES), blurSigma);
             haloMapMilliseconds = (System.nanoTime() - start) / 1.0e6;
         }
         if (highHalo == null) {
             start = System.nanoTime();
             highHalo = unusedHalo != null ? unusedHalo : new IceHaloMap();
-            highHalo.build(haloWorkspace, haloSunElevation(haloIndex + 1), blurSigma);
+            highHalo.build(haloWorkspace, gridSunElevation(haloIndex + 1, HALO_MAP_STEP_DEGREES), blurSigma);
             haloMapMilliseconds = (System.nanoTime() - start) / 1.0e6;
         }
 
-        SkyView view;
+        SkyView unusedView = recycledView;
+        SkyView lowView = previous != null ? previous.viewAt(viewIndex) : null;
+        SkyView highView = previous != null ? previous.viewAt(viewIndex + 1) : null;
         double viewMilliseconds = Double.NaN;
-        if (previous != null && !viewNeeded) {
-            view = previous.view();
-        } else {
+        if (lowView == null) {
             start = System.nanoTime();
-            double lowDistance = Math.abs(sunElevation - lowHalo.sunElevationRadians());
-            double highDistance = Math.abs(sunElevation - highHalo.sunElevationRadians());
-            view = recycledView != null ? recycledView : new SkyView();
-            tables.computeView(sunElevation, haloProfile, lowDistance <= highDistance ? lowHalo : highHalo, view);
+            lowView = unusedView != null ? unusedView : new SkyView();
+            unusedView = null;
+            computeView(tables, haloProfile, lowHalo, highHalo, gridSunElevation(viewIndex, VIEW_STEP_DEGREES),
+                    lowView);
             viewMilliseconds = (System.nanoTime() - start) / 1.0e6;
         }
-        return new BuildResult(new SkyState(tables, haloProfile, haloIndex, lowHalo, highHalo, view),
-                tablesMilliseconds, haloProfileMilliseconds, haloMapMilliseconds, viewMilliseconds);
+        if (highView == null) {
+            start = System.nanoTime();
+            highView = unusedView != null ? unusedView : new SkyView();
+            computeView(tables, haloProfile, lowHalo, highHalo, gridSunElevation(viewIndex + 1, VIEW_STEP_DEGREES),
+                    highView);
+            viewMilliseconds = (System.nanoTime() - start) / 1.0e6;
+        }
+        return new BuildResult(new SkyState(tables, haloProfile, haloIndex, lowHalo, highHalo, viewIndex, lowView,
+                highView), tablesMilliseconds, haloProfileMilliseconds, haloMapMilliseconds, viewMilliseconds);
+    }
+
+    /**
+     * Fills a view for a sun elevation, with the light that ice scatters onto the ground from the nearer halo map.
+     */
+    private static void computeView(SkyTables tables, IceHaloProfile haloProfile, IceHaloMap lowHalo,
+            IceHaloMap highHalo, double sunElevation, SkyView view) {
+        double lowDistance = Math.abs(sunElevation - lowHalo.sunElevationRadians());
+        double highDistance = Math.abs(sunElevation - highHalo.sunElevationRadians());
+        tables.computeView(sunElevation, haloProfile, lowDistance <= highDistance ? lowHalo : highHalo, view);
     }
 
     public static SkySettings configSettings() {
@@ -349,11 +410,21 @@ public final class CalculatedSkyRenderer {
     }
 
     private static void upload(@Nullable SkyState previous, SkyState next) {
-        if (previous == null || previous.view() != next.view()) {
-            skyTexture = uploadTable(skyTexture, next.view().sky(), SkyTables.VIEW_WIDTH, SkyTables.VIEW_HEIGHT,
-                    GL11.GL_REPEAT);
-            iceTexture = uploadTable(iceTexture, next.view().ice(), SkyTables.VIEW_WIDTH, SkyTables.VIEW_HEIGHT,
-                    GL11.GL_REPEAT);
+        if (previous == null || previous.tables() != next.tables()) {
+            sunTexture = uploadTable(sunTexture, next.tables().sunRadiance(), 1, SkyTables.VIEW_HEIGHT,
+                    GL12.GL_CLAMP_TO_EDGE);
+        }
+        if (previous == null || previous.lowView() != next.lowView()) {
+            lowSkyTexture = uploadTable(lowSkyTexture, next.lowView().sky(), SkyTables.VIEW_WIDTH,
+                    SkyTables.VIEW_HEIGHT, GL11.GL_REPEAT);
+            lowIceTexture = uploadTable(lowIceTexture, next.lowView().ice(), SkyTables.VIEW_WIDTH,
+                    SkyTables.VIEW_HEIGHT, GL11.GL_REPEAT);
+        }
+        if (previous == null || previous.highView() != next.highView()) {
+            highSkyTexture = uploadTable(highSkyTexture, next.highView().sky(), SkyTables.VIEW_WIDTH,
+                    SkyTables.VIEW_HEIGHT, GL11.GL_REPEAT);
+            highIceTexture = uploadTable(highIceTexture, next.highView().ice(), SkyTables.VIEW_WIDTH,
+                    SkyTables.VIEW_HEIGHT, GL11.GL_REPEAT);
         }
         if (previous == null || previous.haloProfile() != next.haloProfile()) {
             haloProfileTexture = uploadTable(haloProfileTexture, next.haloProfile().values(),
@@ -419,14 +490,18 @@ public final class CalculatedSkyRenderer {
         float thunderLevel = level.getThunderLevel(partialTick);
         float texelFaceSize = current.tables().settings().texelFaceSize();
         double sunElevation = Math.asin(Math.cos(timeOfDayAngle));
-        float haloBlend = (float) Math.max(0.0, Math.min(1.0,
-                (sunElevation - current.lowHalo().sunElevationRadians())
-                        / (current.highHalo().sunElevationRadians() - current.lowHalo().sunElevationRadians())));
-        drawnTextures[0] = skyTexture;
-        drawnTextures[1] = iceTexture;
-        drawnTextures[2] = lowHaloTexture;
-        drawnTextures[3] = highHaloTexture;
-        drawnTextures[4] = haloProfileTexture;
+        float haloBlend = blendWeight(sunElevation, current.lowHalo().sunElevationRadians(),
+                current.highHalo().sunElevationRadians());
+        float viewBlend = blendWeight(sunElevation, current.lowView().sunElevationRadians(),
+                current.highView().sunElevationRadians());
+        drawnTextures[0] = lowSkyTexture;
+        drawnTextures[1] = highSkyTexture;
+        drawnTextures[2] = lowIceTexture;
+        drawnTextures[3] = highIceTexture;
+        drawnTextures[4] = lowHaloTexture;
+        drawnTextures[5] = highHaloTexture;
+        drawnTextures[6] = haloProfileTexture;
+        drawnTextures[7] = sunTexture;
 
         int previousProgram = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
         int previousActiveTexture = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
@@ -444,14 +519,19 @@ public final class CalculatedSkyRenderer {
                 RenderSystem.bindTexture(drawnTextures[unit]);
             }
             shaderProgram.use(uniforms -> {
-                uniforms.glUniform1I("skyView", 0);
-                uniforms.glUniform1I("iceView", 1);
-                uniforms.glUniform1I("lowHaloMap", 2);
-                uniforms.glUniform1I("highHaloMap", 3);
-                uniforms.glUniform1I("haloProfile", 4);
+                uniforms.glUniform1I("lowSkyView", 0);
+                uniforms.glUniform1I("highSkyView", 1);
+                uniforms.glUniform1I("lowIceView", 2);
+                uniforms.glUniform1I("highIceView", 3);
+                uniforms.glUniform1I("lowHaloMap", 4);
+                uniforms.glUniform1I("highHaloMap", 5);
+                uniforms.glUniform1I("haloProfile", 6);
+                uniforms.glUniform1I("sunRadiance", 7);
+                uniforms.glUniform1F("viewBlend", viewBlend);
                 uniforms.glUniformMatrix4F("inverseViewProjection", inverseViewProjection);
                 uniforms.glUniform3F("sunDirection", sunX, sunY, 0.0F);
                 uniforms.glUniform1F("sunSide", sunSide);
+                uniforms.glUniform1F("sunHalfTangent", (float) SkyTables.SUN_HALF_TANGENT);
                 uniforms.glUniform1F("horizonDip", (float) SkyAtmosphere.HORIZON_DIP_RADIANS);
                 uniforms.glUniform1F("exposure", exposure);
                 uniforms.glUniform1F("texelFaceSize", texelFaceSize);

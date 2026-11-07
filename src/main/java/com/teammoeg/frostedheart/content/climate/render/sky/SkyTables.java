@@ -31,6 +31,16 @@ import java.util.Arrays;
 public final class SkyTables {
     public static final int VIEW_WIDTH = 200;
     public static final int VIEW_HEIGHT = 100;
+    /**
+     * Half the side of the sun's square on the plane one unit in front of the camera.
+     * It matches the 8 texel core of vanilla's 32 texel sun texture, which vanilla draws 60 wide at distance 100.
+     */
+    public static final double SUN_HALF_TANGENT = 0.075;
+    /**
+     * Solid angle of the sun's square, over which the sun's irradiance of 1 is spread.
+     */
+    public static final double SUN_SOLID_ANGLE = 4.0 * Math.atan(SUN_HALF_TANGENT * SUN_HALF_TANGENT
+            / Math.sqrt(1.0 + 2.0 * SUN_HALF_TANGENT * SUN_HALF_TANGENT));
     private static final int CHANNELS = SkyAtmosphere.CHANNEL_COUNT;
     private static final int VIEW_STEPS = 30;
     private static final int MULTIPLE_SCATTERING_SIZE = 32;
@@ -85,6 +95,7 @@ public final class SkyTables {
     private final int[] raySlot = new int[VIEW_HEIGHT * VIEW_STEPS];
     private final double[] rayTransmittance = new double[VIEW_HEIGHT * VIEW_STEPS * CHANNELS];
     private final double[] rayIntegral = new double[VIEW_HEIGHT * VIEW_STEPS * CHANNELS];
+    private final float[] sunRadiance = new float[VIEW_HEIGHT * CHANNELS];
     private final double[] scratchSun = new double[3];
     private final double[] scratchRadiance = new double[CHANNELS];
     private final double[] scratchIceRadiance = new double[CHANNELS];
@@ -108,8 +119,9 @@ public final class SkyTables {
     }
 
     /**
-     * Fills the steps of the view rays of every row, which do not depend on the azimuth or the sun. The transmittance
-     * of a step is the transmittance from the camera to where the step begins.
+     * Fills the steps of the view rays of every row, which do not depend on the azimuth or the sun, and the sun's
+     * radiance through each row. The transmittance of a step is the transmittance from the camera to where the step
+     * begins.
      */
     private void buildViewRays() {
         double radius = SkyAtmosphere.CAMERA_RADIUS;
@@ -117,9 +129,8 @@ public final class SkyTables {
         for (int row = 0; row < VIEW_HEIGHT; row++) {
             double cosine = ROW_SINES[row];
             double groundDistance = SkyAtmosphere.distanceToGroundOrInfinity(radius, cosine);
-            double length = groundDistance < Double.POSITIVE_INFINITY
-                    ? groundDistance
-                    : SkyAtmosphere.distanceToTop(radius, cosine);
+            boolean hitsGround = groundDistance < Double.POSITIVE_INFINITY;
+            double length = hitsGround ? groundDistance : SkyAtmosphere.distanceToTop(radius, cosine);
             double stepLength = length / VIEW_STEPS;
             Arrays.fill(viewTransmittance, 1.0);
             for (int step = 0; step < VIEW_STEPS; step++) {
@@ -140,11 +151,24 @@ public final class SkyTables {
                     viewTransmittance[channel] *= stepTransmittance;
                 }
             }
+            for (int channel = 0; channel < CHANNELS; channel++) {
+                sunRadiance[row * CHANNELS + channel] =
+                        hitsGround ? 0.0F : (float) (viewTransmittance[channel] / SUN_SOLID_ANGLE);
+            }
         }
     }
 
     public SkySettings settings() {
         return settings;
+    }
+
+    /**
+     * Radiance of the sun's square seen through each row of the view tables, as interleaved RGB.
+     * It is the transmittance from the camera to the top of the atmosphere over SUN_SOLID_ANGLE, and zero for rows
+     * that hit the ground. calculated_sky.fsh reads it with the row coordinate of the sky view.
+     */
+    public float[] sunRadiance() {
+        return sunRadiance;
     }
 
     public double nanobotMegatons() {
@@ -392,7 +416,7 @@ public final class SkyTables {
         view.setSunElevationRadians(sunElevationRadians);
     }
 
-    private static double rowElevation(int row) {
+    static double rowElevation(int row) {
         double position = 2.0 * (row + 0.5) / VIEW_HEIGHT - 1.0;
         double latitude = Math.signum(position) * position * position * Math.PI / 2.0;
         return SkyView.latitudeToElevation(latitude);

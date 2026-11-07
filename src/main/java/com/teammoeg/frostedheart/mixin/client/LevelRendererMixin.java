@@ -122,12 +122,20 @@ public abstract class LevelRendererMixin {
     }
 
     /**
-     * Draws the calculated sky over the vanilla sky dome, so vanilla still draws the sun, moon, and stars on top.
+     * Draws the calculated sky and its sun over the vanilla sky dome, so vanilla still draws the moon and stars on top.
      */
     @Inject(method = "renderSky", at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/vertex/VertexBuffer;unbind()V", ordinal = 0, shift = At.Shift.AFTER))
     private void frostedheart$drawCalculatedSky(PoseStack poseStack, Matrix4f projectionMatrix, float partialTick,
                                                 Camera camera, boolean isFoggy, Runnable skyFogSetup, CallbackInfo ci) {
         CalculatedSkyRenderer.render(level, poseStack, projectionMatrix, partialTick, camera);
+    }
+
+    /**
+     * Gives the vanilla sun quad no size when the calculated sky drew its own sun.
+     */
+    @ModifyConstant(method = "renderSky", constant = @Constant(floatValue = 30.0F))
+    private float frostedheart$hideVanillaSun(float sunHalfSize) {
+        return CalculatedSkyRenderer.isSunDrawn() ? 0.0F : sunHalfSize;
     }
 
     /**

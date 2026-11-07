@@ -65,18 +65,25 @@ public final class SkyView {
 
     /**
      * Writes the displayed sky color at the horizon into the result, tone mapped and grayed as calculated_sky.fsh does.
+     * The radiance of the two views is blended by the high view's weight, as the shader blends them.
      * Single scattering by ice is left out, so the color stays smooth near the sun and across halo arcs.
      * A horizontal fraction of 1 uses the given azimuth, and 0 uses the mean over all azimuths.
      */
-    public void horizonDisplayColor(double azimuth, double horizontalFraction, double exposure, float rainLevel,
-            float thunderLevel, float[] result) {
+    public static void horizonDisplayColor(SkyView lowView, SkyView highView, double highWeight, double azimuth,
+            double horizontalFraction, double exposure, float rainLevel, float thunderLevel, float[] result) {
         for (int channel = 0; channel < CHANNELS; channel++) {
-            double radiance = horizontalFraction * sample(sky, channel, azimuth, 0.0)
-                    + (1.0 - horizontalFraction) * meanHorizonRadiance[channel];
+            double lowRadiance = lowView.horizonRadiance(channel, azimuth, horizontalFraction);
+            double highRadiance = highView.horizonRadiance(channel, azimuth, horizontalFraction);
+            double radiance = lowRadiance + (highRadiance - lowRadiance) * highWeight;
             result[channel] = (float) encodeSrgb(1.0 - Math.exp(-exposure * Math.max(0.0, radiance)));
         }
         greyByWeather(result, 0.6F, rainLevel);
         greyByWeather(result, 0.2F, thunderLevel);
+    }
+
+    private double horizonRadiance(int channel, double azimuth, double horizontalFraction) {
+        return horizontalFraction * sample(sky, channel, azimuth, 0.0)
+                + (1.0 - horizontalFraction) * meanHorizonRadiance[channel];
     }
 
     private static void greyByWeather(float[] color, float greyScale, float weatherLevel) {

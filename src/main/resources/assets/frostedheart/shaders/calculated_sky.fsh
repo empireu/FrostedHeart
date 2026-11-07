@@ -2,17 +2,22 @@
 
 // Table lookups match SkyView.sample, IceHaloProfile.phase, and IceHaloMap.phase.
 // Sky texels are the cells of an equi-angular cube map aligned with the world axes, as in calculated-sky.md.
-uniform sampler2D skyView;
-uniform sampler2D iceView;
+uniform sampler2D lowSkyView;
+uniform sampler2D highSkyView;
+uniform sampler2D lowIceView;
+uniform sampler2D highIceView;
 uniform sampler2D lowHaloMap;
 uniform sampler2D highHaloMap;
 uniform sampler2D haloProfile;
+uniform sampler2D sunRadiance;
 uniform mat4 inverseViewProjection;
 uniform vec3 sunDirection;
 uniform float sunSide;
+uniform float sunHalfTangent;
 uniform float horizonDip;
 uniform float exposure;
 uniform float texelFaceSize;
+uniform float viewBlend;
 uniform float haloBlend;
 uniform float haloLowestElevation;
 uniform float haloElevationSpan;
@@ -64,9 +69,23 @@ vec3 texelCenter(vec3 direction, out vec2 texelPosition) {
     return normalize(vec3(center, direction.z > 0.0 ? 1.0 : -1.0));
 }
 
+// Returns how much of the pixel the sun's square covers, with edges along the sun's path as vanilla draws it:
+float sunCoverage(vec3 direction, float pixelAngle) {
+    float forward = dot(direction, sunDirection);
+    if (forward <= 0.0) {
+        return 0.0;
+    }
+    vec3 alongPath = vec3(sunDirection.y, -sunDirection.x, 0.0);
+    vec2 plane = vec2(dot(direction, alongPath), direction.z) / forward;
+    vec2 coverage = clamp((sunHalfTangent - abs(plane)) / pixelAngle + 0.5, 0.0, 1.0);
+    return coverage.x * coverage.y;
+}
+
 void main() {
     vec4 farPoint = inverseViewProjection * vec4(texCoord * 2.0 - 1.0, 1.0, 1.0);
     vec3 direction = normalize(farPoint.xyz / farPoint.w);
+    vec3 pixelDirection = direction;
+    float pixelAngle = max(length(dFdx(direction)), length(dFdy(direction)));
     vec2 noisePosition = gl_FragCoord.xy;
     if (texelFaceSize > 0.0) {
         direction = texelCenter(direction, noisePosition);
@@ -80,14 +99,15 @@ void main() {
             : offset / (1.0 - horizonDip * 2.0 / PI);
     float position = sign(latitude) * sqrt(abs(latitude) * 2.0 / PI);
     vec2 tableCoordinate = vec2((azimuth + PI) / (2.0 * PI), 0.5 + 0.5 * position);
-    vec3 radiance = texture(skyView, tableCoordinate).rgb;
-    vec3 ice = texture(iceView, tableCoordinate).rgb;
+    vec3 radiance = mix(texture(lowSkyView, tableCoordinate).rgb, texture(highSkyView, tableCoordinate).rgb, viewBlend);
+    vec3 ice = mix(texture(lowIceView, tableCoordinate).rgb, texture(highIceView, tableCoordinate).rgb, viewBlend);
 
     float sunAngle = acos(clamp(dot(direction, sunDirection), -1.0, 1.0));
     vec3 icePhase = texture(haloProfile, vec2(sunAngle / PI, 0.5)).rgb;
     vec2 haloCoordinate = vec2(abs(azimuth) / PI, (elevation - haloLowestElevation) / haloElevationSpan);
     icePhase += mix(texture(lowHaloMap, haloCoordinate).rgb, texture(highHaloMap, haloCoordinate).rgb, haloBlend);
     radiance += icePhase * ice;
+    radiance += sunCoverage(pixelDirection, pixelAngle) * texture(sunRadiance, vec2(0.5, tableCoordinate.y)).rgb;
 
     vec3 color = encodeSrgb(1.0 - exp(-exposure * max(radiance, vec3(0.0))));
 

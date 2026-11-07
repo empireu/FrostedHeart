@@ -1,9 +1,9 @@
 # Calculated Sky
 
 - Status: `Partial`
-- Last verified: `2026-11-07`, against source and the GameTests below. The first version, with one ice lobe and no snow fade, was seen in `runClient` on `2026-11-05`. The three-part ice phase and a snow fade toward gray were seen in `runClient` on `2026-11-06`, and the fog color from the sky and the snow fade toward the fog color later that day. The ice crystal halos and the sky texels were first seen in `runClient` on `2026-11-07`, with no popping as the sun moves.
-- Scope: the optional overworld sky color calculated from air, titanium dioxide nanobots, and ice crystals, its halo display, the fog color taken from it outside snow, and the client config and client command. Clouds and lightmap are unchanged.
-- Primary code anchors: `CalculatedSkyRenderer`, `CalculatedSkyEffects`, `CalculatedSkyClientCommand`, `SkyTables`, `SkyView`, `SkyAtmosphere`, `SkyParticleOptics`, `SkyPhase`, `SkySettings`, `IceCrystalData`, `IceHaloProfile`, `IceHaloMap`, `IceHaloFormulas`, `IcePrism`, `LevelRendererMixin.frostedheart$drawCalculatedSky`, `FogRendererMixin.frostedheart$useCalculatedSkyFogColor`, `FHClientEventsMod.registerDimensionEffects`, `assets/frostedheart/shaders/calculated_sky.fsh`, `assets/frostedheart/datasets/ice_halos`
+- Last verified: `2026-11-07`, against source and the GameTests below. The first version, with one ice lobe and no snow fade, was seen in `runClient` on `2026-11-05`. The three-part ice phase and a snow fade toward gray were seen in `runClient` on `2026-11-06`, and the fog color from the sky and the snow fade toward the fog color later that day. The ice crystal halos and the sky texels were first seen in `runClient` on `2026-11-07`, with no popping as the sun moves. The sky's own sun, which replaces vanilla's, and the blended sky views were seen in `runClient` the same day.
+- Scope: the optional overworld sky color calculated from air, titanium dioxide nanobots, and ice crystals, its halo display and sun, the fog color taken from it outside snow, and the client config and client command. Clouds and lightmap are unchanged.
+- Primary code anchors: `CalculatedSkyRenderer`, `CalculatedSkyEffects`, `CalculatedSkyClientCommand`, `SkyTables`, `SkyView`, `SkyAtmosphere`, `SkyParticleOptics`, `SkyPhase`, `SkySettings`, `IceCrystalData`, `IceHaloProfile`, `IceHaloMap`, `IceHaloFormulas`, `IcePrism`, `LevelRendererMixin.frostedheart$drawCalculatedSky`, `LevelRendererMixin.frostedheart$hideVanillaSun`, `FogRendererMixin.frostedheart$useCalculatedSkyFogColor`, `FHClientEventsMod.registerDimensionEffects`, `assets/frostedheart/shaders/calculated_sky.fsh`, `assets/frostedheart/datasets/ice_halos`
 
 The feature is off by default. The plan and later stages are in [the calculated sky plan](../../plans/2026-11-05_21-16-30_calculated-sky.md).
 
@@ -76,26 +76,42 @@ Both are blurred by a Gaussian of `sqrt((0.45 * texel)^2 + (sun radius / 2)^2)` 
 
 The tables were written by the offline sky preview, as described in `datasets/ice_halos/src.md`.
 
+### Sun
+
+The sun is a square with the size and orientation of the core of vanilla's sun texture, its central `8` of `32` texels, which vanilla draws `60` wide at distance `100`. On the plane one unit in front of the camera its half side is `h = 0.075` (`SkyTables.SUN_HALF_TANGENT`), so it is about `8.6 degrees` across, with two edges along the sun's path and two from north to south. Its radiance spreads the sun's irradiance of `1` over its solid angle:
+
+```text
+L_sun(view) = T(elevation) / Omega
+Omega       = 4 * atan(h^2 / sqrt(1 + 2 * h^2)) = 0.02237 sr
+```
+
+`T` is the transmittance from the camera to the top of the atmosphere at the view's elevation, the product over the steps of that row's view ray. `SkyTables.sunRadiance` holds `L_sun` per row of the sky view, built with the tables, and zero for rows that hit the ground. So each texel of the square has the color of its own elevation: as the sun sets, the bottom of the square reddens first and the horizon cuts it off. Below about `4.6 degrees` the shader's fade to the fog color dims it further.
+
+With the default settings and exposure, the table displays white above about `8 degrees`, `(255, 237, 134)` at `4 degrees`, `(245, 148, 37)` at `2 degrees`, `(190, 63, 2)` at `0.5 degrees`, and `(154, 37, 0)` at the horizon. Its transmittance is within `3%` of the transmittance table's at these elevations. The diffraction peak and the nanobots' forward scattering already make the sky white out to about `2..3 degrees` from a high sun, and about `230` of `255` at the square's edges, so a high sun shows as a white square with soft edges. From about `10 degrees` down, the square stands out clearly against the sky.
+
 ## 2. Runtime
 
 | Step | Where | When |
 |---|---|---|
-| Transmittance, multiple scattering, `G`, `S` | `new SkyTables(settings)` on `Util.backgroundExecutor()` | When a setting changes |
+| Transmittance, multiple scattering, `G`, `S`, view ray steps, sun radiance | `new SkyTables(settings)` on `Util.backgroundExecutor()` | When a setting changes |
 | Halo profile | `new IceHaloProfile` on `Util.backgroundExecutor()` | When a setting changes |
 | Halo maps | `new IceHaloMap` on `Util.backgroundExecutor()` | For sun elevations on a `0.5 degree` grid from `-6` to `90 degrees`. The two around the sun are kept, and when the sun leaves them the missing one is built |
-| Sky view and ice view for one sun elevation | `SkyTables.computeView` on `Util.backgroundExecutor()` | When the sun has moved more than `0.25 degrees`, unless both elevations are below `-18 degrees` |
+| Sky views and ice views | `SkyTables.computeView` on `Util.backgroundExecutor()` | For sun elevations on a `0.25 degree` grid from `-18` to `90 degrees`. The two around the sun are kept, and when the sun leaves them the missing one is built |
 | Upload as `RGB16F` textures | `CalculatedSkyRenderer.uploadTable`, render thread | When a build finishes, only the tables that changed |
 | Draw | `calculated_sky.fsh`, one full-screen quad | Every frame while drawn |
 
 Only one build runs at a time, on one thread. The sky view is mirror symmetric around the sun's azimuth, so only half of it is integrated. `IceCrystalData` reads the datasets once, on the first build, through `ModList.getModFileById("frostedheart")`. Below a sun elevation of `-6 degrees` the halo maps stay as they are, since the ice view is dark then.
 
-`LevelRendererMixin.frostedheart$drawCalculatedSky` injects after the first `VertexBuffer.unbind()` in `LevelRenderer.renderSky`, which is right after vanilla draws its sky dome. Vanilla still draws the sun, moon, stars, and the dark dome below the horizon on top. Vanilla's own exits for fog, lava, powder snow, blindness, and darkness still apply.
+`LevelRendererMixin.frostedheart$drawCalculatedSky` injects after the first `VertexBuffer.unbind()` in `LevelRenderer.renderSky`, which is right after vanilla draws its sky dome. Vanilla still draws the moon, stars, and the dark dome below the horizon on top. Vanilla's own exits for fog, lava, powder snow, blindness, and darkness still apply.
+
+`LevelRendererMixin.frostedheart$hideVanillaSun` replaces the sun's half size `30.0F` in `renderSky` with `0` when the calculated sky drew its sun in the same call (`CalculatedSkyRenderer.isSunDrawn`), so vanilla's sun quad has no area. The flag is cleared at the start of every `CalculatedSkyRenderer.render` and set after a successful draw, so in every case below where the calculated sky is skipped, vanilla draws its sun. Oculus `1.7.0` hides the sun for shader packs that turn it off by emptying the vertex builder before `BufferBuilder.end()`, and Embeddium `0.3.31` injects only at the head of `renderSky`, so neither conflicts with the constant.
 
 The shader:
 
 - snaps each pixel's view direction to the center of its sky texel. Texels are the cells of an equi-angular cube map aligned with the world axes, with `round(90 / texelDegrees)` cells along each face edge, so they stay fixed to the sky as the camera turns, like the sun's texture. Minecraft's sun moves in the x-y plane, so its path runs down the middle of the `+x`, top, and `-x` faces. With `texelDegrees` `0` it uses the pixel's own direction;
-- looks up the sky view and the ice view by azimuth from the sun and by the latitude mapping of Hillaire 2020, as `SkyView.sample` does;
+- looks up the sky views and the ice views by azimuth from the sun and by the latitude mapping of Hillaire 2020, as `SkyView.sample` does, and blends the two around the sun by its exact elevation. Without the blend, each new view shifted the glow around a low sun by up to `16` display steps of `255` every `0.25 degrees`. With it, the sky stays within `1` step of a view computed for the exact elevation, measured halfway between two views at sun elevations from `1.4` to `30 degrees` and ice optical depths `0.1` and `0.3`;
 - adds the ice view times the halo profile at the angle from the sun and the two halo maps, blended by the exact sun elevation between their two elevations;
+- adds the sun's radiance from the sun table at the row of the sky texel, times the part of the pixel the sun's square covers. The outline uses the pixel's own direction, with one pixel of smoothing, so the sun glides with sharp edges like vanilla's sun quad, while its color follows the sky texels. Edges on sky texels had to step one texel about every `1.7 s` or fade whole rows of texels in and out, which looked like the square changing shape;
 - grays the color by rain and thunder level with the formula of `ClientLevel.getSkyColor`, without the lightning flash, so the sky darkens like vanilla's;
 - fades the color toward the fog color by the rain level. In snow `FogModification` sets the fog color, so the sky becomes the pack's snow fog. `PlayerWeatherCompatibilityModel` sets the rain level to `0.8` in snow and blizzards, so a fifth of the sky stays, with faint halos, as a fifth of vanilla's sun does;
 - fades to the fog color from the horizon up to a texel direction with `y = 0.08`, about `4.6 degrees`, so terrain fog meets the sky without a seam;
@@ -109,7 +125,7 @@ The shader:
 
 - the sky view table at elevation `0` in the azimuth the camera looks. It has no single scattering by ice, so the color stays smooth near the sun and across halo arcs;
 - blended toward `SkyView.meanHorizonRadiance`, the horizon averaged over `64` azimuths, by `1 - h`, where `h` is the length of the look vector's horizontal part, so looking straight up does not pick a direction at random;
-- tone mapped, encoded, and grayed by rain and thunder as the shader does.
+- blended between the two views around the sun and then tone mapped, encoded, and grayed by rain and thunder as the shader does.
 
 This replaces vanilla's color from sky, biome fog, sunrise, render distance, and weather, which it computes before that call. Vanilla still applies what comes after: darkening for blindness, darkness, the void below `minimum height + 32`, and bosses, then night vision. `ViewportEvent.ComputeFogColor` fires after that, so `FogModification.renderFogColors` still sets its snow fog color whenever its fog density is above zero. Embeddium redirects the biome fog sampling earlier in `setupColor`, and Oculus injects at its tail, so neither conflicts. The fog color is also the clear color behind the world and the color the shader fades to at the horizon.
 
@@ -160,7 +176,8 @@ The renderer reads the config every frame, so changes from the command apply at 
 - the datasets: each side face row and each tumbling table integrates to `1`, the path shares of each row and band add up to between `0.99` and `1` (the tracer drops light still inside a crystal after `40` interactions, at most `0.5%`), and the crystal shares add up to `1`;
 - the halo profile's total and the halo maps' totals at sun elevations `30` and `8 degrees` against the offline preview, and that the brightest bin of the sun dogs sits between `0.25 degrees` inside and `1 degree` outside the minimum deviation from Bravais' effective index;
 - the default sky at sun elevations `30` and `8 degrees` against the offline preview, with `0.5 degree` texels. The directions include the sun itself, `2 degrees` from it (the diffraction peak), and `22 degrees` from it (the 22 degree halo);
-- that the fog color is warmer toward a sun at `4.5 degrees` than away from it, and that looking straight up gives the same color in every direction.
+- that the fog color is warmer toward a sun at `4.5 degrees` than away from it, and that looking straight up gives the same color in every direction;
+- that the sun's radiance is zero below the horizon, has red at least green and green at least blue above it, and has more than ten times the red over blue at `2 degrees` that it has at `30 degrees`.
 
 The preview is a separate Java program in the contributor's workspace, checked against a Monte Carlo reference and its own ray tracer of ice prisms. The port matches it within `1%`, the test's tolerance. The mixin and the shader only run in the client, so the GameTests do not cover them.
 
@@ -183,6 +200,7 @@ On `2026-11-06` empireu also checked the render cost on a laptop RTX 4070, about
 - The fog color is one color per frame, as in vanilla, so at the sides of a wide view the horizon can differ a little from it. It has no light from ice crystals, so toward a low sun it is a little darker than the sky above the horizon fade.
 - Snow fades the sky toward the snow fog. Snow and storms do not change the model, and the same ice crystals and halos are present every clear day.
 - Light on other paths is put at the sun, so what those paths draw is missing: light in through a side face and out through an end face (the circumhorizontal arc of a sun above `58 degrees`), reflections off end faces (the sun pillar), and the faint anthelic arcs of columns opposite the sun. The subsun lies below the horizon and is not drawn.
+- A resource pack's `sun.png` is not used while the calculated sky is drawn, since the shader draws the sun. The pack does not replace it.
 - There is no moonlight in the model, so the night sky is black apart from the vanilla moon and stars, and so is the fog at night. Vanilla's night fog is a very dark blue, `5..8%` of its day fog with the pack's colors.
 - In snow, blindness does not darken the fog, because `FogModification` sets its snow fog color after vanilla's darkening. This does not depend on the calculated sky.
 - `runClient` uses vanilla biomes. The `2026-11-06` run used a datapack that gives them the pack's sky and fog colors, but the pack's own world generation has not been tried.
