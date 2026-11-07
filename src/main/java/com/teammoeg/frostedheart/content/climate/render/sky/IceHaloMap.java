@@ -19,13 +19,17 @@
 
 package com.teammoeg.frostedheart.content.climate.render.sky;
 
+import java.util.Arrays;
+import java.util.List;
+
 /**
  * Phase function per steradian of the oriented ice crystals for one sun elevation, as an RGB table of
  * AZIMUTH_BINS by ELEVATION_BINS bins. Columns are the absolute azimuth from the sun over 0 to pi, since the display
  * is mirror symmetric, and rows are elevation from LOWEST_ELEVATION to the zenith in equal steps.
  * The table is blurred by the sun disc and by part of a sky texel, so one lookup per texel is enough.
  * Light of the oriented crystals that leaves below LOWEST_ELEVATION is dropped.
- * Instances are immutable after construction. The lookup is repeated in calculated_sky.fsh and must stay equal.
+ * An instance keeps its table until it is built again, and a map that anything still reads must not be rebuilt.
+ * The lookup is repeated in calculated_sky.fsh and must stay equal.
  */
 public final class IceHaloMap {
     public static final int AZIMUTH_BINS = 360;
@@ -37,8 +41,10 @@ public final class IceHaloMap {
     private static final int BIN_COUNT = AZIMUTH_BINS * ELEVATION_BINS;
     private static final double TEXEL_BLUR_FRACTION = 0.45;
     private static final double BLUR_SPAN_SIGMAS = 3.0;
+    private static final int MAXIMUM_BLUR_SPAN = Math.max(AZIMUTH_BINS, ELEVATION_BINS - 1);
     private static final int LOOKUP_CELLS = 65536;
     private static final double[] ROW_SOLID_ANGLES = new double[ELEVATION_BINS];
+    private static final double[] ROW_INVERSE_SOLID_ANGLES = new double[ELEVATION_BINS];
     private static final double LOWEST_SINE = Math.sin(LOWEST_ELEVATION);
     private static final double[] ROW_BOUNDARY_SINES = new double[ELEVATION_BINS + 1];
     private static final int[] ROW_LOOKUP = new int[LOOKUP_CELLS];
@@ -50,6 +56,7 @@ public final class IceHaloMap {
             double lower = LOWEST_ELEVATION + row * BIN_STEP;
             double upper = Math.min(Math.PI / 2.0, lower + BIN_STEP);
             ROW_SOLID_ANGLES[row] = 2.0 * BIN_STEP * (Math.sin(upper) - Math.sin(lower));
+            ROW_INVERSE_SOLID_ANGLES[row] = 1.0 / ROW_SOLID_ANGLES[row];
         }
         for (int row = 0; row <= ELEVATION_BINS; row++) {
             ROW_BOUNDARY_SINES[row] = Math.sin(Math.min(Math.PI / 2.0, LOWEST_ELEVATION + row * BIN_STEP));
@@ -74,34 +81,71 @@ public final class IceHaloMap {
         }
     }
 
-    private final double sunElevationRadians;
+    /**
+     * The buffers that building maps needs, kept from build to build so that a build allocates nothing.
+     * One thread at a time may build with a workspace.
+     */
+    static final class Workspace {
+        private final IceCrystalData data;
+        private final IceHaloFormulas formulas;
+        private final double[] sun = new double[3];
+        private final double[][] pathShares = new double[CHANNELS][IceCrystalData.PATH_COUNT];
+        private final double[][] accumulated = new double[CHANNELS][BIN_COUNT];
+        private final double[][] elevationBlurred = new double[CHANNELS][BIN_COUNT];
+        private final double[] extended = new double[3 * AZIMUTH_BINS];
+        private final double[] kernel = new double[2 * MAXIMUM_BLUR_SPAN + 1];
+
+        Workspace(IceCrystalData data) {
+            this.data = data;
+            this.formulas = new IceHaloFormulas(data);
+        }
+    }
+
+    private double sunElevationRadians;
     private final float[] values = new float[BIN_COUNT * CHANNELS];
 
     /**
-     * Builds the table for a sun elevation, with the oriented crystals of the data set sharing the light that is
-     * not diffracted.
+     * An empty map for build to fill.
+     */
+    IceHaloMap() {
+    }
+
+    /**
+     * Builds the table for a sun elevation with a workspace of its own.
      */
     public IceHaloMap(IceCrystalData data, double sunElevationRadians, double blurSigma) {
+        build(new Workspace(data), sunElevationRadians, blurSigma);
+    }
+
+    /**
+     * Fills the table for a sun elevation, with the oriented crystals of the data set sharing the light that is
+     * not diffracted.
+     */
+    void build(Workspace workspace, double sunElevationRadians, double blurSigma) {
         this.sunElevationRadians = sunElevationRadians;
-        double[] sun = {Math.cos(sunElevationRadians), Math.sin(sunElevationRadians), 0.0};
+        IceCrystalData data = workspace.data;
+        double[] sun = workspace.sun;
+        sun[0] = Math.cos(sunElevationRadians);
+        sun[1] = Math.sin(sunElevationRadians);
+        sun[2] = 0.0;
         double sunElevationDegrees = Math.toDegrees(sunElevationRadians);
-        double[][] combined = new double[CHANNELS][BIN_COUNT];
-        double[][] pathShares = new double[CHANNELS][IceCrystalData.PATH_COUNT];
+        double[][] accumulated = workspace.accumulated;
+        for (int channel = 0; channel < CHANNELS; channel++) {
+            Arrays.fill(accumulated[channel], 0.0);
+        }
         double refracted = 1.0 - SkyAtmosphere.ICE_DIFFRACTION_FRACTION;
-        IceHaloFormulas formulas = new IceHaloFormulas(data);
-        for (IceCrystalData.Crystal crystal : data.crystals()) {
+        List<IceCrystalData.Crystal> crystals = data.crystals();
+        for (int index = 0; index < crystals.size(); index++) {
+            IceCrystalData.Crystal crystal = crystals.get(index);
             if (crystal.orientation() == IceCrystalData.Orientation.RANDOM) {
                 continue;
             }
-            data.pathShares(crystal, sunElevationDegrees, pathShares);
-            formulas.addCrystal(combined, crystal, sun, refracted * data.shareOf(crystal), pathShares);
+            data.pathShares(crystal, sunElevationDegrees, workspace.pathShares);
+            workspace.formulas.addCrystal(accumulated, crystal, sun, refracted * data.shareOf(crystal),
+                    workspace.pathShares);
         }
-        double[][] blurred = blurAzimuth(blurElevation(combined, blurSigma), blurSigma);
-        for (int bin = 0; bin < BIN_COUNT; bin++) {
-            for (int channel = 0; channel < CHANNELS; channel++) {
-                values[bin * CHANNELS + channel] = (float) blurred[channel][bin];
-            }
-        }
+        blurElevation(accumulated, workspace.elevationBlurred, workspace.kernel, blurSigma);
+        blurAzimuth(workspace.elevationBlurred, values, workspace.extended, workspace.kernel, blurSigma);
     }
 
     /**
@@ -162,6 +206,10 @@ public final class IceHaloMap {
      */
     static double binSolidAngle(int bin) {
         return ROW_SOLID_ANGLES[bin / AZIMUTH_BINS];
+    }
+
+    static double inverseBinSolidAngle(int bin) {
+        return ROW_INVERSE_SOLID_ANGLES[bin / AZIMUTH_BINS];
     }
 
     public static int rowOfElevation(double elevation) {
@@ -232,11 +280,16 @@ public final class IceHaloMap {
         return period < AZIMUTH_BINS ? period : 2 * AZIMUTH_BINS - period - 1;
     }
 
-    private static double[][] blurElevation(double[][] maps, double blurSigma) {
-        double[][] result = new double[CHANNELS][BIN_COUNT];
+    /**
+     * Blurs each column over elevation from the source into the target, weighting rows by their solid angle.
+     * Rows farther than the whole table never meet, so the span stops at ELEVATION_BINS - 1.
+     */
+    private static void blurElevation(double[][] maps, double[][] result, double[] kernel, double blurSigma) {
+        for (int channel = 0; channel < CHANNELS; channel++) {
+            Arrays.fill(result[channel], 0.0);
+        }
         double sigmaBins = blurSigma / BIN_STEP;
-        int span = (int) Math.ceil(BLUR_SPAN_SIGMAS * sigmaBins);
-        double[] kernel = new double[2 * span + 1];
+        int span = (int) Math.min(ELEVATION_BINS - 1, Math.ceil(BLUR_SPAN_SIGMAS * sigmaBins));
         for (int offset = -span; offset <= span; offset++) {
             kernel[offset + span] = Math.exp(-0.5 * offset * offset / (sigmaBins * sigmaBins));
         }
@@ -260,12 +313,13 @@ public final class IceHaloMap {
                 }
             }
         }
-        return result;
     }
 
-    private static double[][] blurAzimuth(double[][] maps, double blurSigma) {
-        double[][] result = new double[CHANNELS][BIN_COUNT];
-        double[] extended = new double[3 * AZIMUTH_BINS];
+    /**
+     * Blurs each row over azimuth from the source into the interleaved float values, mirrored at azimuth 0 and pi.
+     */
+    private static void blurAzimuth(double[][] maps, float[] values, double[] extended, double[] kernel,
+            double blurSigma) {
         for (int row = 0; row < ELEVATION_BINS; row++) {
             double elevation = LOWEST_ELEVATION + (row + 0.5) * BIN_STEP;
             double sigmaBins = blurSigma / BIN_STEP / Math.max(1.0e-6, Math.cos(elevation));
@@ -277,13 +331,12 @@ public final class IceHaloMap {
                         sum += maps[channel][rowOffset + column];
                     }
                     for (int column = 0; column < AZIMUTH_BINS; column++) {
-                        result[channel][rowOffset + column] = sum / AZIMUTH_BINS;
+                        values[(rowOffset + column) * CHANNELS + channel] = (float) (sum / AZIMUTH_BINS);
                     }
                 }
                 continue;
             }
             int span = Math.min(AZIMUTH_BINS, (int) Math.ceil(BLUR_SPAN_SIGMAS * sigmaBins));
-            double[] kernel = new double[2 * span + 1];
             double kernelSum = 0.0;
             for (int offset = -span; offset <= span; offset++) {
                 kernel[offset + span] = Math.exp(-0.5 * offset * offset / (sigmaBins * sigmaBins));
@@ -291,20 +344,22 @@ public final class IceHaloMap {
             }
             for (int channel = 0; channel < CHANNELS; channel++) {
                 double[] source = maps[channel];
-                for (int position = 0; position < extended.length; position++) {
-                    extended[position] = source[rowOffset + mirroredColumn(position - AZIMUTH_BINS)];
+                for (int column = 0; column < AZIMUTH_BINS; column++) {
+                    extended[AZIMUTH_BINS + column] = source[rowOffset + column];
                 }
-                double[] target = result[channel];
+                for (int offset = 1; offset <= span; offset++) {
+                    extended[AZIMUTH_BINS - offset] = source[rowOffset + offset - 1];
+                    extended[2 * AZIMUTH_BINS + offset - 1] = source[rowOffset + AZIMUTH_BINS - offset];
+                }
                 for (int column = 0; column < AZIMUTH_BINS; column++) {
                     double sum = 0.0;
                     int center = column + AZIMUTH_BINS;
                     for (int offset = -span; offset <= span; offset++) {
                         sum += kernel[offset + span] * extended[center + offset];
                     }
-                    target[rowOffset + column] = sum / kernelSum;
+                    values[(rowOffset + column) * CHANNELS + channel] = (float) (sum / kernelSum);
                 }
             }
         }
-        return result;
     }
 }

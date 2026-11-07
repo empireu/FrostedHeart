@@ -19,15 +19,13 @@
 
 package com.teammoeg.frostedheart.content.climate.render.sky;
 
-import java.util.ArrayList;
-import java.util.List;
-
 /**
  * Halo arcs of oriented ice crystals from formulas, splatted into the bins of IceHaloMap.
  * Light leaving through side faces lies on the cone around the crystal axis through the sun, at the in-plane
  * deviation of the side face table for Bravais' effective index. Light entering an end face is traced exactly in 3D,
  * and light passing from end face to end face is followed through its side face reflections in the plane.
- * Each axis is weighted by its projected side area. Single threaded and deterministic.
+ * Each axis is weighted by its projected side area. Single threaded and deterministic. An instance reuses its scratch
+ * buffers, so one instance must not be shared between threads.
  */
 final class IceHaloFormulas {
     private static final int CHANNELS = SkyAtmosphere.CHANNEL_COUNT;
@@ -41,16 +39,64 @@ final class IceHaloFormulas {
     private static final int COLUMN_MIRROR_ROTATIONS = 2;
     private static final int MAXIMUM_PLATE_AXES = 196;
     private static final double PLATE_TILT_STEP_RADIANS = Math.toRadians(0.5);
+    private static final int COLUMN_AXES = (int) Math.round(Math.PI / COLUMN_AZIMUTH_STEP_RADIANS);
+    private static final int MAXIMUM_AXES = Math.max(MAXIMUM_PLATE_AXES, COLUMN_AXES);
+    private static final int PRISM_OUTPUT_CAPACITY = Math.max(Math.max(
+            Math.max(PLATE_MIRROR_ROTATIONS, COLUMN_MIRROR_ROTATIONS) * MIRROR_ENTRY_SAMPLES, PARRY_MIRROR_ENTRY_SAMPLES),
+            PARRY_ENTRY_SAMPLES * (1 + IcePrism.MAXIMUM_INTERACTIONS));
     private static final double[] REFRACTIVE_INDEX = new double[CHANNELS];
+    private static final double[] FACE_ANGLE_COSINES = new double[FACE_ANGLE_STEPS];
+    private static final double[] FACE_ANGLE_SINES = new double[FACE_ANGLE_STEPS];
 
     static {
         for (int channel = 0; channel < CHANNELS; channel++) {
             double micrometers = SkyParticleOptics.CHANNEL_CENTER_NANOMETERS[channel] / 1000.0;
             REFRACTIVE_INDEX[channel] = 1.3005 + 0.0030 / (micrometers * micrometers);
         }
+        for (int face = 0; face < FACE_ANGLE_STEPS; face++) {
+            double angle = (face + 0.5) * 2.0 * Math.PI / FACE_ANGLE_STEPS;
+            FACE_ANGLE_COSINES[face] = Math.cos(angle);
+            FACE_ANGLE_SINES[face] = Math.sin(angle);
+        }
     }
 
-    private record Axis(double x, double y, double z, double weight, double rotation) {
+    /**
+     * One sampled crystal axis. The instances are reused for every crystal kind and map.
+     */
+    private static final class Axis {
+        private double x;
+        private double y;
+        private double z;
+        private double weight;
+        private double rotation;
+
+        double x() {
+            return x;
+        }
+
+        double y() {
+            return y;
+        }
+
+        double z() {
+            return z;
+        }
+
+        double weight() {
+            return weight;
+        }
+
+        double rotation() {
+            return rotation;
+        }
+
+        void set(double x, double y, double z, double weight, double rotation) {
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.weight = weight;
+            this.rotation = rotation;
+        }
     }
 
     private final IceCrystalData data;
@@ -59,7 +105,17 @@ final class IceHaloFormulas {
     private final double[] deviationSines;
     private final double[][] sideFaceDensities;
     private final double[] sideWeights = new double[CHANNELS];
+    private final double[] pendingSideWeights = new double[CHANNELS];
+    private final double[] faceViewX = new double[FACE_ANGLE_STEPS];
+    private final double[] faceViewY = new double[FACE_ANGLE_STEPS];
+    private final double[] faceViewZ = new double[FACE_ANGLE_STEPS];
+    private final double[] faceWeights = new double[FACE_ANGLE_STEPS];
+    private final double[] coneBase = new double[4];
+    private final double[] perpendicular = new double[3];
+    private final Axis[] axes = new Axis[MAXIMUM_AXES];
+    private final IcePrism prism = new IcePrism(PRISM_OUTPUT_CAPACITY);
     private final IcePrism.SplitMixRandom random = new IcePrism.SplitMixRandom();
+    private final IcePrism.SplitMixRandom axisRandom = new IcePrism.SplitMixRandom();
 
     IceHaloFormulas(IceCrystalData data) {
         this.data = data;
@@ -74,6 +130,9 @@ final class IceHaloFormulas {
             deviationSines[step] = Math.sin(deviation);
         }
         this.sideFaceDensities = new double[CHANNELS][columns];
+        for (int axis = 0; axis < MAXIMUM_AXES; axis++) {
+            axes[axis] = new Axis();
+        }
     }
 
     static double refractiveIndex(int channel) {
@@ -86,12 +145,12 @@ final class IceHaloFormulas {
      */
     void addCrystal(double[][] maps, IceCrystalData.Crystal crystal, double[] sun, double weight,
             double[][] pathShares) {
-        List<Axis> axes = axisSamples(crystal, sun);
+        int axisCount = sampleAxes(crystal, sun);
         boolean parry = crystal.orientation() == IceCrystalData.Orientation.PARRY;
         int mirrorRotations = crystal.orientation() == IceCrystalData.Orientation.PLATE
                 ? PLATE_MIRROR_ROTATIONS : COLUMN_MIRROR_ROTATIONS;
-        for (int axisIndex = 0; axisIndex < axes.size(); axisIndex++) {
-            Axis axis = axes.get(axisIndex);
+        for (int axisIndex = 0; axisIndex < axisCount; axisIndex++) {
+            Axis axis = axes[axisIndex];
             double shared = weight * axis.weight();
             if (!parry) {
                 for (int mirrored = 0; mirrored <= 1; mirrored++) {
@@ -131,35 +190,38 @@ final class IceHaloFormulas {
         return Math.sqrt(-2.0 * Math.log(1.0 - random.next())) * Math.cos(2.0 * Math.PI * random.next());
     }
 
-    private static List<Axis> axisSamples(IceCrystalData.Crystal crystal, double[] sun) {
-        List<Axis> axes = new ArrayList<>();
+    /**
+     * Fills the axes of a crystal kind into the reused axis array and returns how many there are.
+     */
+    private int sampleAxes(IceCrystalData.Crystal crystal, double[] sun) {
         double tilt = Math.toRadians(crystal.tiltDegrees());
-        IcePrism.SplitMixRandom random = new IcePrism.SplitMixRandom();
+        IcePrism.SplitMixRandom random = axisRandom;
         random.seed(47, crystal.name().hashCode(), 0, 0);
         if (crystal.orientation() == IceCrystalData.Orientation.PLATE) {
             if (tilt <= 0.0) {
-                axes.add(new Axis(0.0, 1.0, 0.0, 1.0, 0.0));
-                return axes;
+                axes[0].set(0.0, 1.0, 0.0, 1.0, 0.0);
+                return 1;
             }
             int side = (int) Math.min(Math.sqrt(MAXIMUM_PLATE_AXES),
                     Math.max(7.0, Math.ceil(6.0 * tilt / PLATE_TILT_STEP_RADIANS)));
+            int count = 0;
             for (int row = 0; row < side; row++) {
                 for (int column = 0; column < side; column++) {
                     double first = (row + random.next()) / side;
                     double second = (column + random.next()) / side;
                     double angle = tilt * Math.sqrt(-2.0 * Math.log(1.0 - first));
                     double direction = 2.0 * Math.PI * second;
-                    axes.add(new Axis(Math.sin(angle) * Math.cos(direction), Math.cos(angle),
-                            Math.sin(angle) * Math.sin(direction), 1.0 / (side * side), 0.0));
+                    axes[count].set(Math.sin(angle) * Math.cos(direction), Math.cos(angle),
+                            Math.sin(angle) * Math.sin(direction), 1.0 / (side * side), 0.0);
+                    count++;
                 }
             }
-            return axes;
+            return count;
         }
         boolean parry = crystal.orientation() == IceCrystalData.Orientation.PARRY;
-        int azimuthSteps = (int) Math.round(Math.PI / COLUMN_AZIMUTH_STEP_RADIANS);
         double rotationSpread = Math.toRadians(crystal.rotationDegrees());
         double total = 0.0;
-        for (int step = 0; step < azimuthSteps; step++) {
+        for (int step = 0; step < COLUMN_AXES; step++) {
             double azimuth = (step + random.next()) * COLUMN_AZIMUTH_STEP_RADIANS;
             double elevation = tilt > 0.0 ? tilt * gaussian(random) : 0.0;
             double x = Math.cos(elevation) * Math.cos(azimuth);
@@ -168,34 +230,41 @@ final class IceHaloFormulas {
             double along = x * sun[0] + y * sun[1] + z * sun[2];
             double projected = Math.sqrt(Math.max(0.0, 1.0 - along * along));
             double rotation = rotationSpread > 0.0 && parry ? rotationSpread * gaussian(random) : 0.0;
-            axes.add(new Axis(x, y, z, projected, rotation));
+            axes[step].set(x, y, z, projected, rotation);
             total += projected;
         }
-        List<Axis> normalized = new ArrayList<>(axes.size());
-        for (Axis axis : axes) {
-            normalized.add(new Axis(axis.x(), axis.y(), axis.z(), axis.weight() / total, axis.rotation()));
+        for (int step = 0; step < COLUMN_AXES; step++) {
+            Axis axis = axes[step];
+            axis.set(axis.x(), axis.y(), axis.z(), axis.weight() / total, axis.rotation());
         }
-        return normalized;
+        return COLUMN_AXES;
     }
 
     private static void splat(double[] map, double x, double y, double z, double weight) {
         int bin = IceHaloMap.binOf(x, y, z);
         if (bin >= 0) {
-            map[bin] += weight / IceHaloMap.binSolidAngle(bin);
+            map[bin] += weight * IceHaloMap.inverseBinSolidAngle(bin);
         }
     }
 
     /**
      * The cone base for side face light, the sun itself or its mirror image in the end faces, followed by the
-     * component along the axis.
+     * component along the axis. Returns the reused coneBase array.
      */
-    private static double[] coneBase(double[] sun, Axis axis, boolean mirrored) {
+    private double[] coneBase(double[] sun, Axis axis, boolean mirrored) {
         double along = axis.x() * sun[0] + axis.y() * sun[1] + axis.z() * sun[2];
         if (!mirrored) {
-            return new double[] {sun[0], sun[1], sun[2], along};
+            coneBase[0] = sun[0];
+            coneBase[1] = sun[1];
+            coneBase[2] = sun[2];
+            coneBase[3] = along;
+            return coneBase;
         }
-        return new double[] {sun[0] - 2.0 * along * axis.x(), sun[1] - 2.0 * along * axis.y(),
-                sun[2] - 2.0 * along * axis.z(), -along};
+        coneBase[0] = sun[0] - 2.0 * along * axis.x();
+        coneBase[1] = sun[1] - 2.0 * along * axis.y();
+        coneBase[2] = sun[2] - 2.0 * along * axis.z();
+        coneBase[3] = -along;
+        return coneBase;
     }
 
     private static void splatOnCone(double[] map, double[] base, Axis axis, double crossX, double crossY,
@@ -221,24 +290,45 @@ final class IceHaloFormulas {
         double crossX = axis.y() * sun[2] - axis.z() * sun[1];
         double crossY = axis.z() * sun[0] - axis.x() * sun[2];
         double crossZ = axis.x() * sun[1] - axis.y() * sun[0];
-        for (int step = 0; step < deviationCosines.length; step++) {
-            double cosine = deviationCosines[step];
-            double parallel = base[3] * (1.0 - cosine);
-            double centerX = base[0] * cosine + axis.x() * parallel;
-            double centerY = base[1] * cosine + axis.y() * parallel;
-            double centerZ = base[2] * cosine + axis.z() * parallel;
-            for (int sign = -1; sign <= 1; sign += 2) {
+        double scale = 0.5 * deviationStep;
+        for (int sign = -1; sign <= 1; sign += 2) {
+            int pendingBin = -1;
+            for (int step = 0; step < deviationCosines.length; step++) {
+                double cosine = deviationCosines[step];
+                double parallel = base[3] * (1.0 - cosine);
+                double centerX = base[0] * cosine + axis.x() * parallel;
+                double centerY = base[1] * cosine + axis.y() * parallel;
+                double centerZ = base[2] * cosine + axis.z() * parallel;
                 double sine = sign * deviationSines[step];
                 int bin = IceHaloMap.binOf(centerX + crossX * sine, centerY + crossY * sine, centerZ + crossZ * sine);
+                if (bin != pendingBin) {
+                    addPendingSideWeights(maps, pendingBin, scale);
+                    pendingBin = bin;
+                }
                 if (bin < 0) {
                     continue;
                 }
-                double scale = 0.5 * deviationStep / IceHaloMap.binSolidAngle(bin);
+                int column = step / DEVIATION_STEPS_PER_TABLE_COLUMN;
                 for (int channel = 0; channel < CHANNELS; channel++) {
-                    maps[channel][bin] += scale * sideWeights[channel]
-                            * sideFaceDensities[channel][step / DEVIATION_STEPS_PER_TABLE_COLUMN];
+                    pendingSideWeights[channel] += sideWeights[channel] * sideFaceDensities[channel][column];
                 }
             }
+            addPendingSideWeights(maps, pendingBin, scale);
+        }
+    }
+
+    /**
+     * Adds the side face light gathered for one bin and clears it. Consecutive points on a cone mostly share a bin.
+     */
+    private void addPendingSideWeights(double[][] maps, int bin, double scale) {
+        if (bin >= 0) {
+            double factor = scale * IceHaloMap.inverseBinSolidAngle(bin);
+            for (int channel = 0; channel < CHANNELS; channel++) {
+                maps[channel][bin] += factor * pendingSideWeights[channel];
+            }
+        }
+        for (int channel = 0; channel < CHANNELS; channel++) {
+            pendingSideWeights[channel] = 0.0;
         }
     }
 
@@ -266,9 +356,12 @@ final class IceHaloFormulas {
         double crossX = axis.y() * sun[2] - axis.z() * sun[1];
         double crossY = axis.z() * sun[0] - axis.x() * sun[2];
         double crossZ = axis.x() * sun[1] - axis.y() * sun[0];
-        IcePrism.trace(effectiveIndex, axis.rotation() - sunAngle, PARRY_ENTRY_SAMPLES, random,
-                (deviation, pathWeight) -> splatOnCone(map, base, axis, crossX, crossY, crossZ, Math.cos(deviation),
-                        Math.sin(deviation), weight * pathWeight));
+        prism.clearOutputs();
+        prism.trace(effectiveIndex, axis.rotation() - sunAngle, PARRY_ENTRY_SAMPLES, random);
+        for (int output = 0; output < prism.outputCount(); output++) {
+            splatOnCone(map, base, axis, crossX, crossY, crossZ, prism.outputCosine(output), prism.outputSine(output),
+                    weight * prism.outputWeight(output));
+        }
     }
 
     private void addEndToEnd(double[] map, double[] sun, Axis axis, double index, double weight, double halfHeight,
@@ -286,45 +379,47 @@ final class IceHaloFormulas {
         double crossX = axis.y() * sun[2] - axis.z() * sun[1];
         double crossY = axis.z() * sun[0] - axis.x() * sun[2];
         double crossZ = axis.x() * sun[1] - axis.y() * sun[0];
-        IcePrism.ReflectanceFunction reflectance = inPlaneCosine -> {
-            double cosine = inPlaneCosine * horizontalInside;
-            double sineSquared = index * index * (1.0 - cosine * cosine);
-            if (sineSquared >= 1.0) {
-                return 1.0;
-            }
-            return IcePrism.fresnelReflectance(index, 1.0, cosine, Math.sqrt(1.0 - sineSquared));
-        };
-        List<double[]> outputs = new ArrayList<>();
-        double[] total = new double[1];
+        prism.clearOutputs();
         for (int rotationSample = 0; rotationSample < rotations; rotationSample++) {
             double rotation = parry ? axis.rotation() - sunAngle : random.next() * Math.PI / 3.0;
             int entrySamples = parry ? PARRY_MIRROR_ENTRY_SAMPLES : MIRROR_ENTRY_SAMPLES;
-            IcePrism.traceMirrors(rotation, travel, entrySamples, random, reflectance, (deviation, pathWeight) -> {
-                outputs.add(new double[] {deviation, pathWeight});
-                total[0] += pathWeight;
-            });
+            prism.traceMirrors(rotation, travel, entrySamples, random, index, horizontalInside);
         }
-        if (total[0] <= 0.0) {
+        double total = 0.0;
+        for (int output = 0; output < prism.outputCount(); output++) {
+            total += prism.outputWeight(output);
+        }
+        if (total <= 0.0) {
             return;
         }
-        for (double[] output : outputs) {
-            splatOnCone(map, base, axis, crossX, crossY, crossZ, Math.cos(output[0]), Math.sin(output[0]),
-                    weight * output[1] / total[0]);
+        for (int output = 0; output < prism.outputCount(); output++) {
+            splatOnCone(map, base, axis, crossX, crossY, crossZ, prism.outputCosine(output), prism.outputSine(output),
+                    weight * prism.outputWeight(output) / total);
         }
     }
 
-    private static double[] perpendicularUp(Axis axis) {
+    /**
+     * The unit direction perpendicular to the axis that leans most toward the zenith. Returns the reused
+     * perpendicular array.
+     */
+    private double[] perpendicularUp(Axis axis) {
         double x = -axis.y() * axis.x();
         double y = 1.0 - axis.y() * axis.y();
         double z = -axis.y() * axis.z();
         double length = Math.sqrt(x * x + y * y + z * z);
         if (length < 1.0e-9) {
-            return new double[] {1.0, 0.0, 0.0};
+            perpendicular[0] = 1.0;
+            perpendicular[1] = 0.0;
+            perpendicular[2] = 0.0;
+            return perpendicular;
         }
-        return new double[] {x / length, y / length, z / length};
+        perpendicular[0] = x / length;
+        perpendicular[1] = y / length;
+        perpendicular[2] = z / length;
+        return perpendicular;
     }
 
-    private static void addEndToSide(double[] map, double[] sun, Axis axis, double index, double weight,
+    private void addEndToSide(double[] map, double[] sun, Axis axis, double index, double weight,
             boolean parry) {
         double along = axis.x() * sun[0] + axis.y() * sun[1] + axis.z() * sun[2];
         if (Math.abs(along) < 1.0e-6 || weight <= 0.0) {
@@ -347,16 +442,22 @@ final class IceHaloFormulas {
         double secondY = axis.z() * first[0] - axis.x() * first[2];
         double secondZ = axis.x() * first[1] - axis.y() * first[0];
         int faceCount = parry ? 6 : FACE_ANGLE_STEPS;
-        double[] viewX = new double[faceCount];
-        double[] viewY = new double[faceCount];
-        double[] viewZ = new double[faceCount];
-        double[] raw = new double[faceCount];
         double total = 0.0;
         for (int face = 0; face < faceCount; face++) {
-            double angle = parry ? axis.rotation() + face * Math.PI / 3.0 : (face + 0.5) * 2.0 * Math.PI / faceCount;
-            double faceX = Math.cos(angle) * first[0] + Math.sin(angle) * secondX;
-            double faceY = Math.cos(angle) * first[1] + Math.sin(angle) * secondY;
-            double faceZ = Math.cos(angle) * first[2] + Math.sin(angle) * secondZ;
+            faceWeights[face] = 0.0;
+            double angleCosine;
+            double angleSine;
+            if (parry) {
+                double angle = axis.rotation() + face * Math.PI / 3.0;
+                angleCosine = Math.cos(angle);
+                angleSine = Math.sin(angle);
+            } else {
+                angleCosine = FACE_ANGLE_COSINES[face];
+                angleSine = FACE_ANGLE_SINES[face];
+            }
+            double faceX = angleCosine * first[0] + angleSine * secondX;
+            double faceY = angleCosine * first[1] + angleSine * secondY;
+            double faceZ = angleCosine * first[2] + angleSine * secondZ;
             double cosine = insideX * faceX + insideY * faceY + insideZ * faceZ;
             if (cosine <= 0.0) {
                 continue;
@@ -368,18 +469,18 @@ final class IceHaloFormulas {
             double cosineOut = Math.sqrt(1.0 - sineSquared);
             double transmitted = 1.0 - IcePrism.fresnelReflectance(index, 1.0, cosine, cosineOut);
             double exitScale = cosineOut - index * cosine;
-            viewX[face] = -(index * insideX + exitScale * faceX);
-            viewY[face] = -(index * insideY + exitScale * faceY);
-            viewZ[face] = -(index * insideZ + exitScale * faceZ);
-            raw[face] = cosine * transmitted;
-            total += raw[face];
+            faceViewX[face] = -(index * insideX + exitScale * faceX);
+            faceViewY[face] = -(index * insideY + exitScale * faceY);
+            faceViewZ[face] = -(index * insideZ + exitScale * faceZ);
+            faceWeights[face] = cosine * transmitted;
+            total += faceWeights[face];
         }
         if (total <= 0.0) {
             return;
         }
         for (int face = 0; face < faceCount; face++) {
-            if (raw[face] > 0.0) {
-                splat(map, viewX[face], viewY[face], viewZ[face], weight * raw[face] / total);
+            if (faceWeights[face] > 0.0) {
+                splat(map, faceViewX[face], faceViewY[face], faceViewZ[face], weight * faceWeights[face] / total);
             }
         }
     }

@@ -62,6 +62,8 @@ import java.util.concurrent.CompletionException;
  * Tables are built on Minecraft's background executor and uploaded on the render thread.
  * Halo maps exist for sun elevations on a grid of HALO_MAP_STEP_DEGREES, and the two around the sun are blended
  * by the exact sun elevation, so only the missing end is built when the sun leaves them.
+ * Builds reuse one workspace and refill the halo map and view that the previous state dropped, so following the sun
+ * allocates no tables.
  */
 @OnlyIn(Dist.CLIENT)
 public final class CalculatedSkyRenderer {
@@ -82,6 +84,18 @@ public final class CalculatedSkyRenderer {
     private static SkyState state;
     @Nullable
     private static CompletableFuture<BuildResult> pendingBuild;
+    /**
+     * Created and used only inside build, and only one build runs at a time.
+     */
+    @Nullable
+    private static IceHaloMap.Workspace haloWorkspace;
+    /**
+     * A halo map and a view that no state uses any more, handed to the next build to fill. Render thread only.
+     */
+    @Nullable
+    private static IceHaloMap spareHalo;
+    @Nullable
+    private static SkyView spareView;
     @Nullable
     private static FloatBuffer uploadBuffer;
     @Nullable
@@ -209,6 +223,7 @@ public final class CalculatedSkyRenderer {
                 return;
             }
             upload(state, result.state());
+            keepSpares(state, result.state());
             state = result.state();
             if (!Double.isNaN(result.tablesMilliseconds())) {
                 lastTablesMilliseconds = result.tablesMilliseconds();
@@ -236,16 +251,48 @@ public final class CalculatedSkyRenderer {
             return;
         }
         SkyState previous = settingsChanged ? null : current;
-        pendingBuild = CompletableFuture.supplyAsync(() -> build(previous, settings, sunElevation, haloIndex, sunMoved),
-                Util.backgroundExecutor());
+        boolean haloNeeded = previous == null || previous.haloAt(haloIndex) == null
+                || previous.haloAt(haloIndex + 1) == null;
+        boolean viewNeeded = previous == null || sunMoved;
+        IceHaloMap recycledHalo = haloNeeded ? spareHalo : null;
+        SkyView recycledView = viewNeeded ? spareView : null;
+        if (haloNeeded) {
+            spareHalo = null;
+        }
+        if (viewNeeded) {
+            spareView = null;
+        }
+        pendingBuild = CompletableFuture.supplyAsync(() -> build(previous, settings, sunElevation, haloIndex,
+                viewNeeded, recycledHalo, recycledView), Util.backgroundExecutor());
     }
 
     /**
-     * Builds the next state, reusing what the previous state already has. Without a previous state everything is
-     * built for the given settings.
+     * Keeps a halo map and a view of the previous state that the next state no longer uses, so the following build
+     * fills them instead of allocating. Runs after the build finished, when nothing reads the previous state any more.
+     */
+    private static void keepSpares(@Nullable SkyState previous, SkyState next) {
+        if (previous == null) {
+            return;
+        }
+        keepSpareHalo(previous.lowHalo(), next);
+        keepSpareHalo(previous.highHalo(), next);
+        if (spareView == null && previous.view() != next.view()) {
+            spareView = previous.view();
+        }
+    }
+
+    private static void keepSpareHalo(IceHaloMap halo, SkyState next) {
+        if (spareHalo == null && halo != next.lowHalo() && halo != next.highHalo()) {
+            spareHalo = halo;
+        }
+    }
+
+    /**
+     * Builds the next state, reusing what the previous state already has and filling the recycled map and view when
+     * given. Without a previous state everything is built for the given settings.
      */
     private static BuildResult build(@Nullable SkyState previous, SkySettings settings, double sunElevation,
-            int haloIndex, boolean viewNeeded) {
+            int haloIndex, boolean viewNeeded, @Nullable IceHaloMap recycledHalo, @Nullable SkyView recycledView) {
         long start = System.nanoTime();
         SkyTables tables = previous != null ? previous.tables() : new SkyTables(settings);
         double tablesMilliseconds = previous != null ? Double.NaN : (System.nanoTime() - start) / 1.0e6;
@@ -256,17 +303,24 @@ public final class CalculatedSkyRenderer {
         IceHaloProfile haloProfile = previous != null ? previous.haloProfile() : new IceHaloProfile(data, blurSigma);
         double haloProfileMilliseconds = previous != null ? Double.NaN : (System.nanoTime() - start) / 1.0e6;
 
+        if (haloWorkspace == null) {
+            haloWorkspace = new IceHaloMap.Workspace(data);
+        }
+        IceHaloMap unusedHalo = recycledHalo;
         IceHaloMap lowHalo = previous != null ? previous.haloAt(haloIndex) : null;
         IceHaloMap highHalo = previous != null ? previous.haloAt(haloIndex + 1) : null;
         double haloMapMilliseconds = Double.NaN;
         if (lowHalo == null) {
             start = System.nanoTime();
-            lowHalo = new IceHaloMap(data, haloSunElevation(haloIndex), blurSigma);
+            lowHalo = unusedHalo != null ? unusedHalo : new IceHaloMap();
+            unusedHalo = null;
+            lowHalo.build(haloWorkspace, haloSunElevation(haloIndex), blurSigma);
             haloMapMilliseconds = (System.nanoTime() - start) / 1.0e6;
         }
         if (highHalo == null) {
             start = System.nanoTime();
-            highHalo = new IceHaloMap(data, haloSunElevation(haloIndex + 1), blurSigma);
+            highHalo = unusedHalo != null ? unusedHalo : new IceHaloMap();
+            highHalo.build(haloWorkspace, haloSunElevation(haloIndex + 1), blurSigma);
             haloMapMilliseconds = (System.nanoTime() - start) / 1.0e6;
         }
 
@@ -278,7 +332,8 @@ public final class CalculatedSkyRenderer {
             start = System.nanoTime();
             double lowDistance = Math.abs(sunElevation - lowHalo.sunElevationRadians());
             double highDistance = Math.abs(sunElevation - highHalo.sunElevationRadians());
-            view = tables.computeView(sunElevation, haloProfile, lowDistance <= highDistance ? lowHalo : highHalo);
+            view = recycledView != null ? recycledView : new SkyView();
+            tables.computeView(sunElevation, haloProfile, lowDistance <= highDistance ? lowHalo : highHalo, view);
             viewMilliseconds = (System.nanoTime() - start) / 1.0e6;
         }
         return new BuildResult(new SkyState(tables, haloProfile, haloIndex, lowHalo, highHalo, view),

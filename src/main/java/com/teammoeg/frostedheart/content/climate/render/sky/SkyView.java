@@ -26,11 +26,42 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
  * The ice table holds single scattering by ice per unit phase function, which the ice phase of IceHaloProfile and
  * IceHaloMap scales per sky texel.
  * The mean horizon radiance is the sky table at elevation zero, averaged over all azimuths.
+ * SkyTables.computeView fills an instance, and a view that anything still reads must not be filled again.
  * The texel lookup is repeated in calculated_sky.fsh and must stay equal.
  */
-public record SkyView(double sunElevationRadians, float[] sky, float[] ice, double[] groundRadiance,
-        double[] meanHorizonRadiance) {
+public final class SkyView {
     private static final int CHANNELS = SkyAtmosphere.CHANNEL_COUNT;
+    private static final int TABLE_LENGTH = SkyTables.VIEW_WIDTH * SkyTables.VIEW_HEIGHT * CHANNELS;
+
+    private double sunElevationRadians;
+    private final float[] sky = new float[TABLE_LENGTH];
+    private final float[] ice = new float[TABLE_LENGTH];
+    private final double[] groundRadiance = new double[CHANNELS];
+    private final double[] meanHorizonRadiance = new double[CHANNELS];
+
+    public double sunElevationRadians() {
+        return sunElevationRadians;
+    }
+
+    void setSunElevationRadians(double sunElevationRadians) {
+        this.sunElevationRadians = sunElevationRadians;
+    }
+
+    public float[] sky() {
+        return sky;
+    }
+
+    public float[] ice() {
+        return ice;
+    }
+
+    public double[] groundRadiance() {
+        return groundRadiance;
+    }
+
+    public double[] meanHorizonRadiance() {
+        return meanHorizonRadiance;
+    }
 
     /**
      * Writes the displayed sky color at the horizon into the result, tone mapped and grayed as calculated_sky.fsh does.
