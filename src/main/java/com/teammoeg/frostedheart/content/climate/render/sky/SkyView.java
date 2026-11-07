@@ -147,4 +147,33 @@ public final class SkyView {
                 + table[(columnNext + (row + 1) * width) * CHANNELS + channel] * columnFraction;
         return top * (1.0 - rowFraction) + bottom * rowFraction;
     }
+
+    /**
+     * Writes every channel of the table toward a direction into the result, with the same values as sample.
+     */
+    static void sampleChannels(float[] table, double azimuth, double elevation, double[] result) {
+        int width = SkyTables.VIEW_WIDTH;
+        int height = SkyTables.VIEW_HEIGHT;
+        double latitude = elevationToLatitude(elevation);
+        double position = Math.signum(latitude) * Math.sqrt(Math.abs(latitude) * 2.0 / Math.PI);
+        double rowPosition = (0.5 + 0.5 * position) * height - 0.5;
+        rowPosition = Math.max(0.0, Math.min(height - 1.0, rowPosition));
+        double columnPosition = (azimuth + Math.PI) / (2.0 * Math.PI) * width - 0.5;
+        int columnFloor = (int) Math.floor(columnPosition);
+        double columnFraction = columnPosition - columnFloor;
+        int column = Math.floorMod(columnFloor, width);
+        int columnNext = Math.floorMod(columnFloor + 1, width);
+        int row = Math.min((int) rowPosition, height - 2);
+        double rowFraction = rowPosition - row;
+        int topLeft = (column + row * width) * CHANNELS;
+        int topRight = (columnNext + row * width) * CHANNELS;
+        int bottomLeft = (column + (row + 1) * width) * CHANNELS;
+        int bottomRight = (columnNext + (row + 1) * width) * CHANNELS;
+        for (int channel = 0; channel < CHANNELS; channel++) {
+            double top = table[topLeft + channel] * (1.0 - columnFraction) + table[topRight + channel] * columnFraction;
+            double bottom = table[bottomLeft + channel] * (1.0 - columnFraction)
+                    + table[bottomRight + channel] * columnFraction;
+            result[channel] = top * (1.0 - rowFraction) + bottom * rowFraction;
+        }
+    }
 }

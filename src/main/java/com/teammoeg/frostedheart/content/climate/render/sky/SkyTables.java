@@ -44,6 +44,11 @@ public final class SkyTables {
     private static final double MAXIMUM_TRANSFER = 0.9999;
     private static final double[] SPHERE_DIRECTION_X = new double[DIRECTION_ROOT * DIRECTION_ROOT];
     private static final double[] SPHERE_DIRECTION_Y = new double[DIRECTION_ROOT * DIRECTION_ROOT];
+    private static final int COMPUTED_COLUMNS = VIEW_WIDTH / 2;
+    private static final double[] ROW_SINES = new double[VIEW_HEIGHT];
+    private static final double[] ROW_COSINES = new double[VIEW_HEIGHT];
+    private static final double[] COLUMN_SINES = new double[COMPUTED_COLUMNS];
+    private static final double[] COLUMN_COSINES = new double[COMPUTED_COLUMNS];
 
     static {
         for (int azimuthIndex = 0; azimuthIndex < DIRECTION_ROOT; azimuthIndex++) {
@@ -55,6 +60,16 @@ public final class SkyTables {
                 SPHERE_DIRECTION_Y[azimuthIndex * DIRECTION_ROOT + cosineIndex] = cosine;
             }
         }
+        for (int row = 0; row < VIEW_HEIGHT; row++) {
+            double elevation = rowElevation(row);
+            ROW_SINES[row] = Math.sin(elevation);
+            ROW_COSINES[row] = Math.cos(elevation);
+        }
+        for (int index = 0; index < COMPUTED_COLUMNS; index++) {
+            double azimuth = -Math.PI + 2.0 * Math.PI * (VIEW_WIDTH / 2 + index + 0.5) / VIEW_WIDTH;
+            COLUMN_SINES[index] = Math.sin(azimuth);
+            COLUMN_COSINES[index] = Math.cos(azimuth);
+        }
     }
 
     private final SkySettings settings;
@@ -64,6 +79,12 @@ public final class SkyTables {
             new double[MULTIPLE_SCATTERING_SIZE * MULTIPLE_SCATTERING_SIZE * CHANNELS];
     private final double[] glowResponse = new double[(GLOW_VIEW_SAMPLES + 1) * CHANNELS];
     private final double[] sphericalAlbedo = new double[CHANNELS];
+    private final double[] rayTravelled = new double[VIEW_HEIGHT * VIEW_STEPS];
+    private final double[] rayRadius = new double[VIEW_HEIGHT * VIEW_STEPS];
+    private final double[] rayHeight = new double[VIEW_HEIGHT * VIEW_STEPS];
+    private final int[] raySlot = new int[VIEW_HEIGHT * VIEW_STEPS];
+    private final double[] rayTransmittance = new double[VIEW_HEIGHT * VIEW_STEPS * CHANNELS];
+    private final double[] rayIntegral = new double[VIEW_HEIGHT * VIEW_STEPS * CHANNELS];
     private final double[] scratchSun = new double[3];
     private final double[] scratchRadiance = new double[CHANNELS];
     private final double[] scratchIceRadiance = new double[CHANNELS];
@@ -72,6 +93,10 @@ public final class SkyTables {
     private final double[] scratchViewTransmittance = new double[CHANNELS];
     private final double[] scratchStepSunTransmittance = new double[CHANNELS];
     private final double[] scratchMultiple = new double[CHANNELS];
+    private final double[] scratchProfileIrradiance = new double[CHANNELS];
+    private final double[] scratchMapIrradiance = new double[CHANNELS];
+    private final double[] scratchRingSums = new double[CHANNELS];
+    private final double[] scratchSamples = new double[CHANNELS];
 
     public SkyTables(SkySettings settings) {
         this.settings = settings;
@@ -79,6 +104,43 @@ public final class SkyTables {
         this.transmittance = new SkyTransmittance(atmosphere);
         buildMultipleScattering();
         buildGlowResponse();
+        buildViewRays();
+    }
+
+    /**
+     * Fills the steps of the view rays of every row, which do not depend on the azimuth or the sun. The transmittance
+     * of a step is the transmittance from the camera to where the step begins.
+     */
+    private void buildViewRays() {
+        double radius = SkyAtmosphere.CAMERA_RADIUS;
+        double[] viewTransmittance = new double[CHANNELS];
+        for (int row = 0; row < VIEW_HEIGHT; row++) {
+            double cosine = ROW_SINES[row];
+            double groundDistance = SkyAtmosphere.distanceToGroundOrInfinity(radius, cosine);
+            double length = groundDistance < Double.POSITIVE_INFINITY
+                    ? groundDistance
+                    : SkyAtmosphere.distanceToTop(radius, cosine);
+            double stepLength = length / VIEW_STEPS;
+            Arrays.fill(viewTransmittance, 1.0);
+            for (int step = 0; step < VIEW_STEPS; step++) {
+                int sample = row * VIEW_STEPS + step;
+                double travelled = (step + 0.5) * stepLength;
+                double sampleRadius = SkyAtmosphere.radiusAlongRay(radius, cosine, travelled);
+                int slot = atmosphere.altitudeSlot(sampleRadius);
+                rayTravelled[sample] = travelled;
+                rayRadius[sample] = sampleRadius;
+                rayHeight[sample] = radius + cosine * travelled;
+                raySlot[sample] = slot;
+                for (int channel = 0; channel < CHANNELS; channel++) {
+                    double extinction = atmosphere.totalExtinction[slot + channel];
+                    double stepTransmittance = Math.exp(-extinction * stepLength);
+                    rayTransmittance[sample * CHANNELS + channel] = viewTransmittance[channel];
+                    rayIntegral[sample * CHANNELS + channel] =
+                            extinction > 0.0 ? (1.0 - stepTransmittance) / extinction : stepLength;
+                    viewTransmittance[channel] *= stepTransmittance;
+                }
+            }
+        }
     }
 
     public SkySettings settings() {
@@ -266,11 +328,11 @@ public final class SkyTables {
         double[] radiance = scratchRadiance;
         double[] iceRadiance = scratchIceRadiance;
         for (int row = 0; row < VIEW_HEIGHT; row++) {
-            double elevation = rowElevation(row);
+            double rowCosine = ROW_COSINES[row];
             for (int column = VIEW_WIDTH / 2; column < VIEW_WIDTH; column++) {
-                double azimuth = -Math.PI + 2.0 * Math.PI * (column + 0.5) / VIEW_WIDTH;
-                integrateView(Math.cos(elevation) * Math.cos(azimuth), Math.sin(elevation),
-                        Math.cos(elevation) * Math.sin(azimuth), sun, radiance, iceRadiance);
+                int index = column - VIEW_WIDTH / 2;
+                integrateView(row, rowCosine * COLUMN_COSINES[index], rowCosine * COLUMN_SINES[index], sun, radiance,
+                        iceRadiance);
                 int texel = (column + row * VIEW_WIDTH) * CHANNELS;
                 int mirroredTexel = (VIEW_WIDTH - 1 - column + row * VIEW_WIDTH) * CHANNELS;
                 for (int channel = 0; channel < CHANNELS; channel++) {
@@ -285,16 +347,20 @@ public final class SkyTables {
         double[] groundRadiance = view.groundRadiance();
         double[] sunTransmittance = scratchSunTransmittance;
         transmittance.sample(SkyAtmosphere.GROUND_RADIUS, sun[1], sunTransmittance);
+        double[] profileIrradiance = scratchProfileIrradiance;
+        double[] mapIrradiance = scratchMapIrradiance;
+        haloProfile.irradiance(sun, ice, profileIrradiance, scratchRingSums, scratchSamples);
+        haloMap.irradiance(ice, mapIrradiance, scratchSamples);
         for (int channel = 0; channel < CHANNELS; channel++) {
             double direct = sun[1] > 0.0 ? sun[1] * sunTransmittance[channel] : 0.0;
-            double iceIrradiance = haloProfile.irradiance(channel, sun, ice) + haloMap.irradiance(channel, ice);
+            double iceIrradiance = profileIrradiance[channel] + mapIrradiance[channel];
             double downward = direct + skyIrradiance(sky, channel) + iceIrradiance;
             groundRadiance[channel] = SkyAtmosphere.GROUND_ALBEDO / Math.PI * downward
                     / (1.0 - SkyAtmosphere.GROUND_ALBEDO * sphericalAlbedo[channel]);
         }
 
         for (int row = 0; row < VIEW_HEIGHT; row++) {
-            double directionY = Math.sin(rowElevation(row));
+            double directionY = ROW_SINES[row];
             boolean hitsGround = SkyAtmosphere.distanceToGroundOrInfinity(SkyAtmosphere.CAMERA_RADIUS, directionY)
                     < Double.POSITIVE_INFINITY;
             double position = Math.max(0.0, directionY) * GLOW_VIEW_SAMPLES;
@@ -332,53 +398,48 @@ public final class SkyTables {
         return SkyView.latitudeToElevation(latitude);
     }
 
-    private void integrateView(double directionX, double directionY, double directionZ, double[] sun,
-            double[] radiance, double[] iceRadiance) {
-        double radius = SkyAtmosphere.CAMERA_RADIUS;
-        double cosine = directionY;
+    /**
+     * Integrates the view ray of a row toward the given horizontal direction components, with the steps that
+     * buildViewRays filled for the row.
+     */
+    private void integrateView(int row, double directionX, double directionZ, double[] sun, double[] radiance,
+            double[] iceRadiance) {
+        double directionY = ROW_SINES[row];
         double viewSunCosine = directionX * sun[0] + directionY * sun[1] + directionZ * sun[2];
         double rayleighPhase = SkyPhase.rayleigh(viewSunCosine);
         double aerosolPhase = SkyPhase.henyeyGreenstein(viewSunCosine, SkyAtmosphere.AEROSOL_ASYMMETRY);
         double[] nanobotPhase = scratchNanobotPhase;
-        double[] viewTransmittance = scratchViewTransmittance;
         double[] sunTransmittance = scratchStepSunTransmittance;
         double[] multiple = scratchMultiple;
         for (int channel = 0; channel < CHANNELS; channel++) {
             nanobotPhase[channel] = SkyPhase.henyeyGreenstein(viewSunCosine,
                     atmosphere.nanobotBands.asymmetry()[channel]);
-            viewTransmittance[channel] = 1.0;
             radiance[channel] = 0.0;
             iceRadiance[channel] = 0.0;
         }
 
-        double groundDistance = SkyAtmosphere.distanceToGroundOrInfinity(radius, cosine);
-        double length = groundDistance < Double.POSITIVE_INFINITY
-                ? groundDistance
-                : SkyAtmosphere.distanceToTop(radius, cosine);
-        double stepLength = length / VIEW_STEPS;
         for (int step = 0; step < VIEW_STEPS; step++) {
-            double travelled = (step + 0.5) * stepLength;
-            double sampleRadius = SkyAtmosphere.radiusAlongRay(radius, cosine, travelled);
-            int slot = atmosphere.altitudeSlot(sampleRadius);
+            int sample = row * VIEW_STEPS + step;
+            double travelled = rayTravelled[sample];
+            double sampleRadius = rayRadius[sample];
+            int slot = raySlot[sample];
             double sampleX = directionX * travelled;
-            double sampleY = radius + directionY * travelled;
+            double sampleY = rayHeight[sample];
             double sampleZ = directionZ * travelled;
             double sampleSunCosine = (sampleX * sun[0] + sampleY * sun[1] + sampleZ * sun[2]) / sampleRadius;
             transmittance.sample(sampleRadius, sampleSunCosine, sunTransmittance);
             sampleMultipleScattering(sampleRadius, sampleSunCosine, multiple);
             for (int channel = 0; channel < CHANNELS; channel++) {
                 double scattering = atmosphere.totalScattering[slot + channel];
-                double extinction = atmosphere.totalExtinction[slot + channel];
-                double stepTransmittance = Math.exp(-extinction * stepLength);
-                double integral = extinction > 0.0 ? (1.0 - stepTransmittance) / extinction : stepLength;
+                double viewTransmittance = rayTransmittance[sample * CHANNELS + channel];
+                double integral = rayIntegral[sample * CHANNELS + channel];
                 double phaseWeighted = atmosphere.rayleighScattering[slot + channel] * rayleighPhase
                         + atmosphere.aerosolScattering[slot + channel] * aerosolPhase
                         + atmosphere.nanobotScattering[slot + channel] * nanobotPhase[channel];
                 double source = phaseWeighted * sunTransmittance[channel] + scattering * multiple[channel];
-                radiance[channel] += viewTransmittance[channel] * source * integral;
-                iceRadiance[channel] += viewTransmittance[channel] * atmosphere.iceScattering[slot + channel]
+                radiance[channel] += viewTransmittance * source * integral;
+                iceRadiance[channel] += viewTransmittance * atmosphere.iceScattering[slot + channel]
                         * sunTransmittance[channel] * integral;
-                viewTransmittance[channel] *= stepTransmittance;
             }
         }
     }

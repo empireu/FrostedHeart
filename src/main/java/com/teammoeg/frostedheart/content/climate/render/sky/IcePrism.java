@@ -23,11 +23,20 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
  * Light paths through the hexagonal cross section of an ice prism, in the plane perpendicular to its axis.
  * The hexagon has side 1, and light enters travelling along minus x. Traces append their outputs to the instance as
  * the cosine and sine of the deviation, the signed angle from the incoming direction to the outgoing one, and a
- * weight. An instance reuses its buffers, so one instance must not be shared between threads.
+ * weight. Outputs of one trace call that leave in the same direction are merged into one.
+ * A reflection off a side face maps a direction angle a to 2 * normal angle + pi - a, so the directions inside the
+ * prism after any number of reflections form six classes, by whether the count is odd and by a turn of 0, 120, or
+ * 240 degrees. Light that entered through a side face has six classes for each entry face, and its exit direction
+ * follows from its class and exit face.
+ * An instance reuses its buffers, so one instance must not be shared between threads.
  */
 final class IcePrism {
     static final int MAXIMUM_INTERACTIONS = 12;
     private static final int SIDE_COUNT = 6;
+    private static final int TURNS = 3;
+    private static final int MIRROR_CLASSES = 2 * TURNS;
+    private static final int TRACE_CLASSES = SIDE_COUNT * MIRROR_CLASSES;
+    private static final int SLOT_COUNT = SIDE_COUNT + TRACE_CLASSES * SIDE_COUNT;
     private static final int MAXIMUM_MIRROR_REFLECTIONS = 40;
     private static final double MINIMUM_WEIGHT = 1.0e-5;
     private static final double APOTHEM = Math.cos(Math.PI / 6.0);
@@ -62,6 +71,12 @@ final class IcePrism {
     private final double[] outputSines;
     private final double[] outputWeights;
     private int outputCount;
+    private final double[] slotCosines = new double[SLOT_COUNT];
+    private final double[] slotSines = new double[SLOT_COUNT];
+    private final double[] slotWeights = new double[SLOT_COUNT];
+    private final boolean[] slotUsed = new boolean[SLOT_COUNT];
+    private final int[] usedSlots = new int[SLOT_COUNT];
+    private int usedSlotCount;
 
     /**
      * A trace call adds at most one output per entry sample for traceMirrors, and at most
@@ -93,11 +108,45 @@ final class IcePrism {
         return outputWeights[output];
     }
 
-    private void addOutput(double deviationCosine, double deviationSine, double weight) {
-        outputCosines[outputCount] = deviationCosine;
-        outputSines[outputCount] = deviationSine;
-        outputWeights[outputCount] = weight;
-        outputCount++;
+    /**
+     * Adds light to a slot. The first light in a slot sets its direction, and later light in the same slot leaves in
+     * the same direction up to rounding.
+     */
+    private void addToSlot(int slot, double deviationCosine, double deviationSine, double weight) {
+        if (!slotUsed[slot]) {
+            slotUsed[slot] = true;
+            slotCosines[slot] = deviationCosine;
+            slotSines[slot] = deviationSine;
+            usedSlots[usedSlotCount] = slot;
+            usedSlotCount++;
+        }
+        slotWeights[slot] += weight;
+    }
+
+    /**
+     * Turns the used slots into outputs, in the order they were first used, and clears them.
+     */
+    private void flushSlots() {
+        for (int used = 0; used < usedSlotCount; used++) {
+            int slot = usedSlots[used];
+            outputCosines[outputCount] = slotCosines[slot];
+            outputSines[outputCount] = slotSines[slot];
+            outputWeights[outputCount] = slotWeights[slot];
+            outputCount++;
+            slotWeights[slot] = 0.0;
+            slotUsed[slot] = false;
+        }
+        usedSlotCount = 0;
+    }
+
+    /**
+     * The class after a reflection off a side, with the same entry face, the other parity, and the turn moved.
+     */
+    private static int reflectedClass(int directionClass, int side) {
+        int entryBase = directionClass / MIRROR_CLASSES * MIRROR_CLASSES;
+        int parity = directionClass % MIRROR_CLASSES / TURNS;
+        int turn = directionClass % TURNS;
+        return entryBase + (1 - parity) * TURNS + Math.floorMod(side % TURNS - turn, TURNS);
     }
 
     private void setNormals(double rotation) {
@@ -145,16 +194,18 @@ final class IcePrism {
             double reflectance = fresnelReflectance(1.0, index, cosineIncident, cosineTransmitted);
             double reflectedX = -1.0 + 2.0 * cosineIncident * normalX[entrySide];
             double reflectedY = 2.0 * cosineIncident * normalY[entrySide];
-            addOutput(-reflectedX, -reflectedY, sampleWeight * reflectance);
+            addToSlot(entrySide, -reflectedX, -reflectedY, sampleWeight * reflectance);
             double scale = inverseIndex * cosineIncident - cosineTransmitted;
             double directionX = -inverseIndex + scale * normalX[entrySide];
             double directionY = scale * normalY[entrySide];
-            inside(index, entryX, height, directionX, directionY, sampleWeight * (1.0 - reflectance), 0);
+            inside(index, entryX, height, directionX, directionY, entrySide * MIRROR_CLASSES,
+                    sampleWeight * (1.0 - reflectance), 0);
         }
+        flushSlots();
     }
 
     private void inside(double index, double positionX, double positionY, double directionX, double directionY,
-            double weight, int depth) {
+            int directionClass, double weight, int depth) {
         if (depth >= MAXIMUM_INTERACTIONS || weight < MINIMUM_WEIGHT) {
             return;
         }
@@ -180,8 +231,9 @@ final class IcePrism {
         double sineSquared = index * index * (1.0 - cosine * cosine);
         double reflectedX = directionX - 2.0 * cosine * normalX[exitSide];
         double reflectedY = directionY - 2.0 * cosine * normalY[exitSide];
+        int nextClass = reflectedClass(directionClass, exitSide);
         if (sineSquared >= 1.0) {
-            inside(index, nextX, nextY, reflectedX, reflectedY, weight, depth + 1);
+            inside(index, nextX, nextY, reflectedX, reflectedY, nextClass, weight, depth + 1);
             return;
         }
         double cosineOut = Math.sqrt(1.0 - sineSquared);
@@ -189,8 +241,8 @@ final class IcePrism {
         double scale = cosineOut - index * cosine;
         double exitX = index * directionX + scale * normalX[exitSide];
         double exitY = index * directionY + scale * normalY[exitSide];
-        addOutput(-exitX, -exitY, weight * (1.0 - reflectance));
-        inside(index, nextX, nextY, reflectedX, reflectedY, weight * reflectance, depth + 1);
+        addToSlot(SIDE_COUNT + directionClass * SIDE_COUNT + exitSide, -exitX, -exitY, weight * (1.0 - reflectance));
+        inside(index, nextX, nextY, reflectedX, reflectedY, nextClass, weight * reflectance, depth + 1);
     }
 
     /**
@@ -215,6 +267,7 @@ final class IcePrism {
             double positionY = root * (1.0 - split) * vertexY[triangle] + root * split * vertexY[triangle + 1];
             double directionX = -1.0;
             double directionY = 0.0;
+            int directionClass = 0;
             double remaining = travel;
             double weight = 1.0 / entrySamples;
             for (int interaction = 0; interaction <= MAXIMUM_MIRROR_REFLECTIONS; interaction++) {
@@ -231,7 +284,7 @@ final class IcePrism {
                     }
                 }
                 if (nearestSide < 0 || nearest >= remaining) {
-                    addOutput(-directionX, -directionY, weight);
+                    addToSlot(directionClass, -directionX, -directionY, weight);
                     break;
                 }
                 positionX += nearest * directionX;
@@ -244,8 +297,10 @@ final class IcePrism {
                 }
                 directionX -= 2.0 * cosine * normalX[nearestSide];
                 directionY -= 2.0 * cosine * normalY[nearestSide];
+                directionClass = reflectedClass(directionClass, nearestSide);
             }
         }
+        flushSlots();
     }
 
     /**

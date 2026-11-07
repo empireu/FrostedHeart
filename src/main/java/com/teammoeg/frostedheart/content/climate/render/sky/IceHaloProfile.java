@@ -38,6 +38,23 @@ public final class IceHaloProfile {
     private static final int IRRADIANCE_RINGS = 360;
     private static final int BINS_PER_IRRADIANCE_RING = ANGLE_BINS / IRRADIANCE_RINGS;
     private static final int IRRADIANCE_RING_POINTS = 32;
+    private static final double[] RING_SINES = new double[IRRADIANCE_RINGS];
+    private static final double[] RING_COSINES = new double[IRRADIANCE_RINGS];
+    private static final double[] POINT_SINES = new double[IRRADIANCE_RING_POINTS];
+    private static final double[] POINT_COSINES = new double[IRRADIANCE_RING_POINTS];
+
+    static {
+        for (int ring = 0; ring < IRRADIANCE_RINGS; ring++) {
+            double angle = (ring + 0.5) * (Math.PI / IRRADIANCE_RINGS);
+            RING_SINES[ring] = Math.sin(angle);
+            RING_COSINES[ring] = Math.cos(angle);
+        }
+        for (int point = 0; point < IRRADIANCE_RING_POINTS; point++) {
+            double around = 2.0 * Math.PI * (point + 0.5) / IRRADIANCE_RING_POINTS;
+            POINT_SINES[point] = Math.sin(around);
+            POINT_COSINES[point] = Math.cos(around);
+        }
+    }
 
     private final double blurSigma;
     private final float[] values = new float[ANGLE_BINS * CHANNELS];
@@ -160,27 +177,31 @@ public final class IceHaloProfile {
     }
 
     /**
-     * Irradiance on level ground per unit of the ice table, with each ring of 180 / IRRADIANCE_RINGS degrees around
-     * the sun sampled at IRRADIANCE_RING_POINTS points. The sun direction is in the frame of the sky view tables.
+     * Writes the irradiance on level ground per unit of the ice table for every channel into the result, with each
+     * ring of 180 / IRRADIANCE_RINGS degrees around the sun sampled at IRRADIANCE_RING_POINTS points. The sun direction
+     * is in the frame of the sky view tables. Ring sums and samples are scratch arrays of one entry per channel.
      */
-    double irradiance(int channel, double[] sun, float[] iceTable) {
-        double result = 0.0;
-        double ringStep = Math.PI / IRRADIANCE_RINGS;
+    void irradiance(double[] sun, float[] iceTable, double[] result, double[] ringSums, double[] samples) {
+        Arrays.fill(result, 0.0);
         for (int ring = 0; ring < IRRADIANCE_RINGS; ring++) {
-            double angle = (ring + 0.5) * ringStep;
-            double ringSum = 0.0;
+            double ringSine = RING_SINES[ring];
+            double ringCosine = RING_COSINES[ring];
+            Arrays.fill(ringSums, 0.0);
             for (int point = 0; point < IRRADIANCE_RING_POINTS; point++) {
-                double around = 2.0 * Math.PI * (point + 0.5) / IRRADIANCE_RING_POINTS;
-                double perpendicular = Math.sin(angle) * Math.cos(around);
-                double x = Math.cos(angle) * sun[0] - perpendicular * sun[1];
-                double y = Math.cos(angle) * sun[1] + perpendicular * sun[0];
-                double z = Math.sin(angle) * Math.sin(around);
+                double perpendicular = ringSine * POINT_COSINES[point];
+                double x = ringCosine * sun[0] - perpendicular * sun[1];
+                double y = ringCosine * sun[1] + perpendicular * sun[0];
+                double z = ringSine * POINT_SINES[point];
                 if (y > 0.0) {
-                    ringSum += y * SkyView.sample(iceTable, channel, Math.atan2(z, x), Math.asin(y));
+                    SkyView.sampleChannels(iceTable, Math.atan2(z, x), Math.asin(y), samples);
+                    for (int channel = 0; channel < CHANNELS; channel++) {
+                        ringSums[channel] += y * samples[channel];
+                    }
                 }
             }
-            result += ringEnergies[channel][ring] * ringSum / IRRADIANCE_RING_POINTS;
+            for (int channel = 0; channel < CHANNELS; channel++) {
+                result[channel] += ringEnergies[channel][ring] * ringSums[channel] / IRRADIANCE_RING_POINTS;
+            }
         }
-        return result;
     }
 }

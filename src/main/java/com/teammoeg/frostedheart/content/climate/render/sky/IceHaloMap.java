@@ -252,11 +252,11 @@ public final class IceHaloMap {
     }
 
     /**
-     * Irradiance on level ground from the oriented crystals per unit of the ice table, summed bin by bin above
-     * the horizon.
+     * Writes the irradiance on level ground from the oriented crystals per unit of the ice table for every channel
+     * into the result, summed bin by bin above the horizon. Samples is a scratch array of one entry per channel.
      */
-    double irradiance(int channel, float[] iceTable) {
-        double result = 0.0;
+    void irradiance(float[] iceTable, double[] result, double[] samples) {
+        Arrays.fill(result, 0.0);
         for (int row = 0; row < ELEVATION_BINS; row++) {
             double elevation = LOWEST_ELEVATION + (row + 0.5) * BIN_STEP;
             if (elevation <= 0.0) {
@@ -264,15 +264,23 @@ public final class IceHaloMap {
             }
             double height = Math.sin(elevation);
             for (int column = 0; column < AZIMUTH_BINS; column++) {
-                double phase = value(channel, column, row);
-                if (phase == 0.0) {
+                int texel = (column + row * AZIMUTH_BINS) * CHANNELS;
+                boolean lit = false;
+                for (int channel = 0; channel < CHANNELS; channel++) {
+                    lit |= values[texel + channel] != 0.0F;
+                }
+                if (!lit) {
                     continue;
                 }
-                result += phase * ROW_SOLID_ANGLES[row] * height
-                        * SkyView.sample(iceTable, channel, (column + 0.5) * BIN_STEP, elevation);
+                SkyView.sampleChannels(iceTable, (column + 0.5) * BIN_STEP, elevation, samples);
+                for (int channel = 0; channel < CHANNELS; channel++) {
+                    double phase = values[texel + channel];
+                    if (phase != 0.0) {
+                        result[channel] += phase * ROW_SOLID_ANGLES[row] * height * samples[channel];
+                    }
+                }
             }
         }
-        return result;
     }
 
     private static int mirroredColumn(int column) {
