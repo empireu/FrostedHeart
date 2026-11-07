@@ -32,6 +32,10 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
 public final class SkyView {
     private static final int CHANNELS = SkyAtmosphere.CHANNEL_COUNT;
     private static final int TABLE_LENGTH = SkyTables.VIEW_WIDTH * SkyTables.VIEW_HEIGHT * CHANNELS;
+    /**
+     * The lowest sky darkness that ClientLevel.getSkyDarken returns, at night.
+     */
+    private static final float NIGHT_SKY_DARKEN = 0.2F;
 
     private double sunElevationRadians;
     private final float[] sky = new float[TABLE_LENGTH];
@@ -79,6 +83,37 @@ public final class SkyView {
         }
         greyByWeather(result, 0.6F, rainLevel);
         greyByWeather(result, 0.2F, thunderLevel);
+    }
+
+    /**
+     * Writes the sky light on the terrain into the result, as the lightmap color at full sky light.
+     * In clear weather it is the ground as the sky's exposure displays it, relative to snow under a sun of unit
+     * irradiance at the zenith, scaled down where a channel would pass 1, and at least vanilla's sky light at night.
+     * The ground radiance of the two views is blended by the high view's weight, and rain blends the result into
+     * vanilla's sky light for the given sky darkness.
+     */
+    public static void daylightColor(SkyView lowView, SkyView highView, double highWeight, double exposure,
+            float rainLevel, float skyDarken, float[] result) {
+        double brightest = encodeSrgb(1.0 - Math.exp(-exposure * SkyAtmosphere.GROUND_ALBEDO / Math.PI));
+        for (int channel = 0; channel < CHANNELS; channel++) {
+            double lowRadiance = lowView.groundRadiance[channel];
+            double radiance = lowRadiance + (highView.groundRadiance[channel] - lowRadiance) * highWeight;
+            result[channel] = (float) encodeSrgb(1.0 - Math.exp(-exposure * Math.max(0.0, radiance)));
+            brightest = Math.max(brightest, result[channel]);
+        }
+        for (int channel = 0; channel < CHANNELS; channel++) {
+            float clear = Math.max((float) (result[channel] / brightest), vanillaSkyLight(channel, NIGHT_SKY_DARKEN));
+            result[channel] = clear + (vanillaSkyLight(channel, skyDarken) - clear) * rainLevel;
+        }
+    }
+
+    /**
+     * Vanilla's lightmap color at full sky light for a sky darkness from ClientLevel.getSkyDarken, outside lightning
+     * flashes.
+     */
+    public static float vanillaSkyLight(int channel, float skyDarken) {
+        float tint = channel == 2 ? 1.0F : skyDarken + (1.0F - skyDarken) * 0.35F;
+        return tint * (skyDarken * 0.95F + 0.05F);
     }
 
     private double horizonRadiance(int channel, double azimuth, double horizontalFraction) {

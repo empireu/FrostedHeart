@@ -160,9 +160,30 @@ public final class CalculatedSkyRenderer {
         return isAllowed(level) && state != null;
     }
 
-    private static boolean isAllowed(ClientLevel level) {
+    /**
+     * Whether the calculated sky may be drawn in the level, which needs it enabled, the overworld, no shader pack, and
+     * no earlier error.
+     */
+    public static boolean isAllowed(ClientLevel level) {
         return FHConfig.CLIENT.calculatedSky.get() && !failed && level.dimension() == Level.OVERWORLD
                 && !shaderPackInUse();
+    }
+
+    /**
+     * Whether the sky is drawn from tables, halo maps, and views built for the current config and sun elevation, with
+     * no build pending.
+     */
+    public static boolean isSettled(ClientLevel level, float partialTick) {
+        SkyState current = state;
+        if (current == null || pendingBuild != null || !isAllowed(level)) {
+            return false;
+        }
+        double sunElevation = Math.asin(Math.cos(level.getTimeOfDay(partialTick) * Math.PI * 2.0));
+        return current.tables().settings().equals(configSettings())
+                && current.haloIndex() == gridIndex(sunElevation, HALO_MAP_STEP_DEGREES, LOWEST_HALO_SUN_DEGREES,
+                        HIGHEST_HALO_SUN_DEGREES)
+                && current.viewIndex() == gridIndex(sunElevation, VIEW_STEP_DEGREES, LOWEST_VIEW_SUN_DEGREES,
+                        HIGHEST_VIEW_SUN_DEGREES);
     }
 
     private static boolean shaderPackInUse() {
@@ -215,6 +236,23 @@ public final class CalculatedSkyRenderer {
                 FHConfig.CLIENT.calculatedSkyExposure.get(), level.getRainLevel(partialTick),
                 level.getThunderLevel(partialTick), reusedFogColor);
         return reusedFogColor;
+    }
+
+    /**
+     * Writes the sky light on the terrain while the calculated sky is drawn into the result, as SkyView.daylightColor
+     * gives it for vanilla's sky darkness. Returns false and leaves the result unchanged when the sky is not drawn.
+     */
+    public static boolean daylightColor(ClientLevel level, float partialTick, float skyDarken, float[] result) {
+        SkyState current = state;
+        if (current == null || !isAllowed(level)) {
+            return false;
+        }
+        double sunElevation = Math.asin(Math.cos(level.getTimeOfDay(partialTick) * Math.PI * 2.0));
+        float viewBlend = blendWeight(sunElevation, current.lowView().sunElevationRadians(),
+                current.highView().sunElevationRadians());
+        SkyView.daylightColor(current.lowView(), current.highView(), viewBlend,
+                FHConfig.CLIENT.calculatedSkyExposure.get(), level.getRainLevel(partialTick), skyDarken, result);
+        return true;
     }
 
     /**

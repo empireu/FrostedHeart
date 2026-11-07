@@ -1,9 +1,9 @@
 # Calculated Sky
 
 - Status: `Partial`
-- Last verified: `2026-11-07`, against source and the GameTests below. The first version, with one ice lobe and no snow fade, was seen in `runClient` on `2026-11-05`. The three-part ice phase and a snow fade toward gray were seen in `runClient` on `2026-11-06`, and the fog color from the sky and the snow fade toward the fog color later that day. The ice crystal halos and the sky texels were first seen in `runClient` on `2026-11-07`, with no popping as the sun moves. The sky's own sun, which replaces vanilla's, and the blended sky views were seen in `runClient` the same day.
-- Scope: the optional overworld sky color calculated from air, titanium dioxide nanobots, and ice crystals, its halo display and sun, the fog color taken from it outside snow, and the client config and client command. Clouds and lightmap are unchanged.
-- Primary code anchors: `CalculatedSkyRenderer`, `CalculatedSkyEffects`, `CalculatedSkyClientCommand`, `SkyTables`, `SkyView`, `SkyAtmosphere`, `SkyParticleOptics`, `SkyPhase`, `SkySettings`, `IceCrystalData`, `IceHaloProfile`, `IceHaloMap`, `IceHaloFormulas`, `IcePrism`, `LevelRendererMixin.frostedheart$drawCalculatedSky`, `LevelRendererMixin.frostedheart$hideVanillaSun`, `FogRendererMixin.frostedheart$useCalculatedSkyFogColor`, `FHClientEventsMod.registerDimensionEffects`, `assets/frostedheart/shaders/calculated_sky.fsh`, `assets/frostedheart/datasets/ice_halos`
+- Last verified: `2026-11-07`, against source and the GameTests below. The first version, with one ice lobe and no snow fade, was seen in `runClient` on `2026-11-05`. The three-part ice phase and a snow fade toward gray were seen in `runClient` on `2026-11-06`, and the fog color from the sky and the snow fade toward the fog color later that day. The ice crystal halos and the sky texels were first seen in `runClient` on `2026-11-07`, with no popping as the sun moves. The sky's own sun, which replaces vanilla's, and the blended sky views were seen in `runClient` the same day. The screenshot harness took its first sets in `runClient` the same day, the last one recorded with `beginSet` and `pose`. The daylight on the terrain was seen in `runClient` the same day, with torch light unchanged.
+- Scope: the optional overworld sky color calculated from air, titanium dioxide nanobots, and ice crystals, its halo display and sun, the fog color taken from it outside snow, the sky light of the lightmap taken from it outside rain, the client config and client command, and a screenshot harness for development. Clouds are unchanged.
+- Primary code anchors: `CalculatedSkyRenderer`, `CalculatedSkyEffects`, `CalculatedSkyClientCommand`, `CalculatedSkyScreenshots`, `SkyTables`, `SkyView`, `SkyAtmosphere`, `SkyParticleOptics`, `SkyPhase`, `SkySettings`, `IceCrystalData`, `IceHaloProfile`, `IceHaloMap`, `IceHaloFormulas`, `IcePrism`, `LevelRendererMixin.frostedheart$drawCalculatedSky`, `LevelRendererMixin.frostedheart$hideVanillaSun`, `FogRendererMixin.frostedheart$useCalculatedSkyFogColor`, `FHClientEventsMod.registerDimensionEffects`, `assets/frostedheart/shaders/calculated_sky.fsh`, `assets/frostedheart/datasets/ice_halos`
 
 The feature is off by default. The plan and later stages are in [the calculated sky plan](../../plans/2026-11-05_21-16-30_calculated-sky.md).
 
@@ -117,7 +117,7 @@ The shader:
 - fades to the fog color from the horizon up to a texel direction with `y = 0.08`, about `4.6 degrees`, so terrain fog meets the sky without a seam;
 - adds dithering of half a display step against banding, one value per texel so texels stay flat.
 
-`CalculatedSkyEffects` replaces the overworld `DimensionSpecialEffects` through `RegisterDimensionSpecialEffectsEvent`. While the sky is drawn, `getSunriseColor` returns `null`, which removes vanilla's sunrise fan and its tint of the fog color (`FogRenderer.setupColor`). Otherwise it returns the vanilla value.
+`CalculatedSkyEffects` replaces the overworld `DimensionSpecialEffects` through `RegisterDimensionSpecialEffectsEvent`. While the sky is drawn, `getSunriseColor` returns `null`, which removes vanilla's sunrise fan and its tint of the fog color (`FogRenderer.setupColor`). Otherwise it returns the vanilla value. Its `adjustLightmapColors` lights the terrain, as described under [Daylight](#daylight).
 
 ### Fog color
 
@@ -138,6 +138,34 @@ The calculated sky is skipped, and vanilla draws the sky as before, when:
 - no table has been uploaded yet, for the first second or so after enabling;
 - building or drawing threw an exception, including a missing or broken dataset. It is logged once, and turning the sky on again with the command retries.
 
+### Daylight
+
+`CalculatedSkyEffects.adjustLightmapColors` replaces the sky light in the lightmap of `LightTexture.updateLightTexture` while the calculated sky is drawn. Vanilla's sky light at full sky light is `V = t * (0.95 d + 0.05)`, where `d` is `ClientLevel.getSkyDarken` (`0.2` at night, `1` by day, lower in rain and thunder) and the tint `t` is `d + 0.35 (1 - d)` in red and green and `1` in blue (`SkyView.vanillaSkyLight`). At sky light level `i` it is multiplied by `LightTexture.getBrightness(i)`. `SkyView.daylightColor` gives the color `D` that takes its place:
+
+- `C = encode(1 - exp(-k L))` in each channel, where `L` is `SkyView.groundRadiance` blended between the two views around the sun, `k` is `exposure`, and `encode` is the sRGB encoding. `L` is the light that snow of albedo `0.8` sends back, from the sun, the sky, ice, and light reflected between snow and atmosphere, so `C` is the snow as the sky displays it below the horizon;
+- `C` is divided by the larger of its brightest channel and `encode(1 - exp(-k 0.8 / pi))`, snow under a sun of irradiance `1` at the zenith, so noon is close to white and no channel passes `1`;
+- each channel is raised to at least vanilla's night sky light, `V` at `d = 0.2`, which is `(0.1152, 0.1152, 0.24)`;
+- the result is blended toward `V` by the rain level, so terrain in snow and storms is lit as in vanilla, as the sky fades to the fog there.
+
+At the first texel of each lightmap update, `CalculatedSkyRenderer.daylightColor` computes `D`, and the hook adds `0.96 (D - V)` times vanilla's darkening during boss fights to every texel, times `getBrightness(i)`. The factor `0.96` and the darkening are what vanilla applies to the sky light before the hook runs. Block light, night vision, the darkness effect, the brightness slider, and lightning flashes, during which the lightmap stays vanilla's, are unchanged. The hook applies under the same conditions as the sky, and also with the camera in a fluid. It changes only what the client draws, so mob spawning and light levels on the server stay as they are. One lightmap update costs one evaluation of `D` and `256` multiply-adds, without allocating.
+
+With the default settings, outside the game on `2026-11-07`, against vanilla's `V` in clear weather (luminance with the weights `0.2126`, `0.7152`, `0.0722`):
+
+| Sun | `D` | `V` | Luminance of `D` over `V` |
+|---:|---|---|---:|
+| `90` | `0.998 0.994 1.000` | `1 1 1` | `1.00` |
+| `45` | `0.935 0.924 0.928` | `1 1 1` | `0.93` |
+| `30` | `0.834 0.813 0.814` | `1 1 1` | `0.82` |
+| `20` | `0.709 0.678 0.677` | `0.857 0.857 0.912` | `0.80` |
+| `12` | `0.545 0.509 0.513` | `0.567 0.567 0.708` | `0.90` |
+| `5` | `0.338 0.310 0.323` | `0.354 0.354 0.524` | `0.87` |
+| `2` | `0.227 0.203 0.240` | `0.276 0.276 0.445` | `0.73` |
+| `0` | `0.143 0.127 0.240` | `0.229 0.229 0.392` | `0.57` |
+| `-2` | `0.115 0.115 0.240` | `0.186 0.186 0.339` | `0.63` |
+| `-6` and below | `0.115 0.115 0.240` | `0.115 0.115 0.240` | `1.00` |
+
+Vanilla turns the light blue from a sun at about `24 degrees` down, and `D` stays neutral to faintly warm until the night light's blue channel takes over at about `2 degrees`. With `exposure` `12`, `D` is `0.90` of `V` at `30 degrees`, `1.08` to `1.12` from `12` to `5 degrees`, and `0.76` at `0 degrees`.
+
 ## 3. Configuration
 
 Client config, group `CalculatedSky`. Ranges come from `SkySettings`.
@@ -152,7 +180,7 @@ Client config, group `CalculatedSky`. Ranges come from `SkySettings`.
 | `iceOpticalDepth` | `calculatedSkyIceOpticalDepth` | `0.1` | `0..1` |
 | `texelDegrees` | `calculatedSkyTexelDegrees` | `0.5` | `0..5` |
 
-Optical depths are vertical, at `550 nm`. The spread is the geometric standard deviation of diameter. Narrow spreads give colored skies, and wide ones give white haze. An optical depth of `0.25` at the default size is about `30 Mt` of nanobots worldwide. The texel size is rounded so that a whole number of texels fits along each cube face (`SkySettings.actualTexelDegrees`), and `0` draws a smooth sky. Vanilla's sun texture is about `1 degree` per texel.
+Optical depths are vertical, at `550 nm`. The spread is the geometric standard deviation of diameter. Narrow spreads give colored skies, and wide ones give white haze. An optical depth of `0.25` at the default size is about `30 Mt` of nanobots worldwide. The texel size is rounded so that a whole number of texels fits along each cube face (`SkySettings.actualTexelDegrees`), and `0` draws a smooth sky. Vanilla's sun texture is about `1 degree` per texel. The exposure also sets the daylight on the terrain: a higher exposure keeps it near its noon brightness until the sun is lower.
 
 The renderer reads the config every frame, so changes from the command apply at once. Edits to the config file while the game runs depend on Forge reloading the file, which has not been tried. The existing key `Weather.skyRenderChanges` is unrelated. Its only reader, `DimensionSpecialEffectsMixin`, is not listed in `frostedheart.mixins.json`.
 
@@ -167,6 +195,40 @@ The renderer reads the config every frame, so changes from the command apply at 
 | `/calculatedSky set <key> <value>` | Sets one of the six numeric keys and saves the config |
 | `/calculatedSky reset` | Restores the six numeric keys to their defaults |
 
+### Screenshot harness
+
+`CalculatedSkyScreenshots` records and takes sets of screenshots for comparisons during development. Its subcommands are registered only while the constant `CalculatedSkyScreenshots.ENABLED` is `true`, and nothing else of it runs without them. Taking a set needs a singleplayer world.
+
+| Form | Effect |
+|---|---|
+| `/calculatedSky beginSet <set>` | Starts recording `<game directory>/sky-shots/<set>.json`, which is `run/sky-shots` in `runClient`. An existing set is loaded and extended, and a new one starts with the sky off and on as its variants |
+| `/calculatedSky pose <name>` | Saves where the player stands and looks, with the day time and weather the client shows, as a pose of the set being recorded. A pose of the same name is replaced. The file is written at once |
+| `/calculatedSky endSet` | Ends the recording and releases a held time and weather |
+| `/calculatedSky time <ticks>` and `time off` | Holds the client's day time for framing, as a run does, and releases it. The server clock keeps running |
+| `/calculatedSky weather <clear\|snow\|storm>` and `weather off` | Holds the client's rain and thunder levels for framing, and releases them back to the levels from before |
+| `/calculatedSky screenshots` | Takes the current view at the current time with the sky off and on |
+| `/calculatedSky screenshots <set>` | Takes every combination in the set |
+| `/calculatedSky screenshots stop` | Ends a run early, keeping the shots taken so far |
+
+Taking a set releases a held time and weather, and leaving the world releases them and ends a recording.
+
+A set is one JSON object. Whatever it leaves out comes from the current view, time, weather, and config. Unknown keys and wrong values are reported in chat and skipped or replaced by the default.
+
+| Key | Value |
+|---|---|
+| `poses` | List of `{name, yaw, pitch, position, offset, times, weather}`. `position` is `[x, y, z]` in the world and `offset` is `[x, y, z]` from where the run started. Without either the pose is where the run started. Yaw follows Minecraft, so `90` faces west toward the setting sun and `-90` faces east. `times` and `weather` replace those of the pose's group. Recorded poses go here, with the time and weather they were recorded with |
+| `times` | List of day times in ticks. `18000 + 24000 * n` shows the moon phase of day `n` |
+| `weather` | List of `world` (as the server has it), `clear`, `snow` (rain level `1`), and `storm` (rain and thunder level `1`) |
+| `variants` | List of `{name, sky, exposure, nanobotOpticalDepth, nanobotMedianNanometers, nanobotSpread, iceOpticalDepth, texelDegrees}`, clamped to the config ranges. Without variants each shot is taken with the sky off and on |
+| `groups` | List of objects with their own `poses`, `times`, `weather`, and `variants`. Each group takes its own combinations, and a list it leaves out comes from the set. Without groups the set is one group |
+| `hud` | `true` keeps the HUD and the hand. Default `false` |
+
+Shots run group by group, in the order pose, weather, time, variant. For each shot the harness sets the config without saving the file, holds the day time, the rain and thunder levels, and the view direction on the client every frame, and teleports the player through the integrated server when the pose is somewhere else, flying when the player may fly. It waits at least `1 s`, plus `4 s` after a weather change and `2 s` after a move. It also waits until the player has arrived, the terrain is drawn after a move (`LevelRenderer.hasRenderedAllChunks`, which Embeddium answers from its own renderer), and `CalculatedSkyRenderer.isSettled` reports the tables, halo maps, and views built for the config and sun elevation. After `20 s` it takes the shot anyway and says so in the manifest. An open screen, such as chat or the pause menu, restarts the wait, and pausing on lost focus is off while a run lasts.
+
+The frame is saved at the end of `TickEvent.RenderTickEvent` with vanilla's `Screenshot.grab`, into `screenshots/sky-shots/<set>-<date>_<time>/` as `NNN_<pose>_<time>_<weather>_<variant>.png`. `manifest.tsv` in that folder starts with the set, the world seed, and the window size. It then has one line per shot with the player's position, the sun elevation, the rain and thunder levels, the variant's config, a status (`settled`, `timed out waiting for ...`, or `sky not drawn, ...`), and the frames per second over the wait. When the run ends, the config, the HUD, the weather, the view direction, and the position are restored, and the server's next time update restores the day time within a second.
+
+Only the client's time and weather are held, so the server's clock and climate keep running during a run. `snow` and `storm` only set the client's rain and thunder levels, so they show vanilla snowfall and the snow fades of the sky and the fog. FrostedHeart's storms from the climate (`ClientWeatherFrame`) need a world that is in a real storm, with `world` weather. The contributor's grid tool `ScreenshotGrid`, which lives with the preview outside this repository, lays a run out with `--manifest`, one row per pose, weather, and time and one column per variant.
+
 ## 5. Validation And Performance
 
 `CalculatedSkyGameTests` (namespace `frostedheart_calculated_sky`) checks:
@@ -177,9 +239,10 @@ The renderer reads the config every frame, so changes from the command apply at 
 - the halo profile's total and the halo maps' totals at sun elevations `30` and `8 degrees` against the offline preview, and that the brightest bin of the sun dogs sits between `0.25 degrees` inside and `1 degree` outside the minimum deviation from Bravais' effective index;
 - the default sky at sun elevations `30` and `8 degrees` against the offline preview, with `0.5 degree` texels. The directions include the sun itself, `2 degrees` from it (the diffraction peak), and `22 degrees` from it (the 22 degree halo);
 - that the fog color is warmer toward a sun at `4.5 degrees` than away from it, and that looking straight up gives the same color in every direction;
-- that the sun's radiance is zero below the horizon, has red at least green and green at least blue above it, and has more than ten times the red over blue at `2 degrees` that it has at `30 degrees`.
+- that the sun's radiance is zero below the horizon, has red at least green and green at least blue above it, and has more than ten times the red over blue at `2 degrees` that it has at `30 degrees`;
+- that the daylight is within `0.95` of white at noon, never gets brighter as the sun sinks from `90` to `-18 degrees`, equals vanilla's night sky light at `-18 degrees`, and equals vanilla's sky light in full rain.
 
-The preview is a separate Java program in the contributor's workspace, checked against a Monte Carlo reference and its own ray tracer of ice prisms. The port matches it within `1%`, the test's tolerance. The mixin and the shader only run in the client, so the GameTests do not cover them.
+The preview is a separate Java program in the contributor's workspace, checked against a Monte Carlo reference and its own ray tracer of ice prisms. The port matches it within `1%`, the test's tolerance. The mixins, the shader, and the lightmap hook only run in the client, so the GameTests do not cover them.
 
 Against the Monte Carlo reference, the lookup tables reach a mean color difference (CIE dE) of `2.1` to `4.0` for the default settings through the day, the largest with the sun high. The Monte Carlo reference also shows a wider glow around a low sun, from light that ice scatters forward more than once. The tables treat repeated scattering as even in all directions, so they miss it.
 
@@ -196,7 +259,8 @@ On `2026-11-06` empireu also checked the render cost on a laptop RTX 4070, about
 ## 6. Known Limits
 
 - One sky for the whole overworld. Biome sky and fog colors are not used while the sky is drawn, except the snow fog of `FogModification`.
-- Cloud color and lightmap stay vanilla, so they can disagree with the sky, most visibly at sunrise and sunset.
+- Cloud color stays vanilla, so it can disagree with the sky, most visibly at sunrise and sunset.
+- The daylight is one color for all terrain, as in vanilla, with no side lit by the sun. It reaches the night light at a sun elevation near `0 degrees`, where vanilla's light reaches its night level near `-6 degrees`, so evenings get dark earlier and mornings light later. The night light is vanilla's night sky light, constant and blue, not light from the moon in the model.
 - The fog color is one color per frame, as in vanilla, so at the sides of a wide view the horizon can differ a little from it. It has no light from ice crystals, so toward a low sun it is a little darker than the sky above the horizon fade.
 - Snow fades the sky toward the snow fog. Snow and storms do not change the model, and the same ice crystals and halos are present every clear day.
 - Light on other paths is put at the sun, so what those paths draw is missing: light in through a side face and out through an end face (the circumhorizontal arc of a sun above `58 degrees`), reflections off end faces (the sun pillar), and the faint anthelic arcs of columns opposite the sun. The subsun lies below the horizon and is not drawn.

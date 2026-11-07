@@ -56,6 +56,9 @@ public final class CalculatedSkyGameTests {
     private static final double[] PREVIEW_MAP_TOTAL_SUN_30 = {2.486358e-01, 2.481081e-01, 2.472797e-01};
     private static final double[] PREVIEW_MAP_TOTAL_SUN_8 = {1.982199e-01, 1.981322e-01, 1.984010e-01};
     private static final double PREVIEW_TEXEL_DEGREES = 0.5;
+    private static final double[] DAYLIGHT_SUN_DEGREES = {
+            90.0, 45.0, 30.0, 20.0, 12.0, 5.0, 2.0, 0.0, -2.0, -6.0, -12.0, -18.0
+    };
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void mieMatchesPublishedAndRayleighLimits(GameTestHelper helper) {
@@ -223,6 +226,61 @@ public final class CalculatedSkyGameTests {
                     "Looking straight up uses the mean horizon in every direction, channel " + channel);
         }
         helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void daylightDimsWithTheSunIntoVanillaNightAndRain(GameTestHelper helper) {
+        IceCrystalData data = IceCrystalData.get();
+        double blurSigma = IceHaloMap.blurSigma(SkySettings.DEFAULT.actualTexelDegrees());
+        SkyTables tables = new SkyTables(SkySettings.DEFAULT);
+        IceHaloProfile profile = new IceHaloProfile(data, blurSigma);
+        float[] daylight = new float[SkyAtmosphere.CHANNEL_COUNT];
+        double previousLuminance = Double.POSITIVE_INFINITY;
+        for (double sunElevationDegrees : DAYLIGHT_SUN_DEGREES) {
+            double sunElevation = Math.toRadians(sunElevationDegrees);
+            IceHaloMap map = new IceHaloMap(data, Math.toRadians(Math.max(-6.0, sunElevationDegrees)), blurSigma);
+            SkyView view = tables.computeView(sunElevation, profile, map);
+            SkyView.daylightColor(view, view, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F,
+                    vanillaSkyDarken(sunElevationDegrees, 0.0F), daylight);
+            double luminance = 0.2126 * daylight[0] + 0.7152 * daylight[1] + 0.0722 * daylight[2];
+            helper.assertTrue(luminance <= previousLuminance + 1.0e-6,
+                    "Daylight at sun " + sunElevationDegrees + " has luminance " + luminance
+                            + ", brighter than " + previousLuminance + " at the higher sun before");
+            previousLuminance = luminance;
+            for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
+                if (sunElevationDegrees == 90.0) {
+                    helper.assertTrue(daylight[channel] > 0.95F && daylight[channel] <= 1.0F,
+                            "Daylight at noon is close to white, channel " + channel + " is " + daylight[channel]);
+                }
+                if (sunElevationDegrees == -18.0) {
+                    float night = SkyView.vanillaSkyLight(channel, 0.2F);
+                    helper.assertTrue(Math.abs(daylight[channel] - night) < 1.0e-6F,
+                            "Daylight at sun -18 is vanilla's night, channel " + channel + " is " + daylight[channel]
+                                    + ", vanilla " + night);
+                }
+            }
+            if (sunElevationDegrees == 30.0) {
+                float rainSkyDarken = vanillaSkyDarken(sunElevationDegrees, 1.0F);
+                SkyView.daylightColor(view, view, 0.0, SkySettings.DEFAULT_EXPOSURE, 1.0F, rainSkyDarken, daylight);
+                for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
+                    float vanilla = SkyView.vanillaSkyLight(channel, rainSkyDarken);
+                    helper.assertTrue(Math.abs(daylight[channel] - vanilla) < 1.0e-6F,
+                            "Daylight in full rain is vanilla's sky light, channel " + channel + " is "
+                                    + daylight[channel] + ", vanilla " + vanilla);
+                }
+            }
+        }
+        helper.succeed();
+    }
+
+    /**
+     * The sky darkness that ClientLevel.getSkyDarken gives for a sun elevation and rain level without thunder.
+     */
+    private static float vanillaSkyDarken(double sunElevationDegrees, float rainLevel) {
+        float sunHeight = (float) Math.sin(Math.toRadians(sunElevationDegrees));
+        float skyDarken = 1.0F - Math.max(0.0F, Math.min(1.0F, 1.0F - (sunHeight * 2.0F + 0.2F)));
+        skyDarken *= 1.0F - rainLevel * 5.0F / 16.0F;
+        return skyDarken * 0.8F + 0.2F;
     }
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)

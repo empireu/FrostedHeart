@@ -42,6 +42,7 @@ import static com.teammoeg.frostedheart.infrastructure.command.CommandHelper.reg
 
 /**
  * Client command that turns the calculated sky on and off and changes its settings in the client config.
+ * With CalculatedSkyScreenshots.ENABLED it also records and takes screenshot sets.
  */
 @Mod.EventBusSubscriber(modid = FHMain.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
 public final class CalculatedSkyClientCommand {
@@ -69,6 +70,9 @@ public final class CalculatedSkyClientCommand {
                                 0.0, SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH))
                         .then(setting("texelDegrees", FHConfig.CLIENT.calculatedSkyTexelDegrees,
                                 0.0, SkySettings.MAXIMUM_TEXEL_DEGREES)));
+        if (CalculatedSkyScreenshots.ENABLED) {
+            CalculatedSkyScreenshots.addCommands(command);
+        }
         registerCommand(event.getDispatcher(), command);
     }
 
