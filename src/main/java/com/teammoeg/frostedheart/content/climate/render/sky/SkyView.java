@@ -22,8 +22,9 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
 /**
  * Sky radiance for one sun elevation, as two RGB tables of SkyTables.VIEW_WIDTH by SkyTables.VIEW_HEIGHT texels.
  * Columns are azimuth from the sun, and rows follow the latitude mapping of Hillaire 2020.
- * The sky table already contains light reflected between snow and atmosphere.
- * The ice table holds single scattering by ice per unit phase function, which SkyPhase.narrowIce scales per pixel.
+ * The sky table already contains light reflected between snow and atmosphere, and no single scattering by ice.
+ * The ice table holds single scattering by ice per unit phase function, which the ice phase of IceHaloProfile and
+ * IceHaloMap scales per sky texel.
  * The mean horizon radiance is the sky table at elevation zero, averaged over all azimuths.
  * The texel lookup is repeated in calculated_sky.fsh and must stay equal.
  */
@@ -32,8 +33,8 @@ public record SkyView(double sunElevationRadians, float[] sky, float[] ice, doub
     private static final int CHANNELS = SkyAtmosphere.CHANNEL_COUNT;
 
     /**
-     * Writes the displayed sky colour at the horizon into the result, tone mapped and greyed as calculated_sky.fsh does.
-     * The diffraction peak and the halo ring are left out, so the colour stays smooth near the sun.
+     * Writes the displayed sky color at the horizon into the result, tone mapped and grayed as calculated_sky.fsh does.
+     * Single scattering by ice is left out, so the color stays smooth near the sun and across halo arcs.
      * A horizontal fraction of 1 uses the given azimuth, and 0 uses the mean over all azimuths.
      */
     public void horizonDisplayColor(double azimuth, double horizontalFraction, double exposure, float rainLevel,
@@ -63,16 +64,23 @@ public record SkyView(double sunElevationRadians, float[] sky, float[] ice, doub
         return 1.055 * Math.pow(clamped, 1.0 / 2.4) - 0.055;
     }
 
-    public double radiance(int channel, double azimuth, double elevation) {
+    /**
+     * Radiance toward a direction given by azimuth from the sun and elevation, with the ice phase of the given
+     * profile and map.
+     */
+    public double radiance(int channel, double azimuth, double elevation, IceHaloProfile haloProfile,
+            IceHaloMap haloMap) {
         double directionY = Math.sin(elevation);
         if (SkyAtmosphere.distanceToGroundOrInfinity(SkyAtmosphere.CAMERA_RADIUS, directionY)
                 < Double.POSITIVE_INFINITY) {
             return groundRadiance[channel];
         }
-        double sunCosine = Math.cos(elevation) * Math.cos(azimuth) * Math.cos(sunElevationRadians)
-                + directionY * Math.sin(sunElevationRadians);
-        return sample(sky, channel, azimuth, elevation)
-                + SkyPhase.narrowIce(sunCosine, channel) * sample(ice, channel, azimuth, elevation);
+        double[] direction = {
+                Math.cos(elevation) * Math.cos(azimuth), directionY, Math.cos(elevation) * Math.sin(azimuth)
+        };
+        double sunCosine = direction[0] * Math.cos(sunElevationRadians) + directionY * Math.sin(sunElevationRadians);
+        double icePhase = haloProfile.phase(channel, sunCosine) + haloMap.phase(channel, direction);
+        return sample(sky, channel, azimuth, elevation) + icePhase * sample(ice, channel, azimuth, elevation);
     }
 
     static double latitudeToElevation(double latitude) {

@@ -82,6 +82,7 @@ public class FHConfig {
 		public final ForgeConfigSpec.DoubleValue calculatedSkyNanobotMedianNanometers;
 		public final ForgeConfigSpec.DoubleValue calculatedSkyNanobotSpread;
 		public final ForgeConfigSpec.DoubleValue calculatedSkyIceOpticalDepth;
+		public final ForgeConfigSpec.DoubleValue calculatedSkyTexelDegrees;
 		public final ForgeConfigSpec.IntValue scenarioRenderQuality;
 		public final ForgeConfigSpec.IntValue scenarioRenderThread;
 		public final ForgeConfigSpec.BooleanValue scenarioAntiAliasing;
@@ -224,8 +225,11 @@ public class FHConfig {
 				.comment("Geometric standard deviation of nanobot diameter. Narrow sizes give coloured skies, wide sizes give white haze.")
 				.defineInRange("nanobotSpread", SkySettings.DEFAULT.nanobotSpread(), SkySettings.MINIMUM_NANOBOT_SPREAD, SkySettings.MAXIMUM_NANOBOT_SPREAD);
 			calculatedSkyIceOpticalDepth = builder
-				.comment("Vertical optical depth of the ice crystal layer, which also draws the 22 degree halo.")
+				.comment("Vertical optical depth of the ice crystal layer, which also draws the halos, sun dogs, and arcs.")
 				.defineInRange("iceOpticalDepth", SkySettings.DEFAULT.iceOpticalDepth(), 0.0, SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH);
+			calculatedSkyTexelDegrees = builder
+				.comment("Size of the sky's square texels in degrees. They are fixed to the sky like the sun's texture. 0 draws a smooth sky.")
+				.defineInRange("texelDegrees", SkySettings.DEFAULT.texelDegrees(), 0.0, SkySettings.MAXIMUM_TEXEL_DEGREES);
 			builder.pop();
 
 

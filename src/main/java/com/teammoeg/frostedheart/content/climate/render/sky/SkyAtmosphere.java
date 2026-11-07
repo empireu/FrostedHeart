@@ -31,11 +31,8 @@ public final class SkyAtmosphere {
     public static final double ATMOSPHERE_HEIGHT = TOP_RADIUS - GROUND_RADIUS;
     public static final double CAMERA_RADIUS = GROUND_RADIUS + 100.0;
     public static final double HORIZON_DIP_RADIANS = Math.acos(GROUND_RADIUS / CAMERA_RADIUS);
-    public static final double ICE_HALO_FRACTION = 0.1;
     public static final double ICE_DIFFRACTION_FRACTION = 0.5;
     public static final double ICE_DIFFRACTION_ASYMMETRY = 0.99;
-    static final double ICE_BROAD_FRACTION = 1.0 - ICE_HALO_FRACTION - ICE_DIFFRACTION_FRACTION;
-    static final double ICE_BROAD_ASYMMETRY = 0.48;
     static final double GROUND_ALBEDO = 0.8;
     static final double AEROSOL_ASYMMETRY = 0.8;
     private static final double ALTITUDE_STEP = 50.0;

@@ -28,6 +28,7 @@ import java.util.function.DoubleUnaryOperator;
 
 /**
  * Checks the sky optics against published values and against the offline preview in the workspace.
+ * Reference values come from the preview's datasets mode, which also wrote the ice halo datasets.
  */
 @GameTestHolder("frostedheart_calculated_sky")
 @PrefixGameTestTemplate(false)
@@ -36,21 +37,25 @@ public final class CalculatedSkyGameTests {
             {0.0, 90.0}, {0.0, 10.0}, {180.0, 10.0}, {90.0, 45.0}, {0.0, 30.0}, {0.0, -5.0}
     };
     private static final double[][] PREVIEW_RADIANCE_SUN_30 = {
-            {4.320987e-02, 5.210253e-02, 7.061756e-02},
-            {1.660233e-01, 1.550792e-01, 1.548889e-01},
-            {9.646680e-02, 1.072552e-01, 1.295390e-01},
-            {5.265287e-02, 6.284106e-02, 8.426542e-02},
-            {8.584539e+01, 6.546757e+01, 4.714827e+01},
-            {1.219478e-01, 1.121708e-01, 1.128015e-01}
+            {4.166095e-02, 5.124624e-02, 6.967542e-02},
+            {1.467572e-01, 1.414350e-01, 1.489306e-01},
+            {9.582255e-02, 1.069268e-01, 1.295040e-01},
+            {5.127253e-02, 6.186302e-02, 8.348271e-02},
+            {1.406775e+02, 1.072396e+02, 7.730739e+01},
+            {1.224294e-01, 1.125749e-01, 1.131418e-01}
     };
     private static final double[][] PREVIEW_RADIANCE_SUN_8 = {
-            {1.419630e-02, 1.494000e-02, 1.888865e-02},
-            {1.038473e+00, 4.714456e-01, 1.955413e-01},
-            {2.759280e-02, 2.457196e-02, 2.587705e-02},
-            {1.789454e-02, 1.834341e-02, 2.250549e-02},
-            {8.858680e-02, 6.062171e-02, 3.952311e-02},
-            {2.258090e-02, 1.886819e-02, 1.990654e-02}
+            {1.400972e-02, 1.480753e-02, 1.879119e-02},
+            {1.110835e+00, 5.038122e-01, 2.090749e-01},
+            {2.988587e-02, 2.558581e-02, 2.621068e-02},
+            {1.760332e-02, 1.818259e-02, 2.239172e-02},
+            {8.795442e-02, 5.732254e-02, 4.105200e-02},
+            {2.247240e-02, 1.877901e-02, 1.981469e-02}
     };
+    private static final double[] PREVIEW_PROFILE_TOTAL = {7.001337e-01, 7.001327e-01, 7.001303e-01};
+    private static final double[] PREVIEW_MAP_TOTAL_SUN_30 = {2.486358e-01, 2.481081e-01, 2.472797e-01};
+    private static final double[] PREVIEW_MAP_TOTAL_SUN_8 = {1.982199e-01, 1.981322e-01, 1.984010e-01};
+    private static final double PREVIEW_TEXEL_DEGREES = 0.5;
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void mieMatchesPublishedAndRayleighLimits(GameTestHelper helper) {
@@ -70,33 +75,131 @@ public final class CalculatedSkyGameTests {
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void phaseFunctionsIntegrateToOne(GameTestHelper helper) {
-        assertNormalised(helper, "Rayleigh", SkyPhase::rayleigh, 1.0e-3);
-        assertNormalised(helper, "Henyey-Greenstein", cosine -> SkyPhase.henyeyGreenstein(cosine, 0.8), 2.0e-3);
+        assertNormalized(helper, "Rayleigh", SkyPhase::rayleigh, 1.0e-3);
+        assertNormalized(helper, "Henyey-Greenstein", cosine -> SkyPhase.henyeyGreenstein(cosine, 0.8), 2.0e-3);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void iceHaloDatasetsAreNormalized(GameTestHelper helper) {
+        IceCrystalData data = IceCrystalData.get();
+        double worstSideFaceError = 0.0;
+        for (int row = 0; row < data.sideFaceIndexRows(); row++) {
+            double integral = 0.0;
+            for (int column = 0; column < data.sideFaceDeviationColumns(); column++) {
+                integral += data.sideFaceDensity(row, column) * data.sideFaceDeviationStep();
+            }
+            worstSideFaceError = Math.max(worstSideFaceError, Math.abs(integral - 1.0));
+        }
+        helper.assertTrue(worstSideFaceError < 1.0e-3,
+                "Side face deviation densities integrate to 1, worst row off by " + worstSideFaceError);
+        double shareSum = 0.0;
+        for (IceCrystalData.Crystal crystal : data.crystals()) {
+            shareSum += data.shareOf(crystal);
+            if (crystal.orientation() == IceCrystalData.Orientation.RANDOM) {
+                for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
+                    double[] angles = data.scattering(crystal, channel);
+                    double total = 0.0;
+                    for (int bin = 0; bin < angles.length; bin++) {
+                        total += angles[bin] * IceHaloProfile.binSolidAngle(bin);
+                    }
+                    helper.assertTrue(Math.abs(total - 1.0) < 1.0e-3,
+                            crystal.name() + " scattering integrates to " + total + " in channel " + channel);
+                }
+                continue;
+            }
+            for (int row = 0; row < data.pathShareRows(crystal); row++) {
+                for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
+                    double sum = 0.0;
+                    for (int path = 0; path < IceCrystalData.PATH_COUNT; path++) {
+                        sum += data.pathShare(crystal, row, channel, path);
+                    }
+                    helper.assertTrue(sum > 0.99 && sum < 1.0 + 1.0e-5,
+                            crystal.name() + " path shares add up to " + sum + " in row " + row + ", channel "
+                                    + channel + ", where light still inside after the tracer's last interaction "
+                                    + "is lost");
+                }
+            }
+        }
+        helper.assertTrue(Math.abs(shareSum - 1.0) < 1.0e-9, "Crystal shares add up to " + shareSum);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void iceHalosMatchOfflinePreview(GameTestHelper helper) {
+        IceCrystalData data = IceCrystalData.get();
+        double blurSigma = IceHaloMap.blurSigma(PREVIEW_TEXEL_DEGREES);
+        IceHaloProfile profile = new IceHaloProfile(data, blurSigma);
         for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
-            int haloChannel = channel;
-            assertNormalised(helper, "Halo channel " + channel, cosine -> SkyPhase.haloRing(cosine, haloChannel), 1.0e-2);
-            DoubleUnaryOperator ice = cosine -> SkyPhase.broadIce(cosine) + SkyPhase.narrowIce(cosine, haloChannel);
-            assertNormalised(helper, "Ice channel " + channel, ice, 1.0e-2);
-            double meanCosine = integrate(cosine -> cosine * ice.applyAsDouble(cosine));
-            helper.assertTrue(Math.abs(meanCosine - 0.78) < 0.01,
-                    "Ice channel " + channel + " has asymmetry " + meanCosine + ", real ice crystals about 0.78");
+            double total = profile.total(channel);
+            helper.assertTrue(Math.abs(total / PREVIEW_PROFILE_TOTAL[channel] - 1.0) < 1.0e-3,
+                    "Halo profile total in channel " + channel + " is " + total + ", preview "
+                            + PREVIEW_PROFILE_TOTAL[channel]);
+        }
+        assertHaloMap(helper, new IceHaloMap(data, Math.toRadians(30.0), blurSigma), 30.0, PREVIEW_MAP_TOTAL_SUN_30);
+        assertHaloMap(helper, new IceHaloMap(data, Math.toRadians(8.0), blurSigma), 8.0, PREVIEW_MAP_TOTAL_SUN_8);
+        helper.succeed();
+    }
+
+    /**
+     * Checks the light a halo map holds against the preview, and that its sun dogs sit just outside the minimum
+     * deviation that Bravais' effective index predicts, where the blur moves the brightest bin.
+     */
+    private static void assertHaloMap(GameTestHelper helper, IceHaloMap map, double sunElevationDegrees,
+            double[] expectedTotals) {
+        int sunRow = IceHaloMap.rowOfElevation(Math.toRadians(sunElevationDegrees));
+        for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
+            double total = map.total(channel);
+            helper.assertTrue(Math.abs(total / expectedTotals[channel] - 1.0) < 5.0e-3,
+                    "Halo map total at sun " + sunElevationDegrees + " in channel " + channel + " is " + total
+                            + ", preview " + expectedTotals[channel]);
+            int brightest = -1;
+            for (int column = 0; column < IceHaloMap.AZIMUTH_BINS; column++) {
+                double degrees = Math.toDegrees((column + 0.5) * IceHaloMap.BIN_STEP);
+                if (degrees > 15.0 && degrees < 40.0 && (brightest < 0
+                        || map.value(channel, column, sunRow) > map.value(channel, brightest, sunRow))) {
+                    brightest = column;
+                }
+            }
+            double index = IceHaloFormulas.refractiveIndex(channel);
+            double along = Math.sin(Math.toRadians(sunElevationDegrees));
+            double effectiveIndex = Math.sqrt(index * index - along * along) / Math.sqrt(1.0 - along * along);
+            double bravaisDegrees = Math.toDegrees(2.0 * Math.asin(effectiveIndex * 0.5)) - 60.0;
+            double sunDogDegrees = Math.toDegrees((brightest + 0.5) * IceHaloMap.BIN_STEP);
+            helper.assertTrue(sunDogDegrees > bravaisDegrees - 0.25 && sunDogDegrees < bravaisDegrees + 1.0,
+                    "Sun dog at sun " + sunElevationDegrees + " in channel " + channel + " is at " + sunDogDegrees
+                            + " degrees from the sun, Bravais minimum deviation " + bravaisDegrees);
+        }
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void defaultSkyMatchesOfflinePreview(GameTestHelper helper) {
+        SkySettings settings = new SkySettings(SkySettings.DEFAULT.nanobotOpticalDepth(),
+                SkySettings.DEFAULT.nanobotMedianNanometers(), SkySettings.DEFAULT.nanobotSpread(),
+                SkySettings.DEFAULT.iceOpticalDepth(), PREVIEW_TEXEL_DEGREES);
+        SkyTables tables = new SkyTables(settings);
+        helper.assertTrue(Math.abs(tables.nanobotMegatons() - 0.25 * 120.5512) < 0.01,
+                "Default nanobot mass is " + tables.nanobotMegatons() + " Mt");
+        IceCrystalData data = IceCrystalData.get();
+        double blurSigma = IceHaloMap.blurSigma(settings.actualTexelDegrees());
+        IceHaloProfile profile = new IceHaloProfile(data, blurSigma);
+        for (double sunElevationDegrees : new double[] {30.0, 8.0}) {
+            double sunElevation = Math.toRadians(sunElevationDegrees);
+            IceHaloMap map = new IceHaloMap(data, sunElevation, blurSigma);
+            SkyView view = tables.computeView(sunElevation, profile, map);
+            double[][] expected = sunElevationDegrees == 30.0 ? PREVIEW_RADIANCE_SUN_30 : PREVIEW_RADIANCE_SUN_8;
+            assertMatchesPreview(helper, view, profile, map, expected, sunElevationDegrees);
         }
         helper.succeed();
     }
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
-    public static void defaultSkyMatchesOfflinePreview(GameTestHelper helper) {
-        SkyTables tables = new SkyTables(SkySettings.DEFAULT);
-        helper.assertTrue(Math.abs(tables.nanobotMegatons() - 0.25 * 120.5512) < 0.01,
-                "Default nanobot mass is " + tables.nanobotMegatons() + " Mt");
-        assertMatchesPreview(helper, tables.computeView(Math.toRadians(30.0)), PREVIEW_RADIANCE_SUN_30, 30.0);
-        assertMatchesPreview(helper, tables.computeView(Math.toRadians(8.0)), PREVIEW_RADIANCE_SUN_8, 8.0);
-        helper.succeed();
-    }
-
-    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void fogColorFollowsTheLowSun(GameTestHelper helper) {
-        SkyView view = new SkyTables(SkySettings.DEFAULT).computeView(Math.toRadians(4.5));
+        IceCrystalData data = IceCrystalData.get();
+        double blurSigma = IceHaloMap.blurSigma(SkySettings.DEFAULT.actualTexelDegrees());
+        double sunElevation = Math.toRadians(4.5);
+        SkyView view = new SkyTables(SkySettings.DEFAULT).computeView(sunElevation,
+                new IceHaloProfile(data, blurSigma), new IceHaloMap(data, sunElevation, blurSigma));
         float[] towardSun = new float[SkyAtmosphere.CHANNEL_COUNT];
         float[] awayFromSun = new float[SkyAtmosphere.CHANNEL_COUNT];
         view.horizonDisplayColor(0.0, 1.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, towardSun);
@@ -120,13 +223,13 @@ public final class CalculatedSkyGameTests {
         helper.succeed();
     }
 
-    private static void assertMatchesPreview(GameTestHelper helper, SkyView view, double[][] expected,
-            double sunElevationDegrees) {
+    private static void assertMatchesPreview(GameTestHelper helper, SkyView view, IceHaloProfile profile,
+            IceHaloMap map, double[][] expected, double sunElevationDegrees) {
         for (int index = 0; index < DIRECTIONS_DEGREES.length; index++) {
             double azimuth = Math.toRadians(DIRECTIONS_DEGREES[index][0]);
             double elevation = Math.toRadians(DIRECTIONS_DEGREES[index][1]);
             for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
-                double actual = view.radiance(channel, azimuth, elevation);
+                double actual = view.radiance(channel, azimuth, elevation, profile, map);
                 double relativeError = Math.abs(actual / expected[index][channel] - 1.0);
                 helper.assertTrue(relativeError < 0.01,
                         "Sun " + sunElevationDegrees + ", azimuth " + DIRECTIONS_DEGREES[index][0] + ", elevation "
@@ -136,7 +239,7 @@ public final class CalculatedSkyGameTests {
         }
     }
 
-    private static void assertNormalised(GameTestHelper helper, String name, DoubleUnaryOperator phase,
+    private static void assertNormalized(GameTestHelper helper, String name, DoubleUnaryOperator phase,
             double tolerance) {
         double integral = integrate(phase);
         helper.assertTrue(Math.abs(integral - 1.0) < tolerance, name + " phase integrates to " + integral);

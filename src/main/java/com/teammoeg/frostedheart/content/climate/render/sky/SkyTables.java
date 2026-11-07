@@ -39,7 +39,6 @@ public final class SkyTables {
     private static final int GLOW_ALTITUDE_SAMPLES = 64;
     private static final int IRRADIANCE_AZIMUTH_SAMPLES = 64;
     private static final int IRRADIANCE_COSINE_SAMPLES = 32;
-    private static final int HALO_IRRADIANCE_SAMPLES = 64;
     private static final int HORIZON_AZIMUTH_SAMPLES = 64;
     private static final double MAXIMUM_TRANSFER = 0.9999;
 
@@ -226,7 +225,11 @@ public final class SkyTables {
         }
     }
 
-    public SkyView computeView(double sunElevationRadians) {
+    /**
+     * Computes the sky view for a sun elevation. The halo profile and map give the light that ice scatters onto the
+     * ground, and the map may be built for a nearby sun elevation.
+     */
+    public SkyView computeView(double sunElevationRadians, IceHaloProfile haloProfile, IceHaloMap haloMap) {
         double[] sun = {Math.cos(sunElevationRadians), Math.sin(sunElevationRadians), 0.0};
         float[] rawSky = new float[VIEW_WIDTH * VIEW_HEIGHT * CHANNELS];
         float[] ice = new float[VIEW_WIDTH * VIEW_HEIGHT * CHANNELS];
@@ -258,7 +261,8 @@ public final class SkyTables {
         transmittance.sample(SkyAtmosphere.GROUND_RADIUS, sun[1], sunTransmittance);
         for (int channel = 0; channel < CHANNELS; channel++) {
             double direct = sun[1] > 0.0 ? sun[1] * sunTransmittance[channel] : 0.0;
-            double downward = direct + skyIrradiance(rawSky, channel) + narrowIceIrradiance(ice, sun, channel);
+            double iceIrradiance = haloProfile.irradiance(channel, sun, ice) + haloMap.irradiance(channel, ice);
+            double downward = direct + skyIrradiance(rawSky, channel) + iceIrradiance;
             groundRadiance[channel] = SkyAtmosphere.GROUND_ALBEDO / Math.PI * downward
                     / (1.0 - SkyAtmosphere.GROUND_ALBEDO * sphericalAlbedo[channel]);
         }
@@ -308,7 +312,6 @@ public final class SkyTables {
         double viewSunCosine = direction[0] * sun[0] + direction[1] * sun[1] + direction[2] * sun[2];
         double rayleighPhase = SkyPhase.rayleigh(viewSunCosine);
         double aerosolPhase = SkyPhase.henyeyGreenstein(viewSunCosine, SkyAtmosphere.AEROSOL_ASYMMETRY);
-        double icePhase = SkyPhase.broadIce(viewSunCosine);
         double[] nanobotPhase = new double[CHANNELS];
         double[] viewTransmittance = new double[CHANNELS];
         double[] sunTransmittance = new double[CHANNELS];
@@ -343,8 +346,7 @@ public final class SkyTables {
                 double integral = extinction > 0.0 ? (1.0 - stepTransmittance) / extinction : stepLength;
                 double phaseWeighted = atmosphere.rayleighScattering[slot + channel] * rayleighPhase
                         + atmosphere.aerosolScattering[slot + channel] * aerosolPhase
-                        + atmosphere.nanobotScattering[slot + channel] * nanobotPhase[channel]
-                        + atmosphere.iceScattering[slot + channel] * icePhase;
+                        + atmosphere.nanobotScattering[slot + channel] * nanobotPhase[channel];
                 double source = phaseWeighted * sunTransmittance[channel] + scattering * multiple[channel];
                 radiance[channel] += viewTransmittance[channel] * source * integral;
                 iceRadiance[channel] += viewTransmittance[channel] * atmosphere.iceScattering[slot + channel]
@@ -365,30 +367,5 @@ public final class SkyTables {
             }
         }
         return sum * 2.0 * Math.PI / (IRRADIANCE_COSINE_SAMPLES * IRRADIANCE_AZIMUTH_SAMPLES);
-    }
-
-    /**
-     * Irradiance from the diffraction peak and the halo ring, which the sky view table leaves out.
-     * The peak is treated as light from the sun's direction, and the ring is sampled along its circle.
-     */
-    private static double narrowIceIrradiance(float[] ice, double[] sun, int channel) {
-        double irradiance = 0.0;
-        if (sun[1] > 0.0) {
-            irradiance += SkyAtmosphere.ICE_DIFFRACTION_FRACTION * sun[1]
-                    * SkyView.sample(ice, channel, 0.0, Math.asin(sun[1]));
-        }
-        double ringAngle = SkyPhase.haloAngleRadians(channel);
-        double ringSum = 0.0;
-        for (int index = 0; index < HALO_IRRADIANCE_SAMPLES; index++) {
-            double around = 2.0 * Math.PI * (index + 0.5) / HALO_IRRADIANCE_SAMPLES;
-            double perpendicular = Math.sin(ringAngle) * Math.cos(around);
-            double x = Math.cos(ringAngle) * sun[0] - perpendicular * sun[1];
-            double y = Math.cos(ringAngle) * sun[1] + perpendicular * sun[0];
-            double z = Math.sin(ringAngle) * Math.sin(around);
-            if (y > 0.0) {
-                ringSum += y * SkyView.sample(ice, channel, Math.atan2(z, x), Math.asin(y));
-            }
-        }
-        return irradiance + SkyAtmosphere.ICE_HALO_FRACTION * ringSum / HALO_IRRADIANCE_SAMPLES;
     }
 }

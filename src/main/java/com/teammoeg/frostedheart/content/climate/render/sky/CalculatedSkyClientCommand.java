@@ -66,7 +66,9 @@ public final class CalculatedSkyClientCommand {
                         .then(setting("nanobotSpread", FHConfig.CLIENT.calculatedSkyNanobotSpread,
                                 SkySettings.MINIMUM_NANOBOT_SPREAD, SkySettings.MAXIMUM_NANOBOT_SPREAD))
                         .then(setting("iceOpticalDepth", FHConfig.CLIENT.calculatedSkyIceOpticalDepth,
-                                0.0, SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH)));
+                                0.0, SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH))
+                        .then(setting("texelDegrees", FHConfig.CLIENT.calculatedSkyTexelDegrees,
+                                0.0, SkySettings.MAXIMUM_TEXEL_DEGREES)));
         registerCommand(event.getDispatcher(), command);
     }
 
@@ -95,6 +97,7 @@ public final class CalculatedSkyClientCommand {
         FHConfig.CLIENT.calculatedSkyNanobotMedianNanometers.set(SkySettings.DEFAULT.nanobotMedianNanometers());
         FHConfig.CLIENT.calculatedSkyNanobotSpread.set(SkySettings.DEFAULT.nanobotSpread());
         FHConfig.CLIENT.calculatedSkyIceOpticalDepth.set(SkySettings.DEFAULT.iceOpticalDepth());
+        FHConfig.CLIENT.calculatedSkyTexelDegrees.set(SkySettings.DEFAULT.texelDegrees());
         // Saving one value writes the whole client config file:
         FHConfig.CLIENT.calculatedSkyExposure.save();
         return status(context);
@@ -111,11 +114,14 @@ public final class CalculatedSkyClientCommand {
         send(context, String.format(Locale.ROOT, "Calculated sky: %s", CalculatedSkyRenderer.describeState(level)));
         send(context, String.format(Locale.ROOT,
                 "exposure %.2f, nanobotOpticalDepth %.3f (about %.0f Mt), nanobotMedianNanometers %.0f, "
-                        + "nanobotSpread %.2f, iceOpticalDepth %.3f",
+                        + "nanobotSpread %.2f, iceOpticalDepth %.3f, texelDegrees %.2f (drawn %.3f)",
                 FHConfig.CLIENT.calculatedSkyExposure.get(), settings.nanobotOpticalDepth(), megatons,
-                settings.nanobotMedianNanometers(), settings.nanobotSpread(), settings.iceOpticalDepth()));
-        send(context, String.format(Locale.ROOT, "Last build: tables %.1f ms, sky view %.1f ms",
-                CalculatedSkyRenderer.lastTablesMilliseconds(), CalculatedSkyRenderer.lastViewMilliseconds()));
+                settings.nanobotMedianNanometers(), settings.nanobotSpread(), settings.iceOpticalDepth(),
+                settings.texelDegrees(), settings.actualTexelDegrees()));
+        send(context, String.format(Locale.ROOT,
+                "Last build: tables %.1f ms, halo profile %.1f ms, halo map %.1f ms, sky view %.1f ms",
+                CalculatedSkyRenderer.lastTablesMilliseconds(), CalculatedSkyRenderer.lastHaloProfileMilliseconds(),
+                CalculatedSkyRenderer.lastHaloMapMilliseconds(), CalculatedSkyRenderer.lastViewMilliseconds()));
         return Command.SINGLE_SUCCESS;
     }
 

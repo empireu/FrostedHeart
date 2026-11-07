@@ -1,16 +1,21 @@
 #version 150
 
-// Table lookup matches SkyView.sample, and the diffraction peak and halo match SkyPhase.narrowIce.
+// Table lookups match SkyView.sample, IceHaloProfile.phase, and IceHaloMap.phase.
+// Sky texels are the cells of an equi-angular cube map aligned with the world axes, as in calculated-sky.md.
 uniform sampler2D skyView;
 uniform sampler2D iceView;
+uniform sampler2D lowHaloMap;
+uniform sampler2D highHaloMap;
+uniform sampler2D haloProfile;
 uniform mat4 inverseViewProjection;
 uniform vec3 sunDirection;
 uniform float sunSide;
 uniform float horizonDip;
 uniform float exposure;
-uniform float haloFraction;
-uniform float diffractionFraction;
-uniform float diffractionAsymmetry;
+uniform float texelFaceSize;
+uniform float haloBlend;
+uniform float haloLowestElevation;
+uniform float haloElevationSpan;
 uniform vec3 fogColor;
 uniform float rainLevel;
 uniform float thunderLevel;
@@ -19,12 +24,6 @@ in vec2 texCoord;
 out vec4 fragColor;
 
 const float PI = 3.14159265358979;
-const vec3 HALO_ANGLE = vec3(0.3787364, 0.3839724, 0.3909538);
-const float HALO_INNER_WIDTH = 0.0043633231;
-const float HALO_OUTER_WIDTH = 0.0209439510;
-const float HALO_UPPER_COSINE = 0.9455186;
-const float HALO_LOWER_COSINE = 0.8480481;
-const float HALO_ANGLE_DENSITY = 31.5278744;
 const float HORIZON_FADE = 0.08;
 
 vec3 encodeSrgb(vec3 linear) {
@@ -36,9 +35,42 @@ float interleavedGradientNoise(vec2 pixel) {
     return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
 }
 
+// Snaps the tangents of a direction on one cube face to its texel center and writes the texel's cell:
+vec2 snapOnFace(vec2 tangents, out vec2 cell) {
+    vec2 coordinate = atan(tangents) * (4.0 / PI);
+    cell = clamp(floor((coordinate + 1.0) * 0.5 * texelFaceSize), 0.0, texelFaceSize - 1.0);
+    return tan(((cell + 0.5) / texelFaceSize * 2.0 - 1.0) * (PI / 4.0));
+}
+
+// Returns the direction through the center of the sky texel and writes a position that is different for each texel:
+vec3 texelCenter(vec3 direction, out vec2 texelPosition) {
+    vec3 absolute = abs(direction);
+    vec2 cell;
+    if (absolute.x >= absolute.y && absolute.x >= absolute.z) {
+        float face = direction.x > 0.0 ? 0.0 : 1.0;
+        vec2 center = snapOnFace(direction.yz / absolute.x, cell);
+        texelPosition = cell + vec2(face * texelFaceSize, 0.0);
+        return normalize(vec3(direction.x > 0.0 ? 1.0 : -1.0, center));
+    }
+    if (absolute.y >= absolute.z) {
+        float face = direction.y > 0.0 ? 2.0 : 3.0;
+        vec2 center = snapOnFace(direction.xz / absolute.y, cell);
+        texelPosition = cell + vec2(face * texelFaceSize, 0.0);
+        return normalize(vec3(center.x, direction.y > 0.0 ? 1.0 : -1.0, center.y));
+    }
+    float face = direction.z > 0.0 ? 4.0 : 5.0;
+    vec2 center = snapOnFace(direction.xy / absolute.z, cell);
+    texelPosition = cell + vec2(face * texelFaceSize, 0.0);
+    return normalize(vec3(center, direction.z > 0.0 ? 1.0 : -1.0));
+}
+
 void main() {
     vec4 farPoint = inverseViewProjection * vec4(texCoord * 2.0 - 1.0, 1.0, 1.0);
     vec3 direction = normalize(farPoint.xyz / farPoint.w);
+    vec2 noisePosition = gl_FragCoord.xy;
+    if (texelFaceSize > 0.0) {
+        direction = texelCenter(direction, noisePosition);
+    }
 
     float elevation = asin(clamp(direction.y, -1.0, 1.0));
     float azimuth = atan(direction.z, direction.x * sunSide);
@@ -51,31 +83,22 @@ void main() {
     vec3 radiance = texture(skyView, tableCoordinate).rgb;
     vec3 ice = texture(iceView, tableCoordinate).rgb;
 
-    float sunCosine = dot(direction, sunDirection);
-    float peakDenominator = (1.0 - diffractionAsymmetry) * (1.0 - diffractionAsymmetry)
-            + 2.0 * diffractionAsymmetry * (1.0 - sunCosine);
-    float peak = (1.0 - diffractionAsymmetry * diffractionAsymmetry)
-            / (4.0 * PI * peakDenominator * sqrt(peakDenominator));
-    radiance += diffractionFraction * peak * ice;
-    if (sunCosine < HALO_UPPER_COSINE && sunCosine > HALO_LOWER_COSINE) {
-        vec3 angle = vec3(acos(sunCosine));
-        vec3 angleOffset = angle - HALO_ANGLE;
-        vec3 width = mix(vec3(HALO_OUTER_WIDTH), vec3(HALO_INNER_WIDTH), step(angleOffset, vec3(0.0)));
-        vec3 ring = HALO_ANGLE_DENSITY * exp(-0.5 * angleOffset * angleOffset / (width * width))
-                / (2.0 * PI * sin(angle));
-        radiance += haloFraction * ring * ice;
-    }
+    float sunAngle = acos(clamp(dot(direction, sunDirection), -1.0, 1.0));
+    vec3 icePhase = texture(haloProfile, vec2(sunAngle / PI, 0.5)).rgb;
+    vec2 haloCoordinate = vec2(abs(azimuth) / PI, (elevation - haloLowestElevation) / haloElevationSpan);
+    icePhase += mix(texture(lowHaloMap, haloCoordinate).rgb, texture(highHaloMap, haloCoordinate).rgb, haloBlend);
+    radiance += icePhase * ice;
 
     vec3 color = encodeSrgb(1.0 - exp(-exposure * max(radiance, vec3(0.0))));
 
-    // Same weather greying as ClientLevel.getSkyColor and SkyView.horizonDisplayColor:
-    float rainGrey = dot(color, vec3(0.3, 0.59, 0.11)) * 0.6;
-    color = mix(vec3(rainGrey), color, 1.0 - rainLevel * 0.75);
-    float thunderGrey = dot(color, vec3(0.3, 0.59, 0.11)) * 0.2;
-    color = mix(vec3(thunderGrey), color, 1.0 - thunderLevel * 0.75);
+    // Same weather graying as ClientLevel.getSkyColor and SkyView.horizonDisplayColor:
+    float rainGray = dot(color, vec3(0.3, 0.59, 0.11)) * 0.6;
+    color = mix(vec3(rainGray), color, 1.0 - rainLevel * 0.75);
+    float thunderGray = dot(color, vec3(0.3, 0.59, 0.11)) * 0.2;
+    color = mix(vec3(thunderGray), color, 1.0 - thunderLevel * 0.75);
 
     color = mix(color, fogColor, rainLevel);
     color = mix(fogColor, color, smoothstep(0.0, HORIZON_FADE, direction.y));
-    color += (interleavedGradientNoise(gl_FragCoord.xy) - 0.5) / 255.0;
+    color += (interleavedGradientNoise(noisePosition) - 0.5) / 255.0;
     fragColor = vec4(color, 1.0);
 }
