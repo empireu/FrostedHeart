@@ -48,6 +48,13 @@ final class SkyTransmittance {
     private final float[] values = new float[WIDTH * HEIGHT * CHANNELS];
 
     SkyTransmittance(SkyAtmosphere atmosphere) {
+        this(atmosphere, atmosphere.totalExtinction);
+    }
+
+    /**
+     * Builds the table from extinction coefficients stored like those of SkyAtmosphere.
+     */
+    SkyTransmittance(SkyAtmosphere atmosphere, double[] extinction) {
         double[] opticalDepth = new double[CHANNELS];
         double[] boundaries = new double[SkyRaySteps.MAXIMUM_BOUNDARIES];
         double[] travelled = new double[SkyRaySteps.maximumSteps(STEP_COUNT, ICE_BAND_STEPS)];
@@ -72,7 +79,7 @@ final class SkyTransmittance {
                 for (int step = 0; step < stepCount; step++) {
                     int slot = atmosphere.altitudeSlot(SkyAtmosphere.radiusAlongRay(radius, cosine, travelled[step]));
                     for (int channel = 0; channel < CHANNELS; channel++) {
-                        opticalDepth[channel] += atmosphere.totalExtinction[slot + channel] * stepLengths[step];
+                        opticalDepth[channel] += extinction[slot + channel] * stepLengths[step];
                     }
                 }
                 int texel = (column + row * WIDTH) * CHANNELS;

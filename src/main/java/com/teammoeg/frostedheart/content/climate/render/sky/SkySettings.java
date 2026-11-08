@@ -35,8 +35,12 @@ public record SkySettings(double nanobotOpticalDepth, double nanobotMedianNanome
     public static final double MAXIMUM_NANOBOT_MEDIAN_NANOMETERS = 1000.0;
     public static final double MINIMUM_NANOBOT_SPREAD = 1.05;
     public static final double MAXIMUM_NANOBOT_SPREAD = 3.0;
-    public static final double MAXIMUM_ICE_OPTICAL_DEPTH = 1.0;
+    public static final double MAXIMUM_ICE_OPTICAL_DEPTH = 3.0;
     public static final double MAXIMUM_TEXEL_DEGREES = 5.0;
+
+    public SkySettings withIceOpticalDepth(double depth) {
+        return new SkySettings(nanobotOpticalDepth, nanobotMedianNanometers, nanobotSpread, depth, texelDegrees);
+    }
 
     /**
      * Texels per edge of each face of the cube map that holds the sky texels, or 0 for a smooth sky.

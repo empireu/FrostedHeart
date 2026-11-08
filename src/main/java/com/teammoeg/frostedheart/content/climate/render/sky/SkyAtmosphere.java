@@ -24,6 +24,9 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
  * Air, ozone, and ground aerosol use the Earth values from Hillaire 2020.
  * The totals hold ice delta scaled, without the share ICE_DIFFRACTION_FRACTION that diffraction sends on within a few
  * degrees of its direction, so that light counts as transmitted. The ice scattering holds all of it.
+ * The diffuse totals keep only the share 1 - g of the delta scaled ice, where g is the asymmetry of the tumbling
+ * crystals. This similarity scaling serves light that SkyTables scatters as if isotropically, because the share g goes
+ * on roughly in its direction. Oriented crystals are taken to scatter like the tumbling ones.
  */
 public final class SkyAtmosphere {
     public static final int CHANNEL_COUNT = 3;
@@ -63,13 +66,17 @@ public final class SkyAtmosphere {
     final double[] iceScattering = new double[ALTITUDE_SAMPLE_COUNT * CHANNEL_COUNT];
     final double[] totalScattering = new double[ALTITUDE_SAMPLE_COUNT * CHANNEL_COUNT];
     final double[] totalExtinction = new double[ALTITUDE_SAMPLE_COUNT * CHANNEL_COUNT];
+    final double[] diffuseScattering = new double[ALTITUDE_SAMPLE_COUNT * CHANNEL_COUNT];
+    final double[] diffuseExtinction = new double[ALTITUDE_SAMPLE_COUNT * CHANNEL_COUNT];
 
     SkyAtmosphere(SkySettings settings) {
         this.nanobotBands = SkyParticleOptics.forDistribution(settings.nanobotMedianNanometers(),
                 settings.nanobotSpread());
         double greenCrossSection = nanobotBands.crossSectionSquareMeters()[GREEN_CHANNEL];
+        IceCrystalData crystals = IceCrystalData.get();
         for (int channel = 0; channel < CHANNEL_COUNT; channel++) {
             double nanobotRatio = nanobotBands.crossSectionSquareMeters()[channel] / greenCrossSection;
+            double iceAsymmetry = crystals.tumblingAsymmetry(channel);
             for (int index = 0; index < ALTITUDE_SAMPLE_COUNT; index++) {
                 double altitude = index * ALTITUDE_STEP;
                 double rayleigh = RAYLEIGH_COEFFICIENT[channel] * Math.exp(-altitude / RAYLEIGH_SCALE_HEIGHT);
@@ -88,6 +95,8 @@ public final class SkyAtmosphere {
                 totalScattering[slot] = rayleigh + AEROSOL_SCATTERING * aerosolDensity + nanobot + deltaScaledIce;
                 totalExtinction[slot] = rayleigh + (AEROSOL_SCATTERING + AEROSOL_ABSORPTION) * aerosolDensity
                         + ozone + nanobot + deltaScaledIce;
+                diffuseScattering[slot] = totalScattering[slot] - iceAsymmetry * deltaScaledIce;
+                diffuseExtinction[slot] = totalExtinction[slot] - iceAsymmetry * deltaScaledIce;
             }
         }
     }

@@ -25,6 +25,8 @@ import java.util.Arrays;
  * Lookup tables of Hillaire 2020 for one set of settings, built on the CPU.
  * Multiple scattering is computed against a black ground. Light reflected between snow and atmosphere is added
  * afterwards as L_ground = (A / pi) * E_0 / (1 - A * S), where S is the spherical albedo of the atmosphere.
+ * The multiple scattering table uses the diffuse coefficients of SkyAtmosphere, lit by the sun through a transmittance
+ * built from them, so that the light ice scatters forward lights deeper layers like the sun's beam.
  * The tables do not change after construction, so other threads may read them while a view is computed. Computing a
  * view reuses scratch buffers of the instance, so one thread at a time computes views.
  */
@@ -99,6 +101,7 @@ public final class SkyTables {
     private final SkySettings settings;
     private final SkyAtmosphere atmosphere;
     private final SkyTransmittance transmittance;
+    private final SkyTransmittance diffuseTransmittance;
     private final double[] multipleScattering =
             new double[MULTIPLE_SCATTERING_ROWS * MULTIPLE_SCATTERING_COLUMNS * CHANNELS];
     private final double[] glowResponse = new double[(GLOW_VIEW_SAMPLES + 1) * CHANNELS];
@@ -133,6 +136,7 @@ public final class SkyTables {
         this.settings = settings;
         this.atmosphere = new SkyAtmosphere(settings);
         this.transmittance = new SkyTransmittance(atmosphere);
+        this.diffuseTransmittance = new SkyTransmittance(atmosphere, atmosphere.diffuseExtinction);
         buildMultipleScattering();
         buildGlowResponse();
         buildViewRays();
@@ -237,7 +241,8 @@ public final class SkyTables {
             for (int column = 0; column < MULTIPLE_SCATTERING_COLUMNS; column++) {
                 double sunCosine = column / (MULTIPLE_SCATTERING_COLUMNS - 1.0) * 2.0 - 1.0;
                 double sunSine = Math.sqrt(Math.max(0.0, 1.0 - sunCosine * sunCosine));
-                integrateIsotropic(radius, sunSine, sunCosine, true, secondOrder, transfer, groundReach);
+                integrateIsotropic(radius, sunSine, sunCosine, true, atmosphere.diffuseScattering,
+                        atmosphere.diffuseExtinction, secondOrder, transfer, groundReach);
                 int texel = (column + row * MULTIPLE_SCATTERING_COLUMNS) * CHANNELS;
                 for (int channel = 0; channel < CHANNELS; channel++) {
                     multipleScattering[texel + channel] =
@@ -271,8 +276,14 @@ public final class SkyTables {
                 / (SkyAtmosphere.ATMOSPHERE_HEIGHT - ICE_BAND_HIGH_ALTITUDE) * ROWS_ABOVE_ICE_BAND;
     }
 
+    /**
+     * Sums over directions from a point, with the given coefficients, the share of isotropic light scattered again,
+     * the share that reaches the ground, and with the sun the sunlight scattered once toward the point. The sun lights
+     * the samples through the diffuse transmittance.
+     */
     private void integrateIsotropic(double radius, double sunSine, double sunCosine, boolean withSun,
-            double[] secondOrder, double[] transfer, double[] groundReach) {
+            double[] scatteringCoefficients, double[] extinctionCoefficients, double[] secondOrder, double[] transfer,
+            double[] groundReach) {
         Arrays.fill(secondOrder, 0.0);
         Arrays.fill(transfer, 0.0);
         Arrays.fill(groundReach, 0.0);
@@ -298,11 +309,11 @@ public final class SkyTables {
                         double sampleX = directionX * travelled;
                         double sampleY = radius + cosine * travelled;
                         double sampleSunCosine = (sampleX * sunSine + sampleY * sunCosine) / sampleRadius;
-                        transmittance.sample(sampleRadius, sampleSunCosine, sun);
+                        diffuseTransmittance.sample(sampleRadius, sampleSunCosine, sun);
                     }
                     for (int channel = 0; channel < CHANNELS; channel++) {
-                        double scattering = atmosphere.totalScattering[slot + channel];
-                        double extinction = atmosphere.totalExtinction[slot + channel];
+                        double scattering = scatteringCoefficients[slot + channel];
+                        double extinction = extinctionCoefficients[slot + channel];
                         double stepTransmittance = Math.exp(-extinction * stepLength);
                         double integral = extinction > 0.0 ? (1.0 - stepTransmittance) / extinction : stepLength;
                         if (withSun) {
@@ -334,8 +345,8 @@ public final class SkyTables {
         double[] sourceByAltitude = new double[(GLOW_ALTITUDE_SAMPLES + 1) * CHANNELS];
         for (int sample = 0; sample <= GLOW_ALTITUDE_SAMPLES; sample++) {
             double altitude = Math.max(1.0, sample / (double) GLOW_ALTITUDE_SAMPLES * SkyAtmosphere.ATMOSPHERE_HEIGHT);
-            integrateIsotropic(SkyAtmosphere.GROUND_RADIUS + altitude, 0.0, 1.0, false, secondOrder, transfer,
-                    groundReach);
+            integrateIsotropic(SkyAtmosphere.GROUND_RADIUS + altitude, 0.0, 1.0, false, atmosphere.totalScattering,
+                    atmosphere.totalExtinction, secondOrder, transfer, groundReach);
             for (int channel = 0; channel < CHANNELS; channel++) {
                 sourceByAltitude[sample * CHANNELS + channel] =
                         groundReach[channel] / (1.0 - Math.min(MAXIMUM_TRANSFER, transfer[channel]));

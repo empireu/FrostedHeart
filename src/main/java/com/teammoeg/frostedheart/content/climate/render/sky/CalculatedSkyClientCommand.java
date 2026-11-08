@@ -20,6 +20,7 @@
 package com.teammoeg.frostedheart.content.climate.render.sky;
 
 import com.mojang.brigadier.Command;
+import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
@@ -68,6 +69,13 @@ public final class CalculatedSkyClientCommand {
                                 SkySettings.MINIMUM_NANOBOT_SPREAD, SkySettings.MAXIMUM_NANOBOT_SPREAD))
                         .then(setting("iceOpticalDepth", FHConfig.CLIENT.calculatedSkyIceOpticalDepth,
                                 0.0, SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH))
+                        .then(literal("iceFollowsWeather").then(Commands.argument("value", BoolArgumentType.bool())
+                                .executes(context -> {
+                                    FHConfig.CLIENT.calculatedSkyIceFollowsWeather.set(
+                                            BoolArgumentType.getBool(context, "value"));
+                                    FHConfig.CLIENT.calculatedSkyIceFollowsWeather.save();
+                                    return status(context);
+                                })))
                         .then(setting("texelDegrees", FHConfig.CLIENT.calculatedSkyTexelDegrees,
                                 0.0, SkySettings.MAXIMUM_TEXEL_DEGREES)));
         if (CalculatedSkyScreenshots.ENABLED) {
@@ -101,6 +109,7 @@ public final class CalculatedSkyClientCommand {
         FHConfig.CLIENT.calculatedSkyNanobotMedianNanometers.set(SkySettings.DEFAULT.nanobotMedianNanometers());
         FHConfig.CLIENT.calculatedSkyNanobotSpread.set(SkySettings.DEFAULT.nanobotSpread());
         FHConfig.CLIENT.calculatedSkyIceOpticalDepth.set(SkySettings.DEFAULT.iceOpticalDepth());
+        FHConfig.CLIENT.calculatedSkyIceFollowsWeather.set(true);
         FHConfig.CLIENT.calculatedSkyTexelDegrees.set(SkySettings.DEFAULT.texelDegrees());
         // Saving one value writes the whole client config file:
         FHConfig.CLIENT.calculatedSkyExposure.save();
@@ -122,6 +131,7 @@ public final class CalculatedSkyClientCommand {
                 FHConfig.CLIENT.calculatedSkyExposure.get(), settings.nanobotOpticalDepth(), megatons,
                 settings.nanobotMedianNanometers(), settings.nanobotSpread(), settings.iceOpticalDepth(),
                 settings.texelDegrees(), settings.actualTexelDegrees()));
+        send(context, IceWeatherDepth.describe(Minecraft.getInstance().getFrameTime()));
         send(context, String.format(Locale.ROOT,
                 "Last build: tables %.1f ms, halo profile %.1f ms, halo map %.1f ms, sky view %.1f ms",
                 CalculatedSkyRenderer.lastTablesMilliseconds(), CalculatedSkyRenderer.lastHaloProfileMilliseconds(),

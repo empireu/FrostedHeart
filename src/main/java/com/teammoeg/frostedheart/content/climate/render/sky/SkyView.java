@@ -69,16 +69,19 @@ public final class SkyView {
 
     /**
      * Writes the displayed sky color at the horizon into the result, tone mapped and grayed as calculated_sky.fsh does.
-     * The radiance of the two views is blended by the high view's weight, as the shader blends them.
+     * The radiance of the four views is blended as the shader blends them, by the high sun's weight between views of
+     * the two sun elevations and by the high depth's weight between views of the two ice depths.
      * Single scattering by ice is left out, so the color stays smooth near the sun and across halo arcs.
      * A horizontal fraction of 1 uses the given azimuth, and 0 uses the mean over all azimuths.
      */
-    public static void horizonDisplayColor(SkyView lowView, SkyView highView, double highWeight, double azimuth,
-            double horizontalFraction, double exposure, float rainLevel, float thunderLevel, float[] result) {
+    public static void horizonDisplayColor(SkyView lowDepthLowSun, SkyView lowDepthHighSun, SkyView highDepthLowSun,
+            SkyView highDepthHighSun, double sunWeight, double depthWeight, double azimuth, double horizontalFraction,
+            double exposure, float rainLevel, float thunderLevel, float[] result) {
         for (int channel = 0; channel < CHANNELS; channel++) {
-            double lowRadiance = lowView.horizonRadiance(channel, azimuth, horizontalFraction);
-            double highRadiance = highView.horizonRadiance(channel, azimuth, horizontalFraction);
-            double radiance = lowRadiance + (highRadiance - lowRadiance) * highWeight;
+            double radiance = blend(lowDepthLowSun.horizonRadiance(channel, azimuth, horizontalFraction),
+                    lowDepthHighSun.horizonRadiance(channel, azimuth, horizontalFraction),
+                    highDepthLowSun.horizonRadiance(channel, azimuth, horizontalFraction),
+                    highDepthHighSun.horizonRadiance(channel, azimuth, horizontalFraction), sunWeight, depthWeight);
             result[channel] = (float) encodeSrgb(1.0 - Math.exp(-exposure * Math.max(0.0, radiance)));
         }
         greyByWeather(result, 0.6F, rainLevel);
@@ -89,15 +92,17 @@ public final class SkyView {
      * Writes the sky light on the terrain into the result, as the lightmap color at full sky light.
      * In clear weather it is the ground as the sky's exposure displays it, relative to snow under a sun of unit
      * irradiance at the zenith, scaled down where a channel would pass 1, and at least vanilla's sky light at night.
-     * The ground radiance of the two views is blended by the high view's weight, and rain blends the result into
+     * The ground radiance of the four views is blended as in horizonDisplayColor, and rain blends the result into
      * vanilla's sky light for the given sky darkness.
      */
-    public static void daylightColor(SkyView lowView, SkyView highView, double highWeight, double exposure,
-            float rainLevel, float skyDarken, float[] result) {
+    public static void daylightColor(SkyView lowDepthLowSun, SkyView lowDepthHighSun, SkyView highDepthLowSun,
+            SkyView highDepthHighSun, double sunWeight, double depthWeight, double exposure, float rainLevel,
+            float skyDarken, float[] result) {
         double brightest = encodeSrgb(1.0 - Math.exp(-exposure * SkyAtmosphere.GROUND_ALBEDO / Math.PI));
         for (int channel = 0; channel < CHANNELS; channel++) {
-            double lowRadiance = lowView.groundRadiance[channel];
-            double radiance = lowRadiance + (highView.groundRadiance[channel] - lowRadiance) * highWeight;
+            double radiance = blend(lowDepthLowSun.groundRadiance[channel], lowDepthHighSun.groundRadiance[channel],
+                    highDepthLowSun.groundRadiance[channel], highDepthHighSun.groundRadiance[channel], sunWeight,
+                    depthWeight);
             result[channel] = (float) encodeSrgb(1.0 - Math.exp(-exposure * Math.max(0.0, radiance)));
             brightest = Math.max(brightest, result[channel]);
         }
@@ -114,6 +119,13 @@ public final class SkyView {
     public static float vanillaSkyLight(int channel, float skyDarken) {
         float tint = channel == 2 ? 1.0F : skyDarken + (1.0F - skyDarken) * 0.35F;
         return tint * (skyDarken * 0.95F + 0.05F);
+    }
+
+    private static double blend(double lowDepthLowSun, double lowDepthHighSun, double highDepthLowSun,
+            double highDepthHighSun, double sunWeight, double depthWeight) {
+        double lowDepth = lowDepthLowSun + (lowDepthHighSun - lowDepthLowSun) * sunWeight;
+        double highDepth = highDepthLowSun + (highDepthHighSun - highDepthLowSun) * sunWeight;
+        return lowDepth + (highDepth - lowDepth) * depthWeight;
     }
 
     private double horizonRadiance(int channel, double azimuth, double horizontalFraction) {

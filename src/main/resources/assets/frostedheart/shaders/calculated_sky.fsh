@@ -2,15 +2,20 @@
 
 // Table lookups match SkyView.sample, IceHaloProfile.phase, and IceHaloMap.phase.
 // Sky texels are the cells of an equi-angular cube map aligned with the world axes, as in calculated-sky.md.
-uniform sampler2D lowSkyView;
-uniform sampler2D highSkyView;
-uniform sampler2D lowIceView;
-uniform sampler2D highIceView;
+// Views exist for two ice depths and two sun elevations, and the radiance is blended linearly between them.
+uniform sampler2D lowDepthLowSunSky;
+uniform sampler2D lowDepthHighSunSky;
+uniform sampler2D highDepthLowSunSky;
+uniform sampler2D highDepthHighSunSky;
+uniform sampler2D lowDepthLowSunIce;
+uniform sampler2D lowDepthHighSunIce;
+uniform sampler2D highDepthLowSunIce;
+uniform sampler2D highDepthHighSunIce;
 uniform sampler2D lowHaloMap;
 uniform sampler2D highHaloMap;
 uniform sampler2D haloProfile;
-uniform sampler2D sunRadiance;
-uniform sampler2D diffractionWeight;
+// Columns hold the sun's radiance at the low and the high depth, then the diffraction weights at the low and the high depth:
+uniform sampler2D rowTables;
 uniform mat4 inverseViewProjection;
 uniform vec3 sunDirection;
 uniform float sunSide;
@@ -19,6 +24,7 @@ uniform float horizonDip;
 uniform float exposure;
 uniform float texelFaceSize;
 uniform float viewBlend;
+uniform float depthBlend;
 uniform float haloBlend;
 uniform float haloLowestElevation;
 uniform float haloElevationSpan;
@@ -100,18 +106,30 @@ void main() {
             : offset / (1.0 - horizonDip * 2.0 / PI);
     float position = sign(latitude) * sqrt(abs(latitude) * 2.0 / PI);
     vec2 tableCoordinate = vec2((azimuth + PI) / (2.0 * PI), 0.5 + 0.5 * position);
-    vec3 radiance = mix(texture(lowSkyView, tableCoordinate).rgb, texture(highSkyView, tableCoordinate).rgb, viewBlend);
-    vec3 ice = mix(texture(lowIceView, tableCoordinate).rgb, texture(highIceView, tableCoordinate).rgb, viewBlend);
+    vec3 lowDepthSky = mix(texture(lowDepthLowSunSky, tableCoordinate).rgb,
+            texture(lowDepthHighSunSky, tableCoordinate).rgb, viewBlend);
+    vec3 highDepthSky = mix(texture(highDepthLowSunSky, tableCoordinate).rgb,
+            texture(highDepthHighSunSky, tableCoordinate).rgb, viewBlend);
+    vec3 lowDepthIce = mix(texture(lowDepthLowSunIce, tableCoordinate).rgb,
+            texture(lowDepthHighSunIce, tableCoordinate).rgb, viewBlend);
+    vec3 highDepthIce = mix(texture(highDepthLowSunIce, tableCoordinate).rgb,
+            texture(highDepthHighSunIce, tableCoordinate).rgb, viewBlend);
+    vec3 lowDepthSun = texture(rowTables, vec2(0.125, tableCoordinate.y)).rgb;
+    vec3 highDepthSun = texture(rowTables, vec2(0.375, tableCoordinate.y)).rgb;
+    vec3 lowDepthDiffraction = texture(rowTables, vec2(0.625, tableCoordinate.y)).rgb;
+    vec3 highDepthDiffraction = texture(rowTables, vec2(0.875, tableCoordinate.y)).rgb;
+    vec3 radiance = mix(lowDepthSky, highDepthSky, depthBlend);
+    vec3 ice = mix(lowDepthIce, highDepthIce, depthBlend);
+    // Each depth's diffraction weight scales its own ice view, so the blend matches the blend of whole radiances:
+    vec3 diffractedIce = mix(lowDepthDiffraction * lowDepthIce, highDepthDiffraction * highDepthIce, depthBlend);
 
     float sunAngle = acos(clamp(dot(direction, sunDirection), -1.0, 1.0));
     // The profile holds the tumbling crystals in its first row and the diffraction peak in its second:
-    vec3 icePhase = texture(haloProfile, vec2(sunAngle / PI, 0.25)).rgb
-            + texture(diffractionWeight, vec2(0.5, tableCoordinate.y)).rgb
-            * texture(haloProfile, vec2(sunAngle / PI, 0.75)).rgb;
+    vec3 crystalPhase = texture(haloProfile, vec2(sunAngle / PI, 0.25)).rgb;
     vec2 haloCoordinate = vec2(abs(azimuth) / PI, (elevation - haloLowestElevation) / haloElevationSpan);
-    icePhase += mix(texture(lowHaloMap, haloCoordinate).rgb, texture(highHaloMap, haloCoordinate).rgb, haloBlend);
-    radiance += icePhase * ice;
-    radiance += sunCoverage(pixelDirection, pixelAngle) * texture(sunRadiance, vec2(0.5, tableCoordinate.y)).rgb;
+    crystalPhase += mix(texture(lowHaloMap, haloCoordinate).rgb, texture(highHaloMap, haloCoordinate).rgb, haloBlend);
+    radiance += crystalPhase * ice + texture(haloProfile, vec2(sunAngle / PI, 0.75)).rgb * diffractedIce;
+    radiance += sunCoverage(pixelDirection, pixelAngle) * mix(lowDepthSun, highDepthSun, depthBlend);
 
     vec3 color = encodeSrgb(1.0 - exp(-exposure * max(radiance, vec3(0.0))));
 

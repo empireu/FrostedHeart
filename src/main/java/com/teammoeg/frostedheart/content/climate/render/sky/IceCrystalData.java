@@ -76,6 +76,7 @@ public final class IceCrystalData {
     private final double sideFaceDeviationStep;
     private final Map<String, PathShares> pathShares;
     private final Map<String, double[][]> scattering;
+    private final double[] tumblingAsymmetry = new double[CHANNELS];
 
     private record PathShares(double lowestElevationDegrees, double[][] rows) {
     }
@@ -93,6 +94,24 @@ public final class IceCrystalData {
         this.sideFaceDeviationStep = Math.PI / sideFaceDensities[0].length;
         this.pathShares = pathShares;
         this.scattering = scattering;
+        double angleStep = Math.PI / SCATTERING_ANGLE_BINS;
+        for (int channel = 0; channel < CHANNELS; channel++) {
+            double energy = 0.0;
+            double cosineEnergy = 0.0;
+            for (Crystal crystal : crystals) {
+                if (crystal.orientation() != Orientation.RANDOM) {
+                    continue;
+                }
+                double[] angles = scattering.get(crystal.name())[channel];
+                for (int bin = 0; bin < SCATTERING_ANGLE_BINS; bin++) {
+                    double solidAngle = 2.0 * Math.PI * (Math.cos(bin * angleStep) - Math.cos((bin + 1) * angleStep));
+                    double weighted = crystal.share() * angles[bin] * solidAngle;
+                    energy += weighted;
+                    cosineEnergy += weighted * Math.cos((bin + 0.5) * angleStep);
+                }
+            }
+            tumblingAsymmetry[channel] = energy > 0.0 ? cosineEnergy / energy : 0.0;
+        }
     }
 
     public static IceCrystalData get() {
@@ -199,6 +218,14 @@ public final class IceCrystalData {
      */
     public double[] scattering(Crystal crystal, int channel) {
         return scattering.get(crystal.name())[channel];
+    }
+
+    /**
+     * The mean cosine of the scattering angle of the tumbling crystal kinds, weighted by their shares, without
+     * diffraction.
+     */
+    public double tumblingAsymmetry(int channel) {
+        return tumblingAsymmetry[channel];
     }
 
     private static IceCrystalData load() {

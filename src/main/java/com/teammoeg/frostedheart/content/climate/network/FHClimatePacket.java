@@ -46,6 +46,8 @@ public class FHClimatePacket implements CMessage {
     private final ClimateType globalClimate;
     private final int wind;
     private final float humidity;
+    private final long lastSnowEndHour;
+    private final long nextSnowStartHour;
 
     public FHClimatePacket() {
         data = new short[0];
@@ -55,6 +57,8 @@ public class FHClimatePacket implements CMessage {
         globalClimate = ClimateType.NONE;
         wind = 0;
         humidity = 0;
+        lastSnowEndHour = -1;
+        nextSnowStartHour = -1;
     }
 
     private FHClimatePacket(FriendlyByteBuf buffer) {
@@ -65,6 +69,8 @@ public class FHClimatePacket implements CMessage {
         globalClimate = ClimateType.values()[buffer.readByte() & 0xff];
         wind = buffer.readVarInt();
         humidity = buffer.readFloat();
+        lastSnowEndHour = buffer.readLong();
+        nextSnowStartHour = buffer.readLong();
     }
 
     public FHClimatePacket(WorldClimate climateData, ServerPlayer p) {
@@ -76,6 +82,8 @@ public class FHClimatePacket implements CMessage {
             globalClimate = ClimateType.NONE;
             wind = 0;
             humidity = 0;
+            lastSnowEndHour = -1;
+            nextSnowStartHour = -1;
     	}else {
     		ChunkPos pos=new ChunkPos(p.blockPosition());
 	        data = climateData.getForecastFrames(pos);
@@ -85,6 +93,8 @@ public class FHClimatePacket implements CMessage {
 	        globalClimate = climateData.getGlobalClimate();
             wind = climateData.getWind();
             humidity = climateData.getHumidity();
+            lastSnowEndHour = climateData.getLastSnowEndHour(pos);
+            nextSnowStartHour = climateData.getNextSnowStartHour(pos);
     	}
     }
 
@@ -97,6 +107,8 @@ public class FHClimatePacket implements CMessage {
         buffer.writeByte((byte) globalClimate.ordinal());
         buffer.writeVarInt(wind);
         buffer.writeFloat(humidity);
+        buffer.writeLong(lastSnowEndHour);
+        buffer.writeLong(nextSnowStartHour);
     }
 
     public void handle(Supplier<NetworkEvent.Context> context) {
@@ -124,6 +136,8 @@ public class FHClimatePacket implements CMessage {
             ClientClimateData.secs = sec;
             ClientClimateData.wind = wind;
             ClientClimateData.humidity = humidity;
+            ClientClimateData.lastSnowEndHour = lastSnowEndHour;
+            ClientClimateData.nextSnowStartHour = nextSnowStartHour;
         });
         context.get().setPacketHandled(true);
     }

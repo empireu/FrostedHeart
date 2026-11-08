@@ -85,7 +85,7 @@ import static com.teammoeg.frostedheart.infrastructure.command.CommandHelper.lit
  * A set is a JSON file in the sky-shots folder of the game directory that lists poses, times of day, weather, and
  * variants of the sky config, either once or in groups. Every combination within a group becomes one screenshot,
  * ordered by pose, weather, time, and variant.
- * The time, weather, and view direction are held on the client, so the server's clock and climate do not move.
+ * The time, weather, and view direction are held on the client only, so the server's clock and climate keep running.
  * Poses with a position or offset move the player through the integrated server.
  * Each shot waits until the sky is built for its config and sun elevation, the terrain is drawn after a move, and fog
  * has settled, then saves the frame and a line of manifest.tsv in a new folder under screenshots/sky-shots.
@@ -109,11 +109,11 @@ public final class CalculatedSkyScreenshots {
     private static final Set<String> POSE_KEYS = Set.of("name", "yaw", "pitch", "position", "offset", "times",
             "weather");
     private static final Set<String> VARIANT_KEYS = Set.of("name", "sky", "exposure", "nanobotOpticalDepth",
-            "nanobotMedianNanometers", "nanobotSpread", "iceOpticalDepth", "texelDegrees");
+            "nanobotMedianNanometers", "nanobotSpread", "iceFollowsWeather", "iceOpticalDepth", "texelDegrees");
     private static final String MANIFEST_HEADER = String.join("\t", "index", "file", "pose", "x", "y", "z", "yaw",
             "pitch", "time", "sunDegrees", "weather", "rain", "thunder", "variant", "sky", "exposure",
-            "nanobotOpticalDepth", "nanobotMedianNanometers", "nanobotSpread", "iceOpticalDepth", "texelDegrees",
-            "status", "framesPerSecond", "waitSeconds");
+            "nanobotOpticalDepth", "nanobotMedianNanometers", "nanobotSpread", "iceFollowsWeather", "iceOpticalDepth",
+            "drawnIceOpticalDepth", "texelDegrees", "status", "framesPerSecond", "waitSeconds");
 
     private static final Consumer<TickEvent.RenderTickEvent> HOLD_LISTENER = CalculatedSkyScreenshots::onHoldTick;
     private static final Consumer<ClientPlayerNetworkEvent.LoggingOut> LOGOUT_LISTENER =
@@ -176,18 +176,20 @@ public final class CalculatedSkyScreenshots {
     }
 
     private record Variant(String name, boolean sky, double exposure, double nanobotOpticalDepth,
-            double nanobotMedianNanometers, double nanobotSpread, double iceOpticalDepth, double texelDegrees) {
+            double nanobotMedianNanometers, double nanobotSpread, boolean iceFollowsWeather, double iceOpticalDepth,
+            double texelDegrees) {
         static Variant fromConfig(String name) {
             return new Variant(name, FHConfig.CLIENT.calculatedSky.get(), FHConfig.CLIENT.calculatedSkyExposure.get(),
                     FHConfig.CLIENT.calculatedSkyNanobotOpticalDepth.get(),
                     FHConfig.CLIENT.calculatedSkyNanobotMedianNanometers.get(),
-                    FHConfig.CLIENT.calculatedSkyNanobotSpread.get(), FHConfig.CLIENT.calculatedSkyIceOpticalDepth.get(),
-                    FHConfig.CLIENT.calculatedSkyTexelDegrees.get());
+                    FHConfig.CLIENT.calculatedSkyNanobotSpread.get(),
+                    FHConfig.CLIENT.calculatedSkyIceFollowsWeather.get(),
+                    FHConfig.CLIENT.calculatedSkyIceOpticalDepth.get(), FHConfig.CLIENT.calculatedSkyTexelDegrees.get());
         }
 
         Variant withSky(String newName, boolean newSky) {
             return new Variant(newName, newSky, exposure, nanobotOpticalDepth, nanobotMedianNanometers, nanobotSpread,
-                    iceOpticalDepth, texelDegrees);
+                    iceFollowsWeather, iceOpticalDepth, texelDegrees);
         }
 
         /**
@@ -199,6 +201,7 @@ public final class CalculatedSkyScreenshots {
             FHConfig.CLIENT.calculatedSkyNanobotOpticalDepth.set(nanobotOpticalDepth);
             FHConfig.CLIENT.calculatedSkyNanobotMedianNanometers.set(nanobotMedianNanometers);
             FHConfig.CLIENT.calculatedSkyNanobotSpread.set(nanobotSpread);
+            FHConfig.CLIENT.calculatedSkyIceFollowsWeather.set(iceFollowsWeather);
             FHConfig.CLIENT.calculatedSkyIceOpticalDepth.set(iceOpticalDepth);
             FHConfig.CLIENT.calculatedSkyTexelDegrees.set(texelDegrees);
         }
@@ -742,6 +745,9 @@ public final class CalculatedSkyScreenshots {
                             warnings),
                     clamped(entry, "nanobotSpread", startVariant.nanobotSpread(), SkySettings.MINIMUM_NANOBOT_SPREAD,
                             SkySettings.MAXIMUM_NANOBOT_SPREAD, warnings),
+                    // A variant that names an ice optical depth draws it unless it asks to follow the weather:
+                    bool(entry, "iceFollowsWeather", !entry.has("iceOpticalDepth") && startVariant.iceFollowsWeather(),
+                            warnings),
                     clamped(entry, "iceOpticalDepth", startVariant.iceOpticalDepth(), 0.0,
                             SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH, warnings),
                     clamped(entry, "texelDegrees", startVariant.texelDegrees(), 0.0, SkySettings.MAXIMUM_TEXEL_DEGREES,
@@ -1081,7 +1087,8 @@ public final class CalculatedSkyScreenshots {
                     decimal(level.getRainLevel(partialTick)), decimal(level.getThunderLevel(partialTick)),
                     variant.name(), Boolean.toString(variant.sky()), decimal(variant.exposure()),
                     decimal(variant.nanobotOpticalDepth()), decimal(variant.nanobotMedianNanometers()),
-                    decimal(variant.nanobotSpread()), decimal(variant.iceOpticalDepth()),
+                    decimal(variant.nanobotSpread()), Boolean.toString(variant.iceFollowsWeather()),
+                    decimal(variant.iceOpticalDepth()), decimal(IceWeatherDepth.update(partialTick)),
                     decimal(variant.texelDegrees()), status, decimal(framesWaited / Math.max(waited, 1.0e-3)),
                     decimal(waited)));
         }
