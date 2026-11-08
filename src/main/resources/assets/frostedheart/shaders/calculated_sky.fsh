@@ -10,6 +10,7 @@ uniform sampler2D lowHaloMap;
 uniform sampler2D highHaloMap;
 uniform sampler2D haloProfile;
 uniform sampler2D sunRadiance;
+uniform sampler2D diffractionWeight;
 uniform mat4 inverseViewProjection;
 uniform vec3 sunDirection;
 uniform float sunSide;
@@ -103,7 +104,10 @@ void main() {
     vec3 ice = mix(texture(lowIceView, tableCoordinate).rgb, texture(highIceView, tableCoordinate).rgb, viewBlend);
 
     float sunAngle = acos(clamp(dot(direction, sunDirection), -1.0, 1.0));
-    vec3 icePhase = texture(haloProfile, vec2(sunAngle / PI, 0.5)).rgb;
+    // The profile holds the tumbling crystals in its first row and the diffraction peak in its second:
+    vec3 icePhase = texture(haloProfile, vec2(sunAngle / PI, 0.25)).rgb
+            + texture(diffractionWeight, vec2(0.5, tableCoordinate.y)).rgb
+            * texture(haloProfile, vec2(sunAngle / PI, 0.75)).rgb;
     vec2 haloCoordinate = vec2(abs(azimuth) / PI, (elevation - haloLowestElevation) / haloElevationSpan);
     icePhase += mix(texture(lowHaloMap, haloCoordinate).rgb, texture(highHaloMap, haloCoordinate).rgb, haloBlend);
     radiance += icePhase * ice;

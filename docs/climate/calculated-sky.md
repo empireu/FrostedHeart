@@ -1,7 +1,7 @@
 # Calculated Sky
 
 - Status: `Partial`
-- Last verified: `2026-11-08`, against source and the GameTests below. The ray steps across the ice band were checked against a converged reference outside the game that day. The first version, with one ice lobe and no snow fade, was seen in `runClient` on `2026-11-05`. The three-part ice phase and a snow fade toward gray were seen in `runClient` on `2026-11-06`, and the fog color from the sky and the snow fade toward the fog color later that day. The ice crystal halos and the sky texels were first seen in `runClient` on `2026-11-07`, with no popping as the sun moves. The sky's own sun, which replaces vanilla's, and the blended sky views were seen in `runClient` the same day. The screenshot harness took its first sets in `runClient` the same day, the last one recorded with `beginSet` and `pose`. The daylight on the terrain was seen in `runClient` the same day, with torch light unchanged.
+- Last verified: `2026-11-08`, against source and the GameTests below. The ray steps across the ice band were checked against a converged reference outside the game that day, and delta scaled ice and the transmittance rows in the ice band against the preview's path tracer and a converged table. Delta scaled ice was seen in `runClient` the same day at ice optical depths `0.1` and `0.5`. The first version, with one ice lobe and no snow fade, was seen in `runClient` on `2026-11-05`. The three-part ice phase and a snow fade toward gray were seen in `runClient` on `2026-11-06`, and the fog color from the sky and the snow fade toward the fog color later that day. The ice crystal halos and the sky texels were first seen in `runClient` on `2026-11-07`, with no popping as the sun moves. The sky's own sun, which replaces vanilla's, and the blended sky views were seen in `runClient` the same day. The screenshot harness took its first sets in `runClient` the same day, the last one recorded with `beginSet` and `pose`. The daylight on the terrain was seen in `runClient` the same day, with torch light unchanged.
 - Scope: the optional overworld sky color calculated from air, titanium dioxide nanobots, and ice crystals, its halo display and sun, the fog color taken from it outside snow, the sky light of the lightmap taken from it outside rain, the client config and client command, and a screenshot harness for development. Clouds are unchanged.
 - Primary code anchors: `CalculatedSkyRenderer`, `CalculatedSkyEffects`, `CalculatedSkyClientCommand`, `CalculatedSkyScreenshots`, `SkyTables`, `SkyView`, `SkyAtmosphere`, `SkyParticleOptics`, `SkyPhase`, `SkySettings`, `IceCrystalData`, `IceHaloProfile`, `IceHaloMap`, `IceHaloFormulas`, `IcePrism`, `LevelRendererMixin.frostedheart$drawCalculatedSky`, `LevelRendererMixin.frostedheart$hideVanillaSun`, `FogRendererMixin.frostedheart$useCalculatedSkyFogColor`, `FHClientEventsMod.registerDimensionEffects`, `assets/frostedheart/shaders/calculated_sky.fsh`, `assets/frostedheart/datasets/ice_halos`
 
@@ -21,7 +21,7 @@ The sky is a sphere of radius `6360 km` with an atmosphere up to `6460 km`, seen
 
 `SkyParticleOptics.forDistribution` averages Mie efficiencies over a log-normal size distribution truncated to `50..1000 nm` and over nine wavelengths per band. The refractive index is the rutile formula `n^2 = 5.913 + 0.2441 / (lambda^2 - 0.0803)` with `lambda` in micrometers. Nanobots do not absorb.
 
-`SkyTables` follows Hillaire 2020: a transmittance table (`256 x 64`, `40` steps), a multiple scattering table (`48` altitudes by `32` sun cosines, `20` steps, `64` directions), and a sky view table (`200 x 100`, `30` steps). Every ray also gets `12` steps of its own across each crossing of the ice band, as described under [Ray steps](#ray-steps). Multiple scattering is computed over a black ground. Light reflected back and forth between snow and atmosphere is added afterwards:
+`SkyTables` follows Hillaire 2020: a transmittance table (`256 x 128`, `40` steps), a multiple scattering table (`48` altitudes by `32` sun cosines, `20` steps, `64` directions), and a sky view table (`200 x 100`, `30` steps). Every ray also gets `12` steps of its own across each crossing of the ice band, as described under [Ray steps](#ray-steps). Multiple scattering is computed over a black ground. Light reflected back and forth between snow and atmosphere is added afterwards:
 
 ```text
 L(view)  = L_black_ground(view) + L_ground * G(view)
@@ -32,7 +32,7 @@ S        = 2 * integral over mu from 0 to 1 of G(mu) * mu
 | Symbol | Meaning | Value |
 |---|---|---|
 | `A` | Snow albedo | `0.8`, source constant `SkyAtmosphere.GROUND_ALBEDO` |
-| `E_0` | Downward irradiance on a black ground: direct sun, the sky view table, and single scattering by ice (`IceHaloProfile.irradiance` plus `IceHaloMap.irradiance`) | Computed per sky view |
+| `E_0` | Downward irradiance on a black ground: direct sun through delta scaled ice, the sky view table, and single scattering by ice crystals without the diffraction peak (`IceHaloProfile.irradiance` plus `IceHaloMap.irradiance`) | Computed per sky view |
 | `G(view)` | Radiance at the camera per unit radiance of glowing ground | Table of `65` view cosines |
 | `S` | Spherical albedo of the atmosphere | Computed per settings |
 
@@ -40,7 +40,7 @@ Radiance is relative to a sun of irradiance `1` in each band. The shader display
 
 ### Ray steps
 
-The ice layer is only `1.2 km` wide, so even steps over a ray to the top of the atmosphere put one or two samples in it, about `3.3 km` apart looking straight up. `SkyRaySteps.fill` therefore splits each ray where it enters and leaves the ice band, the shell between `SkyAtmosphere.ICE_BAND_LOW_RADIUS` and `ICE_BAND_HIGH_RADIUS`, four widths below and above the layer's center (`6.2..15.8 km`). Each crossing of the band gets `12` equal steps. Outside it the steps are the cells of the even grid over the whole ray, cut at the band's edges, so the sky without ice samples as before. The transmittance table, the multiple scattering table, `G`, and the view rays all use it. The rows of the multiple scattering table are spaced evenly below the band (`8` intervals), inside it (`16`), and above it (`23`), because the light inside a thick ice layer changes over a few hundred meters.
+The ice layer is only `1.2 km` wide, so even steps over a ray to the top of the atmosphere put one or two samples in it, about `3.3 km` apart looking straight up. `SkyRaySteps.fill` therefore splits each ray where it enters and leaves the ice band, the shell between `SkyAtmosphere.ICE_BAND_LOW_RADIUS` and `ICE_BAND_HIGH_RADIUS`, four widths below and above the layer's center (`6.2..15.8 km`). Each crossing of the band gets `12` equal steps. Outside it the steps are the cells of the even grid over the whole ray, cut at the band's edges, so the sky without ice samples as before. The transmittance table, the multiple scattering table, `G`, and the view rays all use it. The rows of the multiple scattering table are spaced evenly below the band (`8` intervals), inside it (`16`), and above it (`23`), because the light inside a thick ice layer changes over a few hundred meters. The rows of the transmittance table are spaced evenly in the distance to the horizon, `sqrt(r^2 - R^2)`, below the band (`24` intervals), inside it (`64`), and above it (`39`), for the same reason.
 
 Measured outside the game on `2026-11-08` against the same model with `1500` view steps, `1000` multiple scattering steps, `600` transmittance steps, and `128 x 128` multiple scattering texels, along four azimuths from the sun at sun elevations `2`, `15`, `30`, and `60 degrees`, leaving out `5 degrees` around the sun, in display steps of `255` at exposure `6`:
 
@@ -54,15 +54,25 @@ Measured outside the game on `2026-11-08` against the same model with `1500` vie
 
 The ripple is the error minus its average over `12 degrees` of elevation, which shows as bands across the sky. With even steps the ground light at depth `3` was more than twice the reference, and with ray steps it is within `2%`. Near the sun the ice's single scattering changes most: with the default depth `0.1`, the radiance at the sun moves by `-9%` and `2 degrees` from a sun at `8 degrees` by `+9%`, within about `1.7%` of the reference.
 
+The transmittance table had `64` even rows until the change to [delta scaled ice](#delta-scaled-ice), about `1 km` of altitude apart in the ice layer. Interpolating `exp(-tau)` linearly between them overestimates the sunlight inside a thick layer. Measured the same way on `2026-11-08` with delta scaled ice, against `1024` even rows, with `256` columns, which agree with `1024` columns within `0.1` display steps:
+
+| Ice optical depth | `64` even rows | `64` rows, `32` in the band | `128` rows, `64` in the band |
+|---|---|---|---|
+| `0.5` | `1.3` | `1.2` | `0.2` |
+| `1` | `1.9` | `1.1` | `0.2` |
+| `3` | `5.5`, ground `+4.8%` | `0.8`, ground `+2.8%` | `0.3`, ground `+0.5%` |
+
+With only `64` rows the band took too many from the air, and the sky without ice was off by `1.3` steps. Within a few degrees of a low sun the error is larger: at depth `0.5` with the sun at `3.7 degrees`, `64` even rows overestimated the light that the sun's square and its glow carry by `6..7%`, and `128` rows by `3..4%`.
+
 ### Ice crystals and halos
 
 The sky view table holds no single scattering by ice. A second table, the ice view, holds that light per unit phase function, and the ice phase function is applied per sky texel:
 
 ```text
-L_ice(view) = ice_view(view) * (profile(angle from sun) + map(view, sun elevation))
+L_ice(view) = ice_view(view) * (crystals(angle from sun) + w(row) * diffraction(angle from sun) + map(view, sun elevation))
 ```
 
-Half of the light ice removes is diffracted around the sun, as Henyey-Greenstein with asymmetry `0.99` (`ICE_DIFFRACTION_FRACTION`, `ICE_DIFFRACTION_ASYMMETRY`). The other half passes through the crystals of `datasets/ice_halos/crystals.csv`:
+Half of the light ice removes is diffracted around the sun, as Henyey-Greenstein with asymmetry `0.99` (`ICE_DIFFRACTION_FRACTION`, `ICE_DIFFRACTION_ASYMMETRY`), and `w` is the diffraction weight described under [Delta scaled ice](#delta-scaled-ice). The other half passes through the crystals of `datasets/ice_halos/crystals.csv`:
 
 | Crystal kind | Share | Shape (half height over radius) | Orientation | Gives |
 |---|---:|---:|---|---|
@@ -74,7 +84,7 @@ Half of the light ice removes is diffracted around the sun, as Henyey-Greenstein
 
 The mix was chosen for a rich display. The ice refractive index is `n = 1.3005 + 0.0030 / lambda^2`, `1.3070`, `1.3104`, and `1.3160` at the band centers.
 
-`IceHaloProfile` holds the diffraction peak and the tumbling crystals as a function of the angle from the sun, in `3600` bins of `0.05 degrees`, from `scattering_tumbling_crystals.csv`. It is built when a setting changes.
+`IceHaloProfile` holds the tumbling crystals and, in a row of its own, the diffraction peak as a function of the angle from the sun, in `3600` bins of `0.05 degrees`, from `scattering_tumbling_crystals.csv`. It is built when a setting changes.
 
 `IceHaloMap` holds the oriented crystals for one sun elevation, in `360` columns of azimuth from the sun (`0..180 degrees`, the display is mirror symmetric) by `184` rows of elevation from `-2 degrees` to the zenith, both in `0.5 degree` bins. `IceHaloFormulas` fills it from formulas, so no rays are traced in game:
 
@@ -92,6 +102,30 @@ Both are blurred by a Gaussian of `sqrt((0.45 * texel)^2 + (sun radius / 2)^2)` 
 
 The tables were written by the offline sky preview, as described in `datasets/ice_halos/src.md`.
 
+### Delta scaled ice
+
+Diffraction sends light on within a few degrees of its direction, so for everything but the view toward the sun it is as if the light had passed. `SkyAtmosphere` therefore counts only `(1 - f) * beta_ice` in its scattering and extinction totals, where `f` is `ICE_DIFFRACTION_FRACTION` and `beta_ice` the ice's scattering coefficient, and keeps all of `beta_ice` in `iceScattering`. The transmittance table, the multiple scattering table, `G`, and the view rays use the totals, so the sun's beam, the light between scatterings, and the sky seen through ice lose only the ice's other half. The ice view still holds all of the ice's single scattering, so the diffraction peak still draws the glow around the sun. Three things keep diffracted light from counting twice:
+
+- The sun's square uses the full ice extinction, `T(row) * exp(-f * tau(row))`, where `T` is the transmittance of the row's view ray and `tau` the ice optical depth along it. The light diffracted out of the square is in the glow.
+- The glow's single scattering uses delta scaled transmittance, which keeps light that is diffracted again in the beam, so light diffracted `n` times would count `n` times. `SkyTables.diffractionWeights` scales the peak per row by `w = (1 - exp(-f * tau)) / (f * tau)`, which leaves the light diffracted at least once. Toward the sun, the square and the glow then carry `T(row)` between them. Rows that hit the ground take the weight of the lowest row of sky, so it stays smooth where the shader interpolates across the horizon.
+- `IceHaloProfile.irradiance` leaves the peak out of the light on the ground, since the direct sun through delta scaled ice already carries it.
+
+Measured in the preview on `2026-11-08`, whose path tracer follows diffracted light as scattering, against the same model with the full ice extinction. The ice has the preview's generic phase function, half of it diffraction, with the default nanobots and snow. Mean color difference (CIE dE) over the sky above `2 degrees` at exposure `6`, and the radiance over the path tracer's:
+
+| Ice, sun | dE, full extinction and delta scaled | Within `10 degrees` of the sun | Whole sky | Ground |
+|---|---|---|---|---|
+| `0.1`, `10` | `2.4`, `1.6` | `0.84..0.85`, `0.95..0.98` | `0.92..0.94`, `0.98` | `0.97..0.98`, `0.99` |
+| `0.5`, `3` | `3.6`, `1.8` | `0.28..0.63`, `0.81..0.99` | `0.76..0.82`, `0.92` | `0.85..0.87`, `0.94..0.95` |
+| `0.5`, `10` | `5.6`, `2.9` | `0.44..0.52`, `0.92..0.95` | `0.72..0.81`, `0.94` | `0.87..0.88`, `0.96..1.00` |
+| `0.5`, `30` | `6.0`, `3.3` | `0.77..0.80`, `0.98..1.00` | `1.02..1.03`, `1.04..1.05` | `1.05..1.09`, `1.05..1.07` |
+| `2`, `3` | `8.0`, `3.3` | `0.38..0.43`, `0.59..0.66` | `0.51..0.53`, `0.77..0.79` | `0.54..0.57`, `0.79..0.82` |
+| `2`, `10` | `11.4`, `4.7` | `0.31..0.42`, `0.74..0.77` | `0.52..0.54`, `0.79..0.82` | `0.56..0.60`, `0.83..0.88` |
+| `2`, `30` | `7.9`, `3.8` | `0.37..0.39`, `0.95..0.97` | `0.69..0.71`, `0.96..0.99` | `0.75..0.78`, `1.00..1.02` |
+
+Two seeds of the path tracer at ice `2` and sun `10 degrees` differ by a mean dE of `2.2` and up to `6%` within `10 degrees` of the sun, so part of what remains is the reference's own noise. The rest grows with the ice and a low sun, where the multiple scattering table treats repeated scattering by ice as even in all directions, although the crystals scatter mostly forward.
+
+In the mod, against the same code with the full ice extinction, the sky more than `5 degrees` from the sun changed by up to `19` display steps at the default depth `0.1`, in the glow around a low sun, and by `1..4` steps elsewhere. At depth `0.5` the glow around a sun at `2 degrees` grew by up to `122` steps, and a high sun's sky got `4..15` steps darker, because the full extinction had also sent the diffracted half into the even multiple scattering.
+
 ### Sun
 
 The sun is a square with the size and orientation of the core of vanilla's sun texture, its central `8` of `32` texels, which vanilla draws `60` wide at distance `100`. On the plane one unit in front of the camera its half side is `h = 0.075` (`SkyTables.SUN_HALF_TANGENT`), so it is about `8.6 degrees` across, with two edges along the sun's path and two from north to south. Its radiance spreads the sun's irradiance of `1` over its solid angle:
@@ -101,9 +135,9 @@ L_sun(view) = T(elevation) / Omega
 Omega       = 4 * atan(h^2 / sqrt(1 + 2 * h^2)) = 0.02237 sr
 ```
 
-`T` is the transmittance from the camera to the top of the atmosphere at the view's elevation, the product over the steps of that row's view ray. `SkyTables.sunRadiance` holds `L_sun` per row of the sky view, built with the tables, and zero for rows that hit the ground. So each texel of the square has the color of its own elevation: as the sun sets, the bottom of the square reddens first and the horizon cuts it off. Below about `4.6 degrees` the shader's fade to the fog color dims it further.
+`T` is the transmittance from the camera to the top of the atmosphere at the view's elevation with the full ice extinction, the product over the steps of that row's view ray times `exp(-f * tau)`, as described under [Delta scaled ice](#delta-scaled-ice). `SkyTables.sunRadiance` holds `L_sun` per row of the sky view, built with the tables, and zero for rows that hit the ground. So each texel of the square has the color of its own elevation: as the sun sets, the bottom of the square reddens first and the horizon cuts it off. Below about `4.6 degrees` the shader's fade to the fog color dims it further.
 
-With the default settings and exposure, the table displays white above about `8 degrees`, `(255, 237, 134)` at `4 degrees`, `(245, 148, 37)` at `2 degrees`, `(190, 63, 2)` at `0.5 degrees`, and `(154, 37, 0)` at the horizon. Its transmittance is within `3%` of the transmittance table's at these elevations. The diffraction peak and the nanobots' forward scattering already make the sky white out to about `2..3 degrees` from a high sun, and about `230` of `255` at the square's edges, so a high sun shows as a white square with soft edges. From about `10 degrees` down, the square stands out clearly against the sky.
+With the default settings and exposure, the table displays white above about `8 degrees`, `(255, 237, 134)` at `4 degrees`, `(245, 148, 37)` at `2 degrees`, `(190, 63, 2)` at `0.5 degrees`, and `(154, 37, 0)` at the horizon. Its transmittance is within `1.6%` of a fine integration with the full ice extinction from `1 degree` up. The diffraction peak and the nanobots' forward scattering already make the sky white out to about `2..3 degrees` from a high sun, and about `230` of `255` at the square's edges, so a high sun shows as a white square with soft edges. From about `10 degrees` down, the square stands out clearly against the sky.
 
 ## 2. Runtime
 
@@ -126,7 +160,7 @@ The shader:
 
 - snaps each pixel's view direction to the center of its sky texel. Texels are the cells of an equi-angular cube map aligned with the world axes, with `round(90 / texelDegrees)` cells along each face edge, so they stay fixed to the sky as the camera turns, like the sun's texture. Minecraft's sun moves in the x-y plane, so its path runs down the middle of the `+x`, top, and `-x` faces. With `texelDegrees` `0` it uses the pixel's own direction;
 - looks up the sky views and the ice views by azimuth from the sun and by the latitude mapping of Hillaire 2020, as `SkyView.sample` does, and blends the two around the sun by its exact elevation. Without the blend, each new view shifted the glow around a low sun by up to `16` display steps of `255` every `0.25 degrees`. With it, the sky stays within `1` step of a view computed for the exact elevation, measured halfway between two views at sun elevations from `1.4` to `30 degrees` and ice optical depths `0.1` and `0.3`;
-- adds the ice view times the halo profile at the angle from the sun and the two halo maps, blended by the exact sun elevation between their two elevations;
+- adds the ice view times the halo profile at the angle from the sun and the two halo maps, blended by the exact sun elevation between their two elevations. The profile's diffraction peak is scaled by the diffraction weight at the row of the sky texel;
 - adds the sun's radiance from the sun table at the row of the sky texel, times the part of the pixel the sun's square covers. The outline uses the pixel's own direction, with one pixel of smoothing, so the sun glides with sharp edges like vanilla's sun quad, while its color follows the sky texels. Edges on sky texels had to step one texel about every `1.7 s` or fade whole rows of texels in and out, which looked like the square changing shape;
 - grays the color by rain and thunder level with the formula of `ClientLevel.getSkyColor`, without the lightning flash, so the sky darkens like vanilla's;
 - fades the color toward the fog color by the rain level. In snow `FogModification` sets the fog color, so the sky becomes the pack's snow fog. `PlayerWeatherCompatibilityModel` sets the rain level to `0.8` in snow and blizzards, so a fifth of the sky stays, with faint halos, as a fifth of vanilla's sun does;
@@ -253,7 +287,8 @@ Only the client's time and weather are held, so the server's clock and climate k
 - the normalization of the Rayleigh and Henyey-Greenstein phase functions;
 - the datasets: each side face row and each tumbling table integrates to `1`, the path shares of each row and band add up to between `0.99` and `1` (the tracer drops light still inside a crystal after `40` interactions, at most `0.5%`), and the crystal shares add up to `1`;
 - the halo profile's total and the halo maps' totals at sun elevations `30` and `8 degrees` against the offline preview, and that the brightest bin of the sun dogs sits between `0.25 degrees` inside and `1 degree` outside the minimum deviation from Bravais' effective index;
-- the default sky at sun elevations `30` and `8 degrees` against the offline preview, with `0.5 degree` texels. The directions include the sun itself, `2 degrees` from it (the diffraction peak), and `22 degrees` from it (the 22 degree halo). The preview's `FastSky` uses the same ray steps, and its values were taken again on `2026-11-08` with its mode `skyreference`;
+- the default sky at sun elevations `30` and `8 degrees` against the offline preview, with `0.5 degree` texels. The directions include the sun itself, `2 degrees` from it (the diffraction peak), and `22 degrees` from it (the 22 degree halo). The preview's `FastSky` uses the same ray steps, transmittance rows, and delta scaling, and its values were taken again on `2026-11-08` with its mode `skyreference`;
+- that with the sun in the middle of a row of the sky view, at `3.7`, `8.4`, and `45 degrees` and ice optical depth `0.5`, the sun's square carries the transmittance of a fine integration with the full ice extinction within `2%`, and together with the diffraction peak around it, taken as if all of it lay in the sun's direction, the transmittance with delta scaled ice within `5%`. Measured: `1.2%`, `0.9%`, and `0.4%` for the square, `3.7%`, `1.3%`, and `0.4%` with the peak. With `64` even transmittance rows the peak's excess at `3.7 degrees` was twice as large. At depths `1`, `2`, and `3` the excess passes `5%` for suns below `7`, `12`, and `13 degrees`, where the beam is at most `0.3%` of the sun's light. `1024` transmittance rows do not change that, and it was not traced further;
 - that the ray steps of every row of the sky view, and of rays from `0.1` to `60 km` in every vertical direction, follow each other without gaps up to the ray's end and see the ice optical depth of a fine integration within `1%` for the view and `2%` for the others. Measured over `401` directions, the view is within `0.45%`, and rays from above that graze the band reach `1.5%`, where its `12` steps spread over a chord of about `340 km`;
 - that the fog color is warmer toward a sun at `4.5 degrees` than away from it, and that looking straight up gives the same color in every direction;
 - that the sun's radiance is zero below the horizon, has red at least green and green at least blue above it, and has more than ten times the red over blue at `2 degrees` that it has at `30 degrees`;
@@ -261,7 +296,7 @@ Only the client's time and weather are held, so the server's clock and climate k
 
 The preview is a separate Java program in the contributor's workspace, checked against a Monte Carlo reference and its own ray tracer of ice prisms. The port matches it within `1%`, the test's tolerance. The mixins, the shader, and the lightmap hook only run in the client, so the GameTests do not cover them.
 
-Against the Monte Carlo reference, the lookup tables reach a mean color difference (CIE dE) of `2.1` to `4.0` for the default settings through the day, the largest with the sun high. The Monte Carlo reference also shows a wider glow around a low sun, from light that ice scatters forward more than once. The tables treat repeated scattering as even in all directions, so they miss it.
+Against the Monte Carlo reference, the lookup tables reached a mean color difference (CIE dE) of `2.1` to `4.0` for the default settings through the day before delta scaling, the largest with the sun high. The Monte Carlo reference also showed a wider and brighter glow around a low sun, from light that ice diffracts forward more than once, which the tables treated as scattered evenly in all directions. Delta scaling keeps that light in the beam, as measured under [Delta scaled ice](#delta-scaled-ice). Light diffracted more than once is still drawn with the shape of a single diffraction, so the glow stays a little narrower than the reference's.
 
 In the preview, the halo formulas match the ray tracer within a mean dE of `0.03` to `0.23` through the day. On `1 degree` texels, with the earlier coarser sampling, reading the map and profile once at each texel center matches traced and texel-averaged halos within a mean dE of `0.51` (`0.38` looking up). On `0.5 degree` texels with ice optical depth `0.3`, against dense formulas averaged over texels, the map reaches a mean dE of `0.29` with the sun at `22 degrees` and `0.34` at `50 degrees`, where the earlier sampling reached `0.36` and `0.44` and showed colored dots and streaks along the arcs.
 
@@ -272,6 +307,8 @@ In the preview on `2026-11-07`, on one thread: a halo map `0.45..0.49 s` warm (f
 The mod's own halo code, timed outside the game on `2026-11-07` on one thread at sun elevations from `2` to `70 degrees` (warm, high performance power mode): `202..235 ms` per map with `58..68 MB` allocated before the first speedup, `77..89 ms` after it, and `72..75 ms` once `IcePrism` merged its outputs. A sky view took `27..30 ms`, and `15..17 ms` once `SkyTables` worked out the steps of each view ray once per setting (`buildViewRays`) instead of once per texel, since they depend only on the row's elevation. Halo maps and sky views are built without allocating: `CalculatedSkyRenderer` keeps one `IceHaloMap.Workspace` for all builds and refills the halo map and `SkyView` that the previous state dropped, and `SkyTables` reuses scratch buffers for its views. New maps and views are allocated only on the first builds, after a settings change, and when the sun jumps by more than one map step. Of the `73 ms` per map, side face cones take about `24 ms`, end face to end face paths `26 ms`, Parry column side paths `17 ms`, end face to side face paths `5 ms`, and the blur `3 ms`. Of the `15.5 ms` per view, the view rays take about `13 ms` and the light that ice scatters onto the ground about `2.4 ms`. At normal day speed, with a map every `1.7 s` and a view every `0.8 s`, that is about `6%` of one background thread while the sun moves, down from about `8%`. In the laptop's automatic power mode the same builds sometimes took about twice as long, and below normal priority runs sometimes slowed to half speed partway through, so only alternating short runs were compared.
 
 The ray steps, timed the same way on `2026-11-08` with two alternating runs of three rounds each: a sky view takes `18.9..19.9 ms` instead of `15.8..15.9 ms`, from the `12` extra steps of each view ray, and the tables `131..155 ms` instead of `74..98 ms`, from the extra rows and steps of the multiple scattering table.
+
+Delta scaled ice with `128` transmittance rows, timed the same way on `2026-11-08` with three alternating runs against the code before it, in a slower power state of the laptop: the halo profile unchanged at about `192 ms`, the tables about `4%` slower (`239..252 ms` instead of `229..240 ms`), where the transmittance table alone, timed in the faster state, went from `4.7` to `10 ms` of `130..137 ms`, and a sky view about `4%` slower (`34..36 ms` instead of `33..34 ms`), from the row mapping in each lookup of the transmittance table.
 
 On `2026-11-06` empireu also checked the render cost on a laptop RTX 4070, about a desktop RTX 4050 to 4060, and found it negligible. Exact GPU time of the draw and of the texture upload has not been measured.
 

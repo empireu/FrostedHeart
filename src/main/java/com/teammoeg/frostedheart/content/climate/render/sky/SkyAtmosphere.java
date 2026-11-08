@@ -22,6 +22,8 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
 /**
  * Scattering and extinction coefficients by altitude, in 1/m, stored as altitude index times channel count plus channel.
  * Air, ozone, and ground aerosol use the Earth values from Hillaire 2020.
+ * The totals hold ice delta scaled, without the share ICE_DIFFRACTION_FRACTION that diffraction sends on within a few
+ * degrees of its direction, so that light counts as transmitted. The ice scattering holds all of it.
  */
 public final class SkyAtmosphere {
     public static final int CHANNEL_COUNT = 3;
@@ -76,15 +78,16 @@ public final class SkyAtmosphere {
                 double nanobot = settings.nanobotOpticalDepth() * nanobotRatio
                         * gaussian(altitude, NANOBOT_CENTER_METERS, NANOBOT_WIDTH_METERS);
                 double ice = settings.iceOpticalDepth() * gaussian(altitude, ICE_CENTER_METERS, ICE_WIDTH_METERS);
+                double deltaScaledIce = (1.0 - ICE_DIFFRACTION_FRACTION) * ice;
 
                 int slot = index * CHANNEL_COUNT + channel;
                 rayleighScattering[slot] = rayleigh;
                 aerosolScattering[slot] = AEROSOL_SCATTERING * aerosolDensity;
                 nanobotScattering[slot] = nanobot;
                 iceScattering[slot] = ice;
-                totalScattering[slot] = rayleigh + AEROSOL_SCATTERING * aerosolDensity + nanobot + ice;
+                totalScattering[slot] = rayleigh + AEROSOL_SCATTERING * aerosolDensity + nanobot + deltaScaledIce;
                 totalExtinction[slot] = rayleigh + (AEROSOL_SCATTERING + AEROSOL_ABSORPTION) * aerosolDensity
-                        + ozone + nanobot + ice;
+                        + ozone + nanobot + deltaScaledIce;
             }
         }
     }

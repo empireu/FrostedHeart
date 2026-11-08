@@ -75,7 +75,7 @@ public final class CalculatedSkyRenderer {
     private static final double HALO_MAP_STEP_DEGREES = 0.5;
     private static final double LOWEST_HALO_SUN_DEGREES = -6.0;
     private static final double HIGHEST_HALO_SUN_DEGREES = 90.0;
-    private static final int TEXTURE_UNITS = 8;
+    private static final int TEXTURE_UNITS = 9;
     private static final boolean OCULUS_LOADED = ModList.get().isLoaded("oculus");
     private static final Matrix4f inverseViewProjection = new Matrix4f();
     private static final float[] reusedFogColor = new float[SkyAtmosphere.CHANNEL_COUNT];
@@ -113,6 +113,7 @@ public final class CalculatedSkyRenderer {
     private static int highHaloTexture;
     private static int haloProfileTexture;
     private static int sunTexture;
+    private static int diffractionTexture;
     private static boolean failed;
     private static boolean sunDrawn;
     private static double lastTablesMilliseconds = Double.NaN;
@@ -451,6 +452,8 @@ public final class CalculatedSkyRenderer {
         if (previous == null || previous.tables() != next.tables()) {
             sunTexture = uploadTable(sunTexture, next.tables().sunRadiance(), 1, SkyTables.VIEW_HEIGHT,
                     GL12.GL_CLAMP_TO_EDGE);
+            diffractionTexture = uploadTable(diffractionTexture, next.tables().diffractionWeights(), 1,
+                    SkyTables.VIEW_HEIGHT, GL12.GL_CLAMP_TO_EDGE);
         }
         if (previous == null || previous.lowView() != next.lowView()) {
             lowSkyTexture = uploadTable(lowSkyTexture, next.lowView().sky(), SkyTables.VIEW_WIDTH,
@@ -466,7 +469,7 @@ public final class CalculatedSkyRenderer {
         }
         if (previous == null || previous.haloProfile() != next.haloProfile()) {
             haloProfileTexture = uploadTable(haloProfileTexture, next.haloProfile().values(),
-                    IceHaloProfile.ANGLE_BINS, 1, GL12.GL_CLAMP_TO_EDGE);
+                    IceHaloProfile.ANGLE_BINS, 2, GL12.GL_CLAMP_TO_EDGE);
         }
         if (previous == null || previous.lowHalo() != next.lowHalo()) {
             lowHaloTexture = uploadTable(lowHaloTexture, next.lowHalo().values(), IceHaloMap.AZIMUTH_BINS,
@@ -540,6 +543,7 @@ public final class CalculatedSkyRenderer {
         drawnTextures[5] = highHaloTexture;
         drawnTextures[6] = haloProfileTexture;
         drawnTextures[7] = sunTexture;
+        drawnTextures[8] = diffractionTexture;
 
         int previousProgram = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
         int previousActiveTexture = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
@@ -565,6 +569,7 @@ public final class CalculatedSkyRenderer {
                 uniforms.glUniform1I("highHaloMap", 5);
                 uniforms.glUniform1I("haloProfile", 6);
                 uniforms.glUniform1I("sunRadiance", 7);
+                uniforms.glUniform1I("diffractionWeight", 8);
                 uniforms.glUniform1F("viewBlend", viewBlend);
                 uniforms.glUniformMatrix4F("inverseViewProjection", inverseViewProjection);
                 uniforms.glUniform3F("sunDirection", sunX, sunY, 0.0F);

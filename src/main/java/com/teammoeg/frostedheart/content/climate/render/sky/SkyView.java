@@ -24,7 +24,7 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
  * Columns are azimuth from the sun, and rows follow the latitude mapping of Hillaire 2020.
  * The sky table already contains light reflected between snow and atmosphere, and no single scattering by ice.
  * The ice table holds single scattering by ice per unit phase function, which the ice phase of IceHaloProfile and
- * IceHaloMap scales per sky texel.
+ * IceHaloMap scales per sky texel, with the diffraction peak scaled by SkyTables.diffractionWeights.
  * The mean horizon radiance is the sky table at elevation zero, averaged over all azimuths.
  * SkyTables.computeView fills an instance, and a view that anything still reads must not be filled again.
  * The texel lookup is repeated in calculated_sky.fsh and must stay equal.
@@ -139,10 +139,11 @@ public final class SkyView {
 
     /**
      * Radiance toward a direction given by azimuth from the sun and elevation, with the ice phase of the given
-     * profile and map.
+     * profile and map, and the diffraction weights of the tables the view was computed with. The sun's square is
+     * left out.
      */
     public double radiance(int channel, double azimuth, double elevation, IceHaloProfile haloProfile,
-            IceHaloMap haloMap) {
+            IceHaloMap haloMap, float[] diffractionWeights) {
         double directionY = Math.sin(elevation);
         if (SkyAtmosphere.distanceToGroundOrInfinity(SkyAtmosphere.CAMERA_RADIUS, directionY)
                 < Double.POSITIVE_INFINITY) {
@@ -152,8 +153,24 @@ public final class SkyView {
                 Math.cos(elevation) * Math.cos(azimuth), directionY, Math.cos(elevation) * Math.sin(azimuth)
         };
         double sunCosine = direction[0] * Math.cos(sunElevationRadians) + directionY * Math.sin(sunElevationRadians);
-        double icePhase = haloProfile.phase(channel, sunCosine) + haloMap.phase(channel, direction);
+        double diffractionWeight = sampleRow(diffractionWeights, channel, elevation);
+        double icePhase = haloProfile.phase(channel, sunCosine, diffractionWeight) + haloMap.phase(channel, direction);
         return sample(sky, channel, azimuth, elevation) + icePhase * sample(ice, channel, azimuth, elevation);
+    }
+
+    /**
+     * Samples a table of one RGB entry per row of the sky view, with the same rows as sample.
+     */
+    static double sampleRow(float[] rowTable, int channel, double elevation) {
+        int height = SkyTables.VIEW_HEIGHT;
+        double latitude = elevationToLatitude(elevation);
+        double position = Math.signum(latitude) * Math.sqrt(Math.abs(latitude) * 2.0 / Math.PI);
+        double rowPosition = (0.5 + 0.5 * position) * height - 0.5;
+        rowPosition = Math.max(0.0, Math.min(height - 1.0, rowPosition));
+        int row = Math.min((int) rowPosition, height - 2);
+        double rowFraction = rowPosition - row;
+        return rowTable[row * CHANNELS + channel] * (1.0 - rowFraction)
+                + rowTable[(row + 1) * CHANNELS + channel] * rowFraction;
     }
 
     static double latitudeToElevation(double latitude) {

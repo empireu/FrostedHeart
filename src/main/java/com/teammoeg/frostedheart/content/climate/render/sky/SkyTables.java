@@ -115,6 +115,7 @@ public final class SkyTables {
     private final double[] scratchTravelled = new double[MAXIMUM_STEPS];
     private final double[] scratchStepLengths = new double[MAXIMUM_STEPS];
     private final float[] sunRadiance = new float[VIEW_HEIGHT * CHANNELS];
+    private final float[] diffractionWeights = new float[VIEW_HEIGHT * CHANNELS];
     private final double[] scratchSun = new double[3];
     private final double[] scratchRadiance = new double[CHANNELS];
     private final double[] scratchIceRadiance = new double[CHANNELS];
@@ -139,12 +140,14 @@ public final class SkyTables {
 
     /**
      * Fills the steps of the view rays of every row, which do not depend on the azimuth or the sun, and the sun's
-     * radiance through each row. The transmittance of a step is the transmittance from the camera to where the step
-     * begins.
+     * radiance and the diffraction weight through each row. The transmittance of a step is the transmittance from the
+     * camera to where the step begins. Rows that hit the ground take the diffraction weight of the lowest row of sky,
+     * so that it stays smooth where the shader interpolates across the horizon.
      */
     private void buildViewRays() {
         double radius = SkyAtmosphere.CAMERA_RADIUS;
         double[] viewTransmittance = new double[CHANNELS];
+        int lowestSkyRow = -1;
         for (int row = 0; row < VIEW_HEIGHT; row++) {
             double cosine = ROW_SINES[row];
             double groundDistance = SkyAtmosphere.distanceToGroundOrInfinity(radius, cosine);
@@ -154,6 +157,7 @@ public final class SkyTables {
                     rayTravelled, rayStepLength, row * MAXIMUM_VIEW_STEPS);
             rayStepCount[row] = stepCount;
             Arrays.fill(viewTransmittance, 1.0);
+            double iceDepth = 0.0;
             for (int step = 0; step < stepCount; step++) {
                 int sample = row * MAXIMUM_VIEW_STEPS + step;
                 double travelled = rayTravelled[sample];
@@ -163,6 +167,7 @@ public final class SkyTables {
                 rayRadius[sample] = sampleRadius;
                 rayHeight[sample] = radius + cosine * travelled;
                 raySlot[sample] = slot;
+                iceDepth += atmosphere.iceScattering[slot + SkyAtmosphere.GREEN_CHANNEL] * stepLength;
                 for (int channel = 0; channel < CHANNELS; channel++) {
                     double extinction = atmosphere.totalExtinction[slot + channel];
                     double stepTransmittance = Math.exp(-extinction * stepLength);
@@ -172,9 +177,22 @@ public final class SkyTables {
                     viewTransmittance[channel] *= stepTransmittance;
                 }
             }
+            double diffracted = SkyAtmosphere.ICE_DIFFRACTION_FRACTION * iceDepth;
+            double undiffracted = Math.exp(-diffracted);
+            double diffractionWeight = diffracted > 1.0e-9 ? -Math.expm1(-diffracted) / diffracted : 1.0;
+            if (!hitsGround && lowestSkyRow < 0) {
+                lowestSkyRow = row;
+            }
             for (int channel = 0; channel < CHANNELS; channel++) {
                 sunRadiance[row * CHANNELS + channel] =
-                        hitsGround ? 0.0F : (float) (viewTransmittance[channel] / SUN_SOLID_ANGLE);
+                        hitsGround ? 0.0F : (float) (viewTransmittance[channel] * undiffracted / SUN_SOLID_ANGLE);
+                diffractionWeights[row * CHANNELS + channel] = (float) diffractionWeight;
+            }
+        }
+        if (lowestSkyRow > 0) {
+            for (int row = 0; row < lowestSkyRow; row++) {
+                System.arraycopy(diffractionWeights, lowestSkyRow * CHANNELS, diffractionWeights, row * CHANNELS,
+                        CHANNELS);
             }
         }
     }
@@ -185,11 +203,24 @@ public final class SkyTables {
 
     /**
      * Radiance of the sun's square seen through each row of the view tables, as interleaved RGB.
-     * It is the transmittance from the camera to the top of the atmosphere over SUN_SOLID_ANGLE, and zero for rows
-     * that hit the ground. calculated_sky.fsh reads it with the row coordinate of the sky view.
+     * It is the transmittance from the camera to the top of the atmosphere with the full ice extinction, over
+     * SUN_SOLID_ANGLE, and zero for rows that hit the ground. The light that ice diffracts out of the square is drawn
+     * by the diffraction peak of IceHaloProfile. calculated_sky.fsh reads it with the row coordinate of the sky view.
      */
     public float[] sunRadiance() {
         return sunRadiance;
+    }
+
+    /**
+     * Weight of the diffraction peak of IceHaloProfile through each row of the view tables, as interleaved RGB.
+     * The ice table uses delta scaled transmittance, which keeps light that is diffracted again in the beam, so light
+     * diffracted n times would count n times in the aureole. The weight (1 - exp(-f tau)) / (f tau) scales the
+     * aureole to the light diffracted at least once, where tau is the ice optical depth along the row and f is
+     * ICE_DIFFRACTION_FRACTION. The sun's square and the aureole then carry the delta scaled beam between them.
+     * calculated_sky.fsh reads it with the row coordinate of the sky view.
+     */
+    public float[] diffractionWeights() {
+        return diffractionWeights;
     }
 
     public double nanobotMegatons() {

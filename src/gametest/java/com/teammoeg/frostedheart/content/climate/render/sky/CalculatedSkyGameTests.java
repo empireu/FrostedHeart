@@ -37,24 +37,28 @@ public final class CalculatedSkyGameTests {
             {0.0, 90.0}, {0.0, 10.0}, {180.0, 10.0}, {90.0, 45.0}, {0.0, 30.0}, {0.0, -5.0}
     };
     private static final double[][] PREVIEW_RADIANCE_SUN_30 = {
-            {4.156452e-02, 5.118725e-02, 6.976661e-02},
-            {1.460070e-01, 1.409101e-01, 1.491246e-01},
-            {9.561213e-02, 1.068710e-01, 1.299013e-01},
-            {5.105223e-02, 6.173205e-02, 8.353709e-02},
-            {1.281076e+02, 9.759179e+01, 7.016058e+01},
-            {1.214150e-01, 1.118470e-01, 1.127488e-01}
+            {3.802533e-02, 4.817895e-02, 6.711618e-02},
+            {1.533046e-01, 1.464558e-01, 1.531925e-01},
+            {9.034568e-02, 1.042543e-01, 1.300265e-01},
+            {4.667468e-02, 5.815215e-02, 8.067290e-02},
+            {1.386147e+02, 1.055837e+02, 7.590232e+01},
+            {1.191234e-01, 1.100464e-01, 1.114067e-01}
     };
     private static final double[][] PREVIEW_RADIANCE_SUN_8 = {
-            {1.393092e-02, 1.475955e-02, 1.874073e-02},
-            {1.210838e+00, 5.464766e-01, 2.242898e-01},
-            {3.009644e-02, 2.568520e-02, 2.627191e-02},
-            {1.749820e-02, 1.811782e-02, 2.232851e-02},
-            {8.132036e-02, 5.425932e-02, 4.014555e-02},
-            {2.238450e-02, 1.874050e-02, 1.978471e-02}
+            {1.336313e-02, 1.447035e-02, 1.865495e-02},
+            {1.434823e+00, 6.465230e-01, 2.634789e-01},
+            {3.215498e-02, 2.760183e-02, 2.815565e-02},
+            {1.693363e-02, 1.794478e-02, 2.245954e-02},
+            {9.308629e-02, 6.055942e-02, 4.305048e-02},
+            {2.290006e-02, 1.917246e-02, 2.023884e-02}
     };
     private static final int UNIFORM_STEPS = 30;
     private static final int ICE_BAND_STEPS = 12;
     private static final double[] RAY_START_ALTITUDES = {100.0, 5000.0, 11000.0, 20000.0, 60000.0};
+    private static final double AUREOLE_ICE_OPTICAL_DEPTH = 0.5;
+    private static final int[] AUREOLE_ROWS = {60, 65, 85};
+    private static final double AUREOLE_SQUARE_TOLERANCE = 0.02;
+    private static final double AUREOLE_BEAM_TOLERANCE = 0.05;
     private static final double[] PREVIEW_PROFILE_TOTAL = {7.001337e-01, 7.001327e-01, 7.001303e-01};
     private static final double[] PREVIEW_MAP_TOTAL_SUN_30 = {2.486358e-01, 2.481081e-01, 2.472797e-01};
     private static final double[] PREVIEW_MAP_TOTAL_SUN_8 = {1.982199e-01, 1.981322e-01, 1.984010e-01};
@@ -194,9 +198,67 @@ public final class CalculatedSkyGameTests {
             IceHaloMap map = new IceHaloMap(data, sunElevation, blurSigma);
             SkyView view = tables.computeView(sunElevation, profile, map);
             double[][] expected = sunElevationDegrees == 30.0 ? PREVIEW_RADIANCE_SUN_30 : PREVIEW_RADIANCE_SUN_8;
-            assertMatchesPreview(helper, view, profile, map, expected, sunElevationDegrees);
+            assertMatchesPreview(helper, view, profile, map, tables.diffractionWeights(), expected,
+                    sunElevationDegrees);
         }
         helper.succeed();
+    }
+
+    /**
+     * With the sun in the middle of a row of the view tables, the sun's square carries the transmittance toward it
+     * with the full ice extinction. Together with the diffraction peak drawn around it, it carries the transmittance
+     * with delta scaled ice, which counts diffracted light as transmitted. The peak is taken as if all of it lay in
+     * the sun's direction.
+     */
+    @GameTest(template = "phase0a_empty", timeoutTicks = 200)
+    public static void sunSquareAndAureoleCarryTheDeltaScaledBeam(GameTestHelper helper) {
+        SkySettings settings = new SkySettings(SkySettings.DEFAULT.nanobotOpticalDepth(),
+                SkySettings.DEFAULT.nanobotMedianNanometers(), SkySettings.DEFAULT.nanobotSpread(),
+                AUREOLE_ICE_OPTICAL_DEPTH, SkySettings.DEFAULT.texelDegrees());
+        SkyTables tables = new SkyTables(settings);
+        SkyAtmosphere atmosphere = new SkyAtmosphere(settings);
+        IceCrystalData data = IceCrystalData.get();
+        double blurSigma = IceHaloMap.blurSigma(settings.actualTexelDegrees());
+        IceHaloProfile profile = new IceHaloProfile(data, blurSigma);
+        for (int row : AUREOLE_ROWS) {
+            double sunElevation = SkyTables.rowElevation(row);
+            double cosine = Math.sin(sunElevation);
+            SkyView view = tables.computeView(sunElevation, profile, new IceHaloMap(data, sunElevation, blurSigma));
+            for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
+                double deltaScaledDepth = opticalDepthToTop(atmosphere, atmosphere.totalExtinction, channel, cosine);
+                double diffractedDepth = SkyAtmosphere.ICE_DIFFRACTION_FRACTION
+                        * opticalDepthToTop(atmosphere, atmosphere.iceScattering, channel, cosine);
+                double square = tables.sunRadiance()[row * SkyAtmosphere.CHANNEL_COUNT + channel]
+                        * SkyTables.SUN_SOLID_ANGLE;
+                double aureole = SkyAtmosphere.ICE_DIFFRACTION_FRACTION
+                        * tables.diffractionWeights()[row * SkyAtmosphere.CHANNEL_COUNT + channel]
+                        * SkyView.sample(view.ice(), channel, 0.0, sunElevation);
+                double squareExpected = Math.exp(-deltaScaledDepth - diffractedDepth);
+                double beamExpected = Math.exp(-deltaScaledDepth);
+                String where = "Sun at " + Math.toDegrees(sunElevation) + " degrees, channel " + channel;
+                helper.assertTrue(Math.abs(square / squareExpected - 1.0) < AUREOLE_SQUARE_TOLERANCE,
+                        where + ", the sun's square carries " + square + ", full ice extinction gives "
+                                + squareExpected);
+                helper.assertTrue(Math.abs((square + aureole) / beamExpected - 1.0) < AUREOLE_BEAM_TOLERANCE,
+                        where + ", the square and the aureole carry " + square + " and " + aureole
+                                + ", delta scaled ice gives " + beamExpected);
+            }
+        }
+        helper.succeed();
+    }
+
+    private static double opticalDepthToTop(SkyAtmosphere atmosphere, double[] coefficients, int channel,
+            double cosine) {
+        double radius = SkyAtmosphere.CAMERA_RADIUS;
+        double length = SkyAtmosphere.distanceToTop(radius, cosine);
+        int fineSteps = 20000;
+        double depth = 0.0;
+        for (int step = 0; step < fineSteps; step++) {
+            double distance = (step + 0.5) * length / fineSteps;
+            depth += coefficients[atmosphere.altitudeSlot(SkyAtmosphere.radiusAlongRay(radius, cosine, distance))
+                    + channel] * length / fineSteps;
+        }
+        return depth;
     }
 
     /**
@@ -386,12 +448,12 @@ public final class CalculatedSkyGameTests {
     }
 
     private static void assertMatchesPreview(GameTestHelper helper, SkyView view, IceHaloProfile profile,
-            IceHaloMap map, double[][] expected, double sunElevationDegrees) {
+            IceHaloMap map, float[] diffractionWeights, double[][] expected, double sunElevationDegrees) {
         for (int index = 0; index < DIRECTIONS_DEGREES.length; index++) {
             double azimuth = Math.toRadians(DIRECTIONS_DEGREES[index][0]);
             double elevation = Math.toRadians(DIRECTIONS_DEGREES[index][1]);
             for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
-                double actual = view.radiance(channel, azimuth, elevation, profile, map);
+                double actual = view.radiance(channel, azimuth, elevation, profile, map, diffractionWeights);
                 double relativeError = Math.abs(actual / expected[index][channel] - 1.0);
                 helper.assertTrue(relativeError < 0.01,
                         "Sun " + sunElevationDegrees + ", azimuth " + DIRECTIONS_DEGREES[index][0] + ", elevation "

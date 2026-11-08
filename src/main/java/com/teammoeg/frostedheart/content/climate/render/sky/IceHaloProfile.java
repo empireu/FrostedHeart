@@ -23,7 +23,9 @@ import java.util.Arrays;
 
 /**
  * The part of the ice phase function that depends only on the angle from the sun, in ANGLE_BINS equal bins from 0
- * to pi. It holds the diffraction peak and the tumbling crystals, blurred like IceHaloMap.
+ * to pi. It holds the tumbling crystals and, apart from them, the diffraction peak, both blurred like IceHaloMap.
+ * The diffraction peak is scaled by SkyTables.diffractionWeights where it is drawn, and it is left out of the light on
+ * the ground, because the delta scaled sun's beam already carries it there.
  * Light of the tumbling crystals within FORWARD_CUT of the sun is moved into the first bin.
  * Instances are immutable after construction. The lookup is repeated in calculated_sky.fsh and must stay equal.
  */
@@ -57,20 +59,19 @@ public final class IceHaloProfile {
     }
 
     private final double blurSigma;
-    private final float[] values = new float[ANGLE_BINS * CHANNELS];
+    private final float[] values = new float[2 * ANGLE_BINS * CHANNELS];
     private final double[][] blurred = new double[CHANNELS][ANGLE_BINS];
+    private final double[] blurredDiffraction = new double[ANGLE_BINS];
     private final double[][] ringEnergies = new double[CHANNELS][IRRADIANCE_RINGS];
 
     public IceHaloProfile(IceCrystalData data, double blurSigma) {
         this.blurSigma = blurSigma;
         double diffraction = SkyAtmosphere.ICE_DIFFRACTION_FRACTION;
         double[][] raw = new double[CHANNELS][ANGLE_BINS];
+        double[] rawDiffraction = new double[ANGLE_BINS];
         for (int bin = 0; bin < ANGLE_BINS; bin++) {
-            double value = diffraction * SkyPhase.henyeyGreenstein(Math.cos((bin + 0.5) * ANGLE_STEP),
+            rawDiffraction[bin] = diffraction * SkyPhase.henyeyGreenstein(Math.cos((bin + 0.5) * ANGLE_STEP),
                     SkyAtmosphere.ICE_DIFFRACTION_ASYMMETRY);
-            for (int channel = 0; channel < CHANNELS; channel++) {
-                raw[channel][bin] = value;
-            }
         }
         int forwardBins = (int) Math.round(FORWARD_CUT_RADIANS / ANGLE_STEP);
         for (IceCrystalData.Crystal crystal : data.crystals()) {
@@ -98,6 +99,7 @@ public final class IceHaloProfile {
         for (int bin = 0; bin < ANGLE_BINS; bin++) {
             double angle = (bin + 0.5) * ANGLE_STEP;
             Arrays.fill(sums, 0.0);
+            double diffractionSum = 0.0;
             double weightSum = 0.0;
             for (int other = Math.max(0, bin - span); other <= Math.min(ANGLE_BINS - 1, bin + span); other++) {
                 double otherAngle = (other + 0.5) * ANGLE_STEP;
@@ -106,6 +108,7 @@ public final class IceHaloProfile {
                     double weight = Math.exp(-0.5 * distance * distance / (blurSigma * blurSigma))
                             * binSolidAngle(other);
                     weightSum += weight;
+                    diffractionSum += weight * rawDiffraction[other];
                     for (int channel = 0; channel < CHANNELS; channel++) {
                         sums[channel] += weight * raw[channel][other];
                     }
@@ -126,14 +129,17 @@ public final class IceHaloProfile {
                     double distance = Math.acos(Math.max(-1.0, Math.min(1.0, cosine)));
                     double weight = Math.exp(-0.5 * distance * distance / (blurSigma * blurSigma)) * element;
                     weightSum += weight;
+                    diffractionSum += weight * rawDiffraction[other];
                     for (int channel = 0; channel < CHANNELS; channel++) {
                         sums[channel] += weight * raw[channel][other];
                     }
                 }
             }
+            blurredDiffraction[bin] = weightSum > 0.0 ? diffractionSum / weightSum : rawDiffraction[bin];
             for (int channel = 0; channel < CHANNELS; channel++) {
                 blurred[channel][bin] = weightSum > 0.0 ? sums[channel] / weightSum : raw[channel][bin];
                 values[bin * CHANNELS + channel] = (float) blurred[channel][bin];
+                values[(ANGLE_BINS + bin) * CHANNELS + channel] = (float) blurredDiffraction[bin];
             }
         }
         for (int channel = 0; channel < CHANNELS; channel++) {
@@ -154,24 +160,33 @@ public final class IceHaloProfile {
     }
 
     /**
-     * The profile as interleaved RGB by bin, as it is uploaded.
+     * The profile as interleaved RGB by bin, as it is uploaded, with the tumbling crystals in the first row and the
+     * diffraction peak in the second.
      */
     public float[] values() {
         return values;
     }
 
-    public double phase(int channel, double sunCosine) {
+    /**
+     * The phase toward a direction with the given cosine to the sun, with the diffraction peak scaled by the weight.
+     */
+    public double phase(int channel, double sunCosine, double diffractionWeight) {
         double angle = Math.acos(Math.max(-1.0, Math.min(1.0, sunCosine)));
         double position = angle / ANGLE_STEP - 0.5;
         int lower = Math.max(0, Math.min(ANGLE_BINS - 2, (int) Math.floor(position)));
         double fraction = Math.max(0.0, Math.min(1.0, position - lower));
-        return blurred[channel][lower] * (1.0 - fraction) + blurred[channel][lower + 1] * fraction;
+        double crystals = blurred[channel][lower] * (1.0 - fraction) + blurred[channel][lower + 1] * fraction;
+        double peak = blurredDiffraction[lower] * (1.0 - fraction) + blurredDiffraction[lower + 1] * fraction;
+        return crystals + diffractionWeight * peak;
     }
 
+    /**
+     * The phase of the tumbling crystals and the diffraction peak integrated over the sphere.
+     */
     public double total(int channel) {
         double sum = 0.0;
         for (int bin = 0; bin < ANGLE_BINS; bin++) {
-            sum += blurred[channel][bin] * binSolidAngle(bin);
+            sum += (blurred[channel][bin] + blurredDiffraction[bin]) * binSolidAngle(bin);
         }
         return sum;
     }
@@ -180,6 +195,7 @@ public final class IceHaloProfile {
      * Writes the irradiance on level ground per unit of the ice table for every channel into the result, with each
      * ring of 180 / IRRADIANCE_RINGS degrees around the sun sampled at IRRADIANCE_RING_POINTS points. The sun direction
      * is in the frame of the sky view tables. Ring sums and samples are scratch arrays of one entry per channel.
+     * Only the tumbling crystals count, since the diffracted light reaches the ground with the sun's beam.
      */
     void irradiance(double[] sun, float[] iceTable, double[] result, double[] ringSums, double[] samples) {
         Arrays.fill(result, 0.0);
