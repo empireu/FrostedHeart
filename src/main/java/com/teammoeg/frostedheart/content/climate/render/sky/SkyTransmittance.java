@@ -29,6 +29,7 @@ final class SkyTransmittance {
     private static final int WIDTH = 256;
     private static final int HEIGHT = 64;
     private static final int STEP_COUNT = 40;
+    private static final int ICE_BAND_STEPS = 12;
     private static final double HORIZON_DISTANCE = Math.sqrt(
             SkyAtmosphere.TOP_RADIUS * SkyAtmosphere.TOP_RADIUS
                     - SkyAtmosphere.GROUND_RADIUS * SkyAtmosphere.GROUND_RADIUS);
@@ -37,6 +38,9 @@ final class SkyTransmittance {
 
     SkyTransmittance(SkyAtmosphere atmosphere) {
         double[] opticalDepth = new double[CHANNELS];
+        double[] boundaries = new double[SkyRaySteps.MAXIMUM_BOUNDARIES];
+        double[] travelled = new double[SkyRaySteps.maximumSteps(STEP_COUNT, ICE_BAND_STEPS)];
+        double[] stepLengths = new double[SkyRaySteps.maximumSteps(STEP_COUNT, ICE_BAND_STEPS)];
         for (int row = 0; row < HEIGHT; row++) {
             double horizontal = HORIZON_DISTANCE * row / (HEIGHT - 1);
             double radius = Math.sqrt(horizontal * horizontal
@@ -51,13 +55,13 @@ final class SkyTransmittance {
                             / (2.0 * radius * distance);
                     cosine = Math.max(-1.0, Math.min(1.0, cosine));
                 }
-                double stepLength = distance / STEP_COUNT;
+                int stepCount = SkyRaySteps.fill(radius, cosine, distance, STEP_COUNT, ICE_BAND_STEPS, boundaries,
+                        travelled, stepLengths, 0);
                 Arrays.fill(opticalDepth, 0.0);
-                for (int step = 0; step < STEP_COUNT; step++) {
-                    double travelled = (step + 0.5) * stepLength;
-                    int slot = atmosphere.altitudeSlot(SkyAtmosphere.radiusAlongRay(radius, cosine, travelled));
+                for (int step = 0; step < stepCount; step++) {
+                    int slot = atmosphere.altitudeSlot(SkyAtmosphere.radiusAlongRay(radius, cosine, travelled[step]));
                     for (int channel = 0; channel < CHANNELS; channel++) {
-                        opticalDepth[channel] += atmosphere.totalExtinction[slot + channel] * stepLength;
+                        opticalDepth[channel] += atmosphere.totalExtinction[slot + channel] * stepLengths[step];
                     }
                 }
                 int texel = (column + row * WIDTH) * CHANNELS;

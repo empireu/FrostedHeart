@@ -37,21 +37,24 @@ public final class CalculatedSkyGameTests {
             {0.0, 90.0}, {0.0, 10.0}, {180.0, 10.0}, {90.0, 45.0}, {0.0, 30.0}, {0.0, -5.0}
     };
     private static final double[][] PREVIEW_RADIANCE_SUN_30 = {
-            {4.166095e-02, 5.124624e-02, 6.967542e-02},
-            {1.467572e-01, 1.414350e-01, 1.489306e-01},
-            {9.582255e-02, 1.069268e-01, 1.295040e-01},
-            {5.127253e-02, 6.186302e-02, 8.348271e-02},
-            {1.406775e+02, 1.072396e+02, 7.730739e+01},
-            {1.224294e-01, 1.125749e-01, 1.131418e-01}
+            {4.156452e-02, 5.118725e-02, 6.976661e-02},
+            {1.460070e-01, 1.409101e-01, 1.491246e-01},
+            {9.561213e-02, 1.068710e-01, 1.299013e-01},
+            {5.105223e-02, 6.173205e-02, 8.353709e-02},
+            {1.281076e+02, 9.759179e+01, 7.016058e+01},
+            {1.214150e-01, 1.118470e-01, 1.127488e-01}
     };
     private static final double[][] PREVIEW_RADIANCE_SUN_8 = {
-            {1.400972e-02, 1.480753e-02, 1.879119e-02},
-            {1.110835e+00, 5.038122e-01, 2.090749e-01},
-            {2.988587e-02, 2.558581e-02, 2.621068e-02},
-            {1.760332e-02, 1.818259e-02, 2.239172e-02},
-            {8.795442e-02, 5.732254e-02, 4.105200e-02},
-            {2.247240e-02, 1.877901e-02, 1.981469e-02}
+            {1.393092e-02, 1.475955e-02, 1.874073e-02},
+            {1.210838e+00, 5.464766e-01, 2.242898e-01},
+            {3.009644e-02, 2.568520e-02, 2.627191e-02},
+            {1.749820e-02, 1.811782e-02, 2.232851e-02},
+            {8.132036e-02, 5.425932e-02, 4.014555e-02},
+            {2.238450e-02, 1.874050e-02, 1.978471e-02}
     };
+    private static final int UNIFORM_STEPS = 30;
+    private static final int ICE_BAND_STEPS = 12;
+    private static final double[] RAY_START_ALTITUDES = {100.0, 5000.0, 11000.0, 20000.0, 60000.0};
     private static final double[] PREVIEW_PROFILE_TOTAL = {7.001337e-01, 7.001327e-01, 7.001303e-01};
     private static final double[] PREVIEW_MAP_TOTAL_SUN_30 = {2.486358e-01, 2.481081e-01, 2.472797e-01};
     private static final double[] PREVIEW_MAP_TOTAL_SUN_8 = {1.982199e-01, 1.981322e-01, 1.984010e-01};
@@ -194,6 +197,74 @@ public final class CalculatedSkyGameTests {
             assertMatchesPreview(helper, view, profile, map, expected, sunElevationDegrees);
         }
         helper.succeed();
+    }
+
+    /**
+     * Rays from the camera along every row of the sky view, and rays from other altitudes in every vertical direction,
+     * must see the whole ice layer, which uniform steps over the ray left to one or two samples.
+     * Rays from the camera cross the whole layer. Rays from other altitudes may start inside it or graze it, where the
+     * twelve steps of a crossing spread over a longer chord, so they get a wider tolerance.
+     */
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void rayStepsCoverTheIceLayerOnEveryPath(GameTestHelper helper) {
+        SkyAtmosphere atmosphere = new SkyAtmosphere(new SkySettings(0.0, SkySettings.DEFAULT.nanobotMedianNanometers(),
+                SkySettings.DEFAULT.nanobotSpread(), 1.0, SkySettings.DEFAULT.texelDegrees()));
+        assertStepsCoverIce(helper, atmosphere, SkyAtmosphere.CAMERA_RADIUS, 1.0, 0.01);
+        for (int row = 0; row < SkyTables.VIEW_HEIGHT; row++) {
+            assertStepsCoverIce(helper, atmosphere, SkyAtmosphere.CAMERA_RADIUS,
+                    Math.sin(SkyTables.rowElevation(row)), 0.01);
+        }
+        for (double altitude : RAY_START_ALTITUDES) {
+            for (int direction = 0; direction <= 40; direction++) {
+                assertStepsCoverIce(helper, atmosphere, SkyAtmosphere.GROUND_RADIUS + altitude,
+                        -1.0 + 2.0 * direction / 40.0, 0.02);
+            }
+        }
+        helper.succeed();
+    }
+
+    /**
+     * Checks that the steps of one ray follow each other without gaps or overlaps up to its end, and that their ice
+     * optical depth matches a fine integration within the relative tolerance.
+     */
+    private static void assertStepsCoverIce(GameTestHelper helper, SkyAtmosphere atmosphere, double radius,
+            double cosine, double tolerance) {
+        double groundDistance = SkyAtmosphere.distanceToGroundOrInfinity(radius, cosine);
+        double length = groundDistance < Double.POSITIVE_INFINITY ? groundDistance
+                : SkyAtmosphere.distanceToTop(radius, cosine);
+        double[] travelled = new double[SkyRaySteps.maximumSteps(UNIFORM_STEPS, ICE_BAND_STEPS)];
+        double[] lengths = new double[SkyRaySteps.maximumSteps(UNIFORM_STEPS, ICE_BAND_STEPS)];
+        int count = SkyRaySteps.fill(radius, cosine, length, UNIFORM_STEPS, ICE_BAND_STEPS,
+                new double[SkyRaySteps.MAXIMUM_BOUNDARIES], travelled, lengths, 0);
+        String ray = "ray from radius " + radius + " with cosine " + cosine;
+        double end = 0.0;
+        double depth = 0.0;
+        for (int step = 0; step < count; step++) {
+            double start = travelled[step] - 0.5 * lengths[step];
+            helper.assertTrue(Math.abs(start - end) < 1.0e-6 * length,
+                    "Step " + step + " of the " + ray + " starts at " + start + " where the step before ended at "
+                            + end);
+            end = travelled[step] + 0.5 * lengths[step];
+            depth += iceExtinction(atmosphere, radius, cosine, travelled[step]) * lengths[step];
+        }
+        helper.assertTrue(Math.abs(end - length) < 1.0e-6 * length,
+                "The steps of the " + ray + " end at " + end + " instead of " + length);
+        double exactDepth = 0.0;
+        int fineSteps = 20000;
+        for (int step = 0; step < fineSteps; step++) {
+            exactDepth += iceExtinction(atmosphere, radius, cosine, (step + 0.5) * length / fineSteps) * length
+                    / fineSteps;
+        }
+        if (exactDepth > 0.01) {
+            helper.assertTrue(Math.abs(depth / exactDepth - 1.0) < tolerance,
+                    "Ice optical depth along the steps of the " + ray + " is " + depth + ", fine integration "
+                            + exactDepth);
+        }
+    }
+
+    private static double iceExtinction(SkyAtmosphere atmosphere, double radius, double cosine, double distance) {
+        return atmosphere.iceScattering[atmosphere.altitudeSlot(SkyAtmosphere.radiusAlongRay(radius, cosine, distance))
+                + SkyAtmosphere.GREEN_CHANNEL];
     }
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)

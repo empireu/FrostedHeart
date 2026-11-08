@@ -1,7 +1,7 @@
 # Calculated Sky
 
 - Status: `Partial`
-- Last verified: `2026-11-07`, against source and the GameTests below. The first version, with one ice lobe and no snow fade, was seen in `runClient` on `2026-11-05`. The three-part ice phase and a snow fade toward gray were seen in `runClient` on `2026-11-06`, and the fog color from the sky and the snow fade toward the fog color later that day. The ice crystal halos and the sky texels were first seen in `runClient` on `2026-11-07`, with no popping as the sun moves. The sky's own sun, which replaces vanilla's, and the blended sky views were seen in `runClient` the same day. The screenshot harness took its first sets in `runClient` the same day, the last one recorded with `beginSet` and `pose`. The daylight on the terrain was seen in `runClient` the same day, with torch light unchanged.
+- Last verified: `2026-11-08`, against source and the GameTests below. The ray steps across the ice band were checked against a converged reference outside the game that day. The first version, with one ice lobe and no snow fade, was seen in `runClient` on `2026-11-05`. The three-part ice phase and a snow fade toward gray were seen in `runClient` on `2026-11-06`, and the fog color from the sky and the snow fade toward the fog color later that day. The ice crystal halos and the sky texels were first seen in `runClient` on `2026-11-07`, with no popping as the sun moves. The sky's own sun, which replaces vanilla's, and the blended sky views were seen in `runClient` the same day. The screenshot harness took its first sets in `runClient` the same day, the last one recorded with `beginSet` and `pose`. The daylight on the terrain was seen in `runClient` the same day, with torch light unchanged.
 - Scope: the optional overworld sky color calculated from air, titanium dioxide nanobots, and ice crystals, its halo display and sun, the fog color taken from it outside snow, the sky light of the lightmap taken from it outside rain, the client config and client command, and a screenshot harness for development. Clouds are unchanged.
 - Primary code anchors: `CalculatedSkyRenderer`, `CalculatedSkyEffects`, `CalculatedSkyClientCommand`, `CalculatedSkyScreenshots`, `SkyTables`, `SkyView`, `SkyAtmosphere`, `SkyParticleOptics`, `SkyPhase`, `SkySettings`, `IceCrystalData`, `IceHaloProfile`, `IceHaloMap`, `IceHaloFormulas`, `IcePrism`, `LevelRendererMixin.frostedheart$drawCalculatedSky`, `LevelRendererMixin.frostedheart$hideVanillaSun`, `FogRendererMixin.frostedheart$useCalculatedSkyFogColor`, `FHClientEventsMod.registerDimensionEffects`, `assets/frostedheart/shaders/calculated_sky.fsh`, `assets/frostedheart/datasets/ice_halos`
 
@@ -21,7 +21,7 @@ The sky is a sphere of radius `6360 km` with an atmosphere up to `6460 km`, seen
 
 `SkyParticleOptics.forDistribution` averages Mie efficiencies over a log-normal size distribution truncated to `50..1000 nm` and over nine wavelengths per band. The refractive index is the rutile formula `n^2 = 5.913 + 0.2441 / (lambda^2 - 0.0803)` with `lambda` in micrometers. Nanobots do not absorb.
 
-`SkyTables` follows Hillaire 2020: a transmittance table (`256 x 64`, `40` steps), a multiple scattering table (`32 x 32`, `20` steps, `64` directions), and a sky view table (`200 x 100`, `30` steps). Multiple scattering is computed over a black ground. Light reflected back and forth between snow and atmosphere is added afterwards:
+`SkyTables` follows Hillaire 2020: a transmittance table (`256 x 64`, `40` steps), a multiple scattering table (`48` altitudes by `32` sun cosines, `20` steps, `64` directions), and a sky view table (`200 x 100`, `30` steps). Every ray also gets `12` steps of its own across each crossing of the ice band, as described under [Ray steps](#ray-steps). Multiple scattering is computed over a black ground. Light reflected back and forth between snow and atmosphere is added afterwards:
 
 ```text
 L(view)  = L_black_ground(view) + L_ground * G(view)
@@ -37,6 +37,22 @@ S        = 2 * integral over mu from 0 to 1 of G(mu) * mu
 | `S` | Spherical albedo of the atmosphere | Computed per settings |
 
 Radiance is relative to a sun of irradiance `1` in each band. The shader displays it as `1 - exp(-exposure * L)`, encoded to sRGB.
+
+### Ray steps
+
+The ice layer is only `1.2 km` wide, so even steps over a ray to the top of the atmosphere put one or two samples in it, about `3.3 km` apart looking straight up. `SkyRaySteps.fill` therefore splits each ray where it enters and leaves the ice band, the shell between `SkyAtmosphere.ICE_BAND_LOW_RADIUS` and `ICE_BAND_HIGH_RADIUS`, four widths below and above the layer's center (`6.2..15.8 km`). Each crossing of the band gets `12` equal steps. Outside it the steps are the cells of the even grid over the whole ray, cut at the band's edges, so the sky without ice samples as before. The transmittance table, the multiple scattering table, `G`, and the view rays all use it. The rows of the multiple scattering table are spaced evenly below the band (`8` intervals), inside it (`16`), and above it (`23`), because the light inside a thick ice layer changes over a few hundred meters.
+
+Measured outside the game on `2026-11-08` against the same model with `1500` view steps, `1000` multiple scattering steps, `600` transmittance steps, and `128 x 128` multiple scattering texels, along four azimuths from the sun at sun elevations `2`, `15`, `30`, and `60 degrees`, leaving out `5 degrees` around the sun, in display steps of `255` at exposure `6`:
+
+| Ice optical depth | Even steps: largest error, ripple | Ray steps: largest error, ripple |
+|---|---|---|
+| `0` | `2.1`, `1.3` | `2.0`, `1.2` |
+| `0.1` | `3.7`, `3.3` | `1.6`, `0.6` |
+| `0.5` | `13.4`, `9.5` | `1.1`, `0.7` |
+| `1` | `27.4`, `15.1` | `2.1`, `1.5` |
+| `3` | `64.2`, `33.7` | `1.5`, `1.0` |
+
+The ripple is the error minus its average over `12 degrees` of elevation, which shows as bands across the sky. With even steps the ground light at depth `3` was more than twice the reference, and with ray steps it is within `2%`. Near the sun the ice's single scattering changes most: with the default depth `0.1`, the radiance at the sun moves by `-9%` and `2 degrees` from a sun at `8 degrees` by `+9%`, within about `1.7%` of the reference.
 
 ### Ice crystals and halos
 
@@ -237,7 +253,8 @@ Only the client's time and weather are held, so the server's clock and climate k
 - the normalization of the Rayleigh and Henyey-Greenstein phase functions;
 - the datasets: each side face row and each tumbling table integrates to `1`, the path shares of each row and band add up to between `0.99` and `1` (the tracer drops light still inside a crystal after `40` interactions, at most `0.5%`), and the crystal shares add up to `1`;
 - the halo profile's total and the halo maps' totals at sun elevations `30` and `8 degrees` against the offline preview, and that the brightest bin of the sun dogs sits between `0.25 degrees` inside and `1 degree` outside the minimum deviation from Bravais' effective index;
-- the default sky at sun elevations `30` and `8 degrees` against the offline preview, with `0.5 degree` texels. The directions include the sun itself, `2 degrees` from it (the diffraction peak), and `22 degrees` from it (the 22 degree halo);
+- the default sky at sun elevations `30` and `8 degrees` against the offline preview, with `0.5 degree` texels. The directions include the sun itself, `2 degrees` from it (the diffraction peak), and `22 degrees` from it (the 22 degree halo). The preview's `FastSky` uses the same ray steps, and its values were taken again on `2026-11-08` with its mode `skyreference`;
+- that the ray steps of every row of the sky view, and of rays from `0.1` to `60 km` in every vertical direction, follow each other without gaps up to the ray's end and see the ice optical depth of a fine integration within `1%` for the view and `2%` for the others. Measured over `401` directions, the view is within `0.45%`, and rays from above that graze the band reach `1.5%`, where its `12` steps spread over a chord of about `340 km`;
 - that the fog color is warmer toward a sun at `4.5 degrees` than away from it, and that looking straight up gives the same color in every direction;
 - that the sun's radiance is zero below the horizon, has red at least green and green at least blue above it, and has more than ten times the red over blue at `2 degrees` that it has at `30 degrees`;
 - that the daylight is within `0.95` of white at noon, never gets brighter as the sun sinks from `90` to `-18 degrees`, equals vanilla's night sky light at `-18 degrees`, and equals vanilla's sky light in full rain.
@@ -253,6 +270,8 @@ Build times measured outside the game on `2026-11-05`, on one thread: tables `79
 In the preview on `2026-11-07`, on one thread: a halo map `0.45..0.49 s` warm (fastest of three builds) and up to `0.9 s` on first use, the halo profile about `0.4 s`. A new map is needed every `0.5 degrees` of sun elevation, about every `1.7 s` at normal day speed, so the halos take about `28%` of one background thread in daytime by the preview's times. In `runClient` on `2026-11-07`, with the earlier sampling (`0.2 s` per map in the preview), ice optical depth `0.3`, and `0.5 degree` texels: tables `121.5 ms`, halo profile `110.5 ms`, halo map `73.6 ms` (about `4%` of one background thread), sky view `32.1 ms`, and `600..700` frames per second with the sky on and off. Later that day, with the denser sampling, ice optical depth `0.1`, and `0.5 degree` texels: tables `113.7 ms`, halo profile `122.5 ms`, halo map `287.9 ms` (about `17%` of one background thread), sky view `29.6 ms`. That map took `3.9` times the earlier one, more than the preview's ratio of `2.45`, from a single reading at a sun elevation that was not recorded.
 
 The mod's own halo code, timed outside the game on `2026-11-07` on one thread at sun elevations from `2` to `70 degrees` (warm, high performance power mode): `202..235 ms` per map with `58..68 MB` allocated before the first speedup, `77..89 ms` after it, and `72..75 ms` once `IcePrism` merged its outputs. A sky view took `27..30 ms`, and `15..17 ms` once `SkyTables` worked out the steps of each view ray once per setting (`buildViewRays`) instead of once per texel, since they depend only on the row's elevation. Halo maps and sky views are built without allocating: `CalculatedSkyRenderer` keeps one `IceHaloMap.Workspace` for all builds and refills the halo map and `SkyView` that the previous state dropped, and `SkyTables` reuses scratch buffers for its views. New maps and views are allocated only on the first builds, after a settings change, and when the sun jumps by more than one map step. Of the `73 ms` per map, side face cones take about `24 ms`, end face to end face paths `26 ms`, Parry column side paths `17 ms`, end face to side face paths `5 ms`, and the blur `3 ms`. Of the `15.5 ms` per view, the view rays take about `13 ms` and the light that ice scatters onto the ground about `2.4 ms`. At normal day speed, with a map every `1.7 s` and a view every `0.8 s`, that is about `6%` of one background thread while the sun moves, down from about `8%`. In the laptop's automatic power mode the same builds sometimes took about twice as long, and below normal priority runs sometimes slowed to half speed partway through, so only alternating short runs were compared.
+
+The ray steps, timed the same way on `2026-11-08` with two alternating runs of three rounds each: a sky view takes `18.9..19.9 ms` instead of `15.8..15.9 ms`, from the `12` extra steps of each view ray, and the tables `131..155 ms` instead of `74..98 ms`, from the extra rows and steps of the multiple scattering table.
 
 On `2026-11-06` empireu also checked the render cost on a laptop RTX 4070, about a desktop RTX 4050 to 4060, and found it negligible. Exact GPU time of the draw and of the texture upload has not been measured.
 

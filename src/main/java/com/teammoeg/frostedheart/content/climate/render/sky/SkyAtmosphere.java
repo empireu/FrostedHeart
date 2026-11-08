@@ -47,6 +47,12 @@ public final class SkyAtmosphere {
     private static final double NANOBOT_WIDTH_METERS = 6000.0;
     private static final double ICE_CENTER_METERS = 11000.0;
     private static final double ICE_WIDTH_METERS = 1200.0;
+    private static final double ICE_BAND_HALF_WIDTHS = 4.0;
+    /**
+     * Radii between which the ice layer holds all but a negligible share of its optical depth.
+     */
+    static final double ICE_BAND_LOW_RADIUS = GROUND_RADIUS + ICE_CENTER_METERS - ICE_BAND_HALF_WIDTHS * ICE_WIDTH_METERS;
+    static final double ICE_BAND_HIGH_RADIUS = GROUND_RADIUS + ICE_CENTER_METERS + ICE_BAND_HALF_WIDTHS * ICE_WIDTH_METERS;
 
     final SkyParticleOptics.Bands nanobotBands;
     final double[] rayleighScattering = new double[ALTITUDE_SAMPLE_COUNT * CHANNEL_COUNT];
