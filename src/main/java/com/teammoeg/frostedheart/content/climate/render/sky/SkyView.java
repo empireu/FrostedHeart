@@ -32,10 +32,6 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
 public final class SkyView {
     private static final int CHANNELS = SkyAtmosphere.CHANNEL_COUNT;
     private static final int TABLE_LENGTH = SkyTables.VIEW_WIDTH * SkyTables.VIEW_HEIGHT * CHANNELS;
-    /**
-     * The lowest sky darkness that ClientLevel.getSkyDarken returns, at night.
-     */
-    private static final float NIGHT_SKY_DARKEN = 0.2F;
 
     private double sunElevationRadians;
     private final float[] sky = new float[TABLE_LENGTH];
@@ -68,51 +64,6 @@ public final class SkyView {
     }
 
     /**
-     * Writes the displayed sky color at the horizon into the result, tone mapped and grayed as calculated_sky.fsh does.
-     * The radiance of the four views is blended as the shader blends them, by the high sun's weight between views of
-     * the two sun elevations and by the high depth's weight between views of the two ice depths.
-     * Single scattering by ice is left out, so the color stays smooth near the sun and across halo arcs.
-     * A horizontal fraction of 1 uses the given azimuth, and 0 uses the mean over all azimuths.
-     */
-    public static void horizonDisplayColor(SkyView lowDepthLowSun, SkyView lowDepthHighSun, SkyView highDepthLowSun,
-            SkyView highDepthHighSun, double sunWeight, double depthWeight, double azimuth, double horizontalFraction,
-            double exposure, float rainLevel, float thunderLevel, float[] result) {
-        for (int channel = 0; channel < CHANNELS; channel++) {
-            double radiance = blend(lowDepthLowSun.horizonRadiance(channel, azimuth, horizontalFraction),
-                    lowDepthHighSun.horizonRadiance(channel, azimuth, horizontalFraction),
-                    highDepthLowSun.horizonRadiance(channel, azimuth, horizontalFraction),
-                    highDepthHighSun.horizonRadiance(channel, azimuth, horizontalFraction), sunWeight, depthWeight);
-            result[channel] = (float) encodeSrgb(1.0 - Math.exp(-exposure * Math.max(0.0, radiance)));
-        }
-        greyByWeather(result, 0.6F, rainLevel);
-        greyByWeather(result, 0.2F, thunderLevel);
-    }
-
-    /**
-     * Writes the sky light on the terrain into the result, as the lightmap color at full sky light.
-     * In clear weather it is the ground as the sky's exposure displays it, relative to snow under a sun of unit
-     * irradiance at the zenith, scaled down where a channel would pass 1, and at least vanilla's sky light at night.
-     * The ground radiance of the four views is blended as in horizonDisplayColor, and rain blends the result into
-     * vanilla's sky light for the given sky darkness.
-     */
-    public static void daylightColor(SkyView lowDepthLowSun, SkyView lowDepthHighSun, SkyView highDepthLowSun,
-            SkyView highDepthHighSun, double sunWeight, double depthWeight, double exposure, float rainLevel,
-            float skyDarken, float[] result) {
-        double brightest = encodeSrgb(1.0 - Math.exp(-exposure * SkyAtmosphere.GROUND_ALBEDO / Math.PI));
-        for (int channel = 0; channel < CHANNELS; channel++) {
-            double radiance = blend(lowDepthLowSun.groundRadiance[channel], lowDepthHighSun.groundRadiance[channel],
-                    highDepthLowSun.groundRadiance[channel], highDepthHighSun.groundRadiance[channel], sunWeight,
-                    depthWeight);
-            result[channel] = (float) encodeSrgb(1.0 - Math.exp(-exposure * Math.max(0.0, radiance)));
-            brightest = Math.max(brightest, result[channel]);
-        }
-        for (int channel = 0; channel < CHANNELS; channel++) {
-            float clear = Math.max((float) (result[channel] / brightest), vanillaSkyLight(channel, NIGHT_SKY_DARKEN));
-            result[channel] = clear + (vanillaSkyLight(channel, skyDarken) - clear) * rainLevel;
-        }
-    }
-
-    /**
      * Vanilla's lightmap color at full sky light for a sky darkness from ClientLevel.getSkyDarken, outside lightning
      * flashes.
      */
@@ -121,32 +72,13 @@ public final class SkyView {
         return tint * (skyDarken * 0.95F + 0.05F);
     }
 
-    private static double blend(double lowDepthLowSun, double lowDepthHighSun, double highDepthLowSun,
-            double highDepthHighSun, double sunWeight, double depthWeight) {
-        double lowDepth = lowDepthLowSun + (lowDepthHighSun - lowDepthLowSun) * sunWeight;
-        double highDepth = highDepthLowSun + (highDepthHighSun - highDepthLowSun) * sunWeight;
-        return lowDepth + (highDepth - lowDepth) * depthWeight;
-    }
-
-    private double horizonRadiance(int channel, double azimuth, double horizontalFraction) {
+    /**
+     * The sky table at elevation zero toward the azimuth, blended toward the mean horizon radiance by one minus the
+     * horizontal fraction.
+     */
+    double horizonRadiance(int channel, double azimuth, double horizontalFraction) {
         return horizontalFraction * sample(sky, channel, azimuth, 0.0)
                 + (1.0 - horizontalFraction) * meanHorizonRadiance[channel];
-    }
-
-    private static void greyByWeather(float[] color, float greyScale, float weatherLevel) {
-        float grey = (0.3F * color[0] + 0.59F * color[1] + 0.11F * color[2]) * greyScale;
-        float kept = 1.0F - weatherLevel * 0.75F;
-        for (int channel = 0; channel < CHANNELS; channel++) {
-            color[channel] = grey + (color[channel] - grey) * kept;
-        }
-    }
-
-    private static double encodeSrgb(double linear) {
-        double clamped = Math.max(0.0, Math.min(1.0, linear));
-        if (clamped < 0.0031308) {
-            return clamped * 12.92;
-        }
-        return 1.055 * Math.pow(clamped, 1.0 / 2.4) - 0.055;
     }
 
     /**

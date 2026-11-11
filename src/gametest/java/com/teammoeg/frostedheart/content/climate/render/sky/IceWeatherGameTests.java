@@ -212,8 +212,7 @@ public final class IceWeatherGameTests {
             for (int depth = 0; depth < tables.length; depth++) {
                 SkyView view = tables[depth].computeView(sunElevation, profile, map);
                 double[] ground = view.groundRadiance();
-                SkyView.daylightColor(view, view, view, view, 0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 1.0F,
-                        daylight);
+                SkyViewSet.of(view).daylightColor(0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 1.0F, daylight);
                 line.append(String.format(Locale.ROOT, " depth %.1f ground", GROUND_DEPTHS[depth]));
                 for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
                     double ratio = ground[channel] / clear[channel];

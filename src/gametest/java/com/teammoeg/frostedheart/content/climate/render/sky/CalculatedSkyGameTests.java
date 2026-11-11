@@ -336,12 +336,11 @@ public final class CalculatedSkyGameTests {
         double sunElevation = Math.toRadians(4.5);
         SkyView view = new SkyTables(SkySettings.DEFAULT).computeView(sunElevation,
                 new IceHaloProfile(data, blurSigma), new IceHaloMap(data, sunElevation, blurSigma));
+        SkyViewSet views = SkyViewSet.of(view);
         float[] towardSun = new float[SkyAtmosphere.CHANNEL_COUNT];
         float[] awayFromSun = new float[SkyAtmosphere.CHANNEL_COUNT];
-        SkyView.horizonDisplayColor(view, view, view, view, 0.0, 0.0, 0.0, 1.0, SkySettings.DEFAULT_EXPOSURE, 0.0F,
-                0.0F, towardSun);
-        SkyView.horizonDisplayColor(view, view, view, view, 0.0, 0.0, Math.PI, 1.0, SkySettings.DEFAULT_EXPOSURE,
-                0.0F, 0.0F, awayFromSun);
+        views.horizonDisplayColor(0.0, 0.0, 0.0, 1.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, towardSun);
+        views.horizonDisplayColor(0.0, 0.0, Math.PI, 1.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, awayFromSun);
         helper.assertTrue(towardSun[0] / towardSun[2] > 1.1F * awayFromSun[0] / awayFromSun[2],
                 "Fog toward a sun at 4.5 degrees is warmer than away from it, red over blue "
                         + towardSun[0] / towardSun[2] + " against " + awayFromSun[0] / awayFromSun[2]);
@@ -352,10 +351,8 @@ public final class CalculatedSkyGameTests {
 
         float[] upTowardSun = new float[SkyAtmosphere.CHANNEL_COUNT];
         float[] upAwayFromSun = new float[SkyAtmosphere.CHANNEL_COUNT];
-        SkyView.horizonDisplayColor(view, view, view, view, 0.0, 0.0, 0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F,
-                0.0F, upTowardSun);
-        SkyView.horizonDisplayColor(view, view, view, view, 0.0, 0.0, Math.PI, 0.0, SkySettings.DEFAULT_EXPOSURE,
-                0.0F, 0.0F, upAwayFromSun);
+        views.horizonDisplayColor(0.0, 0.0, 0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, upTowardSun);
+        views.horizonDisplayColor(0.0, 0.0, Math.PI, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, upAwayFromSun);
         for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
             helper.assertTrue(upTowardSun[channel] == upAwayFromSun[channel],
                     "Looking straight up uses the mean horizon in every direction, channel " + channel);
@@ -374,8 +371,8 @@ public final class CalculatedSkyGameTests {
         for (double sunElevationDegrees : DAYLIGHT_SUN_DEGREES) {
             double sunElevation = Math.toRadians(sunElevationDegrees);
             IceHaloMap map = new IceHaloMap(data, Math.toRadians(Math.max(-6.0, sunElevationDegrees)), blurSigma);
-            SkyView view = tables.computeView(sunElevation, profile, map);
-            SkyView.daylightColor(view, view, view, view, 0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F,
+            SkyViewSet views = SkyViewSet.of(tables.computeView(sunElevation, profile, map));
+            views.daylightColor(0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F,
                     vanillaSkyDarken(sunElevationDegrees, 0.0F), daylight);
             double luminance = 0.2126 * daylight[0] + 0.7152 * daylight[1] + 0.0722 * daylight[2];
             helper.assertTrue(luminance <= previousLuminance + 1.0e-6,
@@ -396,8 +393,7 @@ public final class CalculatedSkyGameTests {
             }
             if (sunElevationDegrees == 30.0) {
                 float rainSkyDarken = vanillaSkyDarken(sunElevationDegrees, 1.0F);
-                SkyView.daylightColor(view, view, view, view, 0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 1.0F,
-                        rainSkyDarken, daylight);
+                views.daylightColor(0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 1.0F, rainSkyDarken, daylight);
                 for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
                     float vanilla = SkyView.vanillaSkyLight(channel, rainSkyDarken);
                     helper.assertTrue(Math.abs(daylight[channel] - vanilla) < 1.0e-6F,

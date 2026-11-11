@@ -55,7 +55,7 @@ public final class CalculatedSkyEffects extends DimensionSpecialEffects.Overworl
     }
 
     /**
-     * Replaces vanilla's sky light with SkyView.daylightColor while the calculated sky is drawn, except during
+     * Replaces vanilla's sky light with SkyViewSet.daylightColor while the calculated sky is drawn, except during
      * lightning flashes. The change is computed at the first texel of each lightmap update and passes through vanilla's
      * blend toward gray and its darkening during boss fights, which run before this call.
      */

@@ -77,10 +77,7 @@ public final class CalculatedSkyRenderer {
     private static final double LOWEST_HALO_SUN_DEGREES = -6.0;
     private static final double HIGHEST_HALO_SUN_DEGREES = 90.0;
     private static final int CHANNELS = SkyAtmosphere.CHANNEL_COUNT;
-    /**
-     * View slots are numbered by depth end times two plus sun end, so slot 0 has the low depth and low sun.
-     */
-    private static final int VIEW_SLOTS = 4;
+    private static final int VIEW_SLOTS = SkyViewSet.VIEW_COUNT;
     private static final int HALO_SLOTS = 2;
     /**
      * The row table texture holds the sun's radiance at the low and the high depth, then the diffraction weights at the
@@ -167,7 +164,7 @@ public final class CalculatedSkyRenderer {
      */
     private record SkyState(SkySettings settings, IceHaloProfile haloProfile, int haloIndex, IceHaloMap lowHalo,
             IceHaloMap highHalo, int depthIndex, SkyTables lowDepthTables, SkyTables highDepthTables, int viewIndex,
-            SkyView lowDepthLowSun, SkyView lowDepthHighSun, SkyView highDepthLowSun, SkyView highDepthHighSun) {
+            SkyViewSet views) {
         IceHaloMap halo(int slot) {
             return slot == 0 ? lowHalo : highHalo;
         }
@@ -198,36 +195,14 @@ public final class CalculatedSkyRenderer {
             return null;
         }
 
-        SkyView view(int slot) {
-            switch (slot) {
-                case 0: {
-                    return lowDepthLowSun;
-                }
-                case 1: {
-                    return lowDepthHighSun;
-                }
-                case 2: {
-                    return highDepthLowSun;
-                }
-                default: {
-                    return highDepthHighSun;
-                }
-            }
-        }
-
         @Nullable
         SkyView viewAt(int depthGridIndex, int viewGridIndex) {
             int depthEnd = depthGridIndex - depthIndex;
             int sunEnd = viewGridIndex - viewIndex;
-            if (depthEnd < 0 || depthEnd > 1 || sunEnd < 0 || sunEnd > 1) {
+            if (depthEnd < 0 || depthEnd >= SkyViewSet.ENDS || sunEnd < 0 || sunEnd >= SkyViewSet.ENDS) {
                 return null;
             }
-            return view(depthEnd * 2 + sunEnd);
-        }
-
-        boolean holdsView(SkyView view) {
-            return view == lowDepthLowSun || view == lowDepthHighSun || view == highDepthLowSun
-                    || view == highDepthHighSun;
+            return views.view(SkyViewSet.slot(depthEnd, sunEnd));
         }
     }
 
@@ -309,15 +284,15 @@ public final class CalculatedSkyRenderer {
         Vector3f look = camera.getLookVector();
         double horizontalFraction = Math.min(1.0, Math.sqrt(look.x() * look.x() + look.z() * look.z()));
         double azimuth = Math.atan2(look.z(), look.x() * frame.sunSide());
-        SkyView.horizonDisplayColor(current.lowDepthLowSun(), current.lowDepthHighSun(), current.highDepthLowSun(),
-                current.highDepthHighSun(), viewBlend(current, frame), depthBlend(current, frame), azimuth,
+        current.views().horizonDisplayColor(viewBlend(current, frame), depthBlend(current, frame), azimuth,
                 horizontalFraction, frame.exposure(), frame.rainLevel(), frame.thunderLevel(), reusedFogColor);
         return reusedFogColor;
     }
 
     /**
-     * Writes the sky light on the terrain while the calculated sky is drawn into the result, as SkyView.daylightColor
-     * gives it for vanilla's sky darkness. Returns false and leaves the result unchanged when the sky is not drawn.
+     * Writes the sky light on the terrain while the calculated sky is drawn into the result, as
+     * SkyViewSet.daylightColor gives it for vanilla's sky darkness. Returns false and leaves the result unchanged when
+     * the sky is not drawn.
      */
     public static boolean daylightColor(ClientLevel level, float partialTick, float skyDarken, float[] result) {
         SkyState current = state;
@@ -325,8 +300,7 @@ public final class CalculatedSkyRenderer {
             return false;
         }
         SkyFrame frame = SkyFrame.current(level, partialTick);
-        SkyView.daylightColor(current.lowDepthLowSun(), current.lowDepthHighSun(), current.highDepthLowSun(),
-                current.highDepthHighSun(), viewBlend(current, frame), depthBlend(current, frame), frame.exposure(),
+        current.views().daylightColor(viewBlend(current, frame), depthBlend(current, frame), frame.exposure(),
                 frame.rainLevel(), skyDarken, result);
         return true;
     }
@@ -363,8 +337,8 @@ public final class CalculatedSkyRenderer {
     }
 
     private static float viewBlend(SkyState current, SkyFrame frame) {
-        return blendWeight(frame.sunElevationRadians(), current.lowDepthLowSun().sunElevationRadians(),
-                current.lowDepthHighSun().sunElevationRadians());
+        return blendWeight(frame.sunElevationRadians(), current.views().lowSunElevationRadians(),
+                current.views().highSunElevationRadians());
     }
 
     private static float haloBlend(SkyState current, SkyFrame frame) {
@@ -447,8 +421,8 @@ public final class CalculatedSkyRenderer {
             }
         }
         for (int slot = 0; slot < VIEW_SLOTS; slot++) {
-            SkyView view = previous.view(slot);
-            if (!next.holdsView(view) && spareViewCount < VIEW_SLOTS) {
+            SkyView view = previous.views().view(slot);
+            if (!next.views().holds(view) && spareViewCount < VIEW_SLOTS) {
                 spareViews[spareViewCount++] = view;
             }
         }
@@ -476,16 +450,16 @@ public final class CalculatedSkyRenderer {
         IceHaloMap highHalo = haloFor(previous, haloIndex + 1, blurSigma);
         SkyTables lowDepthTables = tablesFor(previous, depthIndex, settings);
         SkyTables highDepthTables = tablesFor(previous, depthIndex + 1, settings);
-        SkyView lowDepthLowSun = viewFor(previous, depthIndex, viewIndex, lowDepthTables, haloProfile, lowHalo,
-                highHalo);
-        SkyView lowDepthHighSun = viewFor(previous, depthIndex, viewIndex + 1, lowDepthTables, haloProfile, lowHalo,
-                highHalo);
-        SkyView highDepthLowSun = viewFor(previous, depthIndex + 1, viewIndex, highDepthTables, haloProfile, lowHalo,
-                highHalo);
-        SkyView highDepthHighSun = viewFor(previous, depthIndex + 1, viewIndex + 1, highDepthTables, haloProfile,
-                lowHalo, highHalo);
+        SkyViewSet views = new SkyViewSet();
+        for (int depthEnd = 0; depthEnd < SkyViewSet.ENDS; depthEnd++) {
+            SkyTables tables = depthEnd == 0 ? lowDepthTables : highDepthTables;
+            for (int sunEnd = 0; sunEnd < SkyViewSet.ENDS; sunEnd++) {
+                views.setView(SkyViewSet.slot(depthEnd, sunEnd), viewFor(previous, depthIndex + depthEnd,
+                        viewIndex + sunEnd, tables, haloProfile, lowHalo, highHalo));
+            }
+        }
         SkyState next = new SkyState(settings, haloProfile, haloIndex, lowHalo, highHalo, depthIndex, lowDepthTables,
-                highDepthTables, viewIndex, lowDepthLowSun, lowDepthHighSun, highDepthLowSun, highDepthHighSun);
+                highDepthTables, viewIndex, views);
         return new BuildResult(next, buildTablesMilliseconds, haloProfileMilliseconds, buildHaloMapMilliseconds,
                 buildViewMilliseconds);
     }
@@ -577,12 +551,12 @@ public final class CalculatedSkyRenderer {
         }
 
         for (int slot = 0; slot < VIEW_SLOTS; slot++) {
-            wantedSlots[slot] = next.view(slot);
+            wantedSlots[slot] = next.views().view(slot);
         }
         reassignSlots(uploadedViews, VIEW_SLOTS, viewSkyTextures, viewIceTextures);
         for (int slot = 0; slot < VIEW_SLOTS; slot++) {
             if (slotNeedsUpload[slot]) {
-                SkyView view = next.view(slot);
+                SkyView view = next.views().view(slot);
                 viewSkyTextures[slot] = uploadTable(viewSkyTextures[slot], view.sky(), SkyTables.VIEW_WIDTH,
                         SkyTables.VIEW_HEIGHT, GL11.GL_REPEAT);
                 viewIceTextures[slot] = uploadTable(viewIceTextures[slot], view.ice(), SkyTables.VIEW_WIDTH,

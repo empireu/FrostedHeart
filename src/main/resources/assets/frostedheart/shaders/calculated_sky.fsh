@@ -133,7 +133,7 @@ void main() {
 
     vec3 color = encodeSrgb(1.0 - exp(-exposure * max(radiance, vec3(0.0))));
 
-    // Same weather graying as ClientLevel.getSkyColor and SkyView.horizonDisplayColor:
+    // Same weather graying as ClientLevel.getSkyColor and SkyViewSet.horizonDisplayColor:
     float rainGray = dot(color, vec3(0.3, 0.59, 0.11)) * 0.6;
     color = mix(vec3(rainGray), color, 1.0 - rainLevel * 0.75);
     float thunderGray = dot(color, vec3(0.3, 0.59, 0.11)) * 0.2;
