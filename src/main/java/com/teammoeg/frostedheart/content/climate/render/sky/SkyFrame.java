@@ -83,9 +83,9 @@ public final class SkyFrame {
         sunY = (float) Math.cos(timeOfDayAngle);
         sunSide = Math.sin(timeOfDayAngle) > 0.0 ? -1.0F : 1.0F;
         iceDepth = IceWeatherDepth.update(partialTick);
-        haloIndex = CalculatedSkyRenderer.haloGridIndex(sunElevationRadians);
+        haloIndex = SkyBuilder.haloGridIndex(sunElevationRadians);
         depthIndex = IceDepthGrid.index(iceDepth);
-        viewIndex = CalculatedSkyRenderer.viewGridIndex(sunElevationRadians);
+        viewIndex = SkyBuilder.viewGridIndex(sunElevationRadians);
         exposure = FHConfig.CLIENT.calculatedSkyExposure.get();
         rainLevel = level.getRainLevel(partialTick);
         thunderLevel = level.getThunderLevel(partialTick);
