@@ -29,8 +29,9 @@ import org.slf4j.Logger;
 import java.util.Locale;
 
 /**
- * Checks the ice depth that the weather calls for, the grid of depths the sky is built for, that blending the tables of
- * two grid depths matches the tables of the depth between them, and the light on the ground under ice.
+ * Checks the ice depth and the diamond dust that the weather calls for, the grid of depths the sky is built for, that
+ * blending the tables of two grid depths matches the tables of the depth between them, and the light on the ground
+ * under ice.
  */
 @GameTestHolder("frostedheart_calculated_sky")
 @PrefixGameTestTemplate(false)
@@ -73,6 +74,54 @@ public final class IceWeatherGameTests {
         assertRampBeforeSnow(helper);
         assertRecoveryAfterSnow(helper);
         assertSmoothing(helper);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void diamondDustLawFollowsSnow(GameTestHelper helper) {
+        double full = DiamondDustLaw.FULL_EXTINCTION;
+        for (double hoursSinceSnow : new double[] {0.0, 0.5, 6.0, 18.0, 30.0, Double.POSITIVE_INFINITY}) {
+            assertClose(helper, "dust while snowing " + hoursSinceSnow + " hours after snow",
+                    DiamondDustLaw.targetExtinction(true, hoursSinceSnow), 0.0, 0.0);
+        }
+        assertClose(helper, "dust with no snow known", dustAfterSnow(Double.POSITIVE_INFINITY), 0.0, 0.0);
+        assertClose(helper, "dust with the snow end ahead of the clock", dustAfterSnow(-1.0), 0.0, 0.0);
+        assertClose(helper, "dust when the snow ends", dustAfterSnow(0.0), 0.0, 0.0);
+        assertRelative(helper, "dust half an hour after snow", dustAfterSnow(0.5), 0.5 * full);
+        assertRelative(helper, "dust 1 hour after snow", dustAfterSnow(1.0), full);
+        assertRelative(helper, "dust 6 hours after snow", dustAfterSnow(6.0), full);
+        assertRelative(helper, "dust 12 hours after snow", dustAfterSnow(12.0), full);
+        assertRelative(helper, "dust 18 hours after snow", dustAfterSnow(18.0), 0.5 * full);
+        assertClose(helper, "dust 24 hours after snow", dustAfterSnow(24.0), 0.0, 0.0);
+        assertClose(helper, "dust 30 hours after snow", dustAfterSnow(30.0), 0.0, 0.0);
+        double previous = 0.0;
+        for (double hours = 0.0; hours <= 30.0; hours += 0.25) {
+            double extinction = dustAfterSnow(hours);
+            helper.assertTrue(extinction >= 0.0 && extinction <= full,
+                    "Dust " + hours + " hours after snow is " + extinction + ", outside the range from 0 to " + full);
+            boolean rising = hours <= DiamondDustLaw.HOLD_END_HOURS;
+            helper.assertTrue(rising ? extinction >= previous : extinction <= previous,
+                    "Dust " + hours + " hours after snow is " + extinction + " after " + previous
+                            + " at the quarter hour before");
+            previous = extinction;
+        }
+        assertRelative(helper, "smoothed dust with no elapsed time",
+                DiamondDustLaw.smoothedExtinction(0.2, full, 0.0), 0.2);
+        assertRelative(helper, "smoothed dust after a very long time",
+                DiamondDustLaw.smoothedExtinction(0.2, full, 1.0e6), full);
+        assertRelative(helper, "gap left after one smoothing time",
+                full - DiamondDustLaw.smoothedExtinction(0.0, full, DiamondDustLaw.SMOOTHING_SECONDS),
+                full / Math.E);
+        for (double elapsed : new double[] {0.1, 1.0, 10.0, 49.0, 50.0, 51.0, 100.0, 500.0}) {
+            for (double[] pair : new double[][] {{0.0, 1.0}, {1.0, 0.0}, {0.3, 0.7}}) {
+                double result = DiamondDustLaw.smoothedExtinction(pair[0], pair[1], elapsed);
+                double low = Math.min(pair[0], pair[1]);
+                double high = Math.max(pair[0], pair[1]);
+                helper.assertTrue(result >= low && result <= high,
+                        "Smoothed dust from " + pair[0] + " toward " + pair[1] + " after " + elapsed
+                                + " seconds is " + result + ", outside the range from " + low + " to " + high);
+            }
+        }
         helper.succeed();
     }
 
@@ -321,6 +370,10 @@ public final class IceWeatherGameTests {
                                 + " seconds is " + result + ", outside the range from " + low + " to " + high);
             }
         }
+    }
+
+    private static double dustAfterSnow(double hoursSinceSnow) {
+        return DiamondDustLaw.targetExtinction(false, hoursSinceSnow);
     }
 
     private static double depthBeforeSnow(double hoursUntilSnow, double humidity) {

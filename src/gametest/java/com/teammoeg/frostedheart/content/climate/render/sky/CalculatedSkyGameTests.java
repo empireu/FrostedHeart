@@ -447,7 +447,7 @@ public final class CalculatedSkyGameTests {
     /**
      * A change of the texel size keeps the tables and builds the halo profile, the halo maps, and the views again.
      * A change of the nanobots then keeps the halo profile and maps, builds the tables again, and fills the views that
-     * the first state dropped. A change of the exposure starts no build.
+     * the first state dropped. A change of any setting that rebuilds nothing, such as the exposure, starts no build.
      */
     @GameTest(template = "phase0a_empty", timeoutTicks = 600)
     public static void settingsRebuildOnlyWhatDependsOnThem(GameTestHelper helper) {
@@ -457,7 +457,6 @@ public final class CalculatedSkyGameTests {
         int viewIndex = SkyBuilder.viewGridIndex(Math.toRadians(20.0));
         SkySettings texelChanged = SkySettings.DEFAULT.with(SkySetting.TEXEL_DEGREES, 1.0);
         SkySettings nanobotsChanged = texelChanged.with(SkySetting.NANOBOT_OPTICAL_DEPTH, 0.5);
-        SkySettings exposureChanged = nanobotsChanged.with(SkySetting.EXPOSURE, 12.0);
         SkyState[] states = new SkyState[3];
         helper.startSequence()
                 .thenExecute(() -> builder.request(SkySettings.DEFAULT, haloIndex, depthIndex, viewIndex))
@@ -502,9 +501,16 @@ public final class CalculatedSkyGameTests {
                         helper.assertTrue(states[0].views().holds(view),
                                 "View " + slot + " after the nanobot change is not one the first state dropped");
                     }
-                    builder.request(exposureChanged, haloIndex, depthIndex, viewIndex);
-                    helper.assertTrue(!builder.isBuilding() && builder.state() == after,
-                            "A change of the exposure started a build");
+                    for (SkySetting setting : SkySetting.values()) {
+                        if (setting.rebuilds() != SkySetting.Rebuilds.NOTHING) {
+                            continue;
+                        }
+                        double changed = setting.isSwitch() ? 1.0 - setting.defaultValue()
+                                : setting.defaultValue() == setting.maximum() ? setting.minimum() : setting.maximum();
+                        builder.request(nanobotsChanged.with(setting, changed), haloIndex, depthIndex, viewIndex);
+                        helper.assertTrue(!builder.isBuilding() && builder.state() == after,
+                                "A change of " + setting.key() + " started a build");
+                    }
                 })
                 .thenSucceed();
     }

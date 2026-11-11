@@ -130,6 +130,7 @@ public final class CalculatedSkyClientCommand {
         send(context, String.format(Locale.ROOT, "Nanobots about %.0f Mt, texels drawn at %.3f degrees", megatons,
                 settings.actualTexelDegrees()));
         send(context, IceWeatherDepth.describe(Minecraft.getInstance().getFrameTime()));
+        send(context, DiamondDustExtinction.describe(Minecraft.getInstance().getFrameTime()));
         send(context, String.format(Locale.ROOT,
                 "Last build: tables %.1f ms, halo profile %.1f ms, halo map %.1f ms, sky view %.1f ms",
                 CalculatedSkyRenderer.lastTablesMilliseconds(), CalculatedSkyRenderer.lastHaloProfileMilliseconds(),

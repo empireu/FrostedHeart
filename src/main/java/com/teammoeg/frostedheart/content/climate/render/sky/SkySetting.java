@@ -44,6 +44,10 @@ public enum SkySetting {
             + "halos, sun dogs, and arcs. Used while iceFollowsWeather is off.", Rebuilds.NOTHING, 0.1, 0.0, 3.0),
     ICE_FOLLOWS_WEATHER("iceFollowsWeather", "Lets the ice crystal layer follow the weather, thin on clear days and "
             + "thickening over the day before snow.", true, ICE_OPTICAL_DEPTH),
+    DUST_EXTINCTION("dustExtinction", "Extinction per kilometer of the diamond dust near the ground, the ice crystals "
+            + "in the clear air after snow. Used while dustFollowsWeather is off.", Rebuilds.NOTHING, 0.0, 0.0, 3.0),
+    DUST_FOLLOWS_WEATHER("dustFollowsWeather", "Lets the diamond dust follow the weather, forming after each snow and "
+            + "gone a climate day later.", true, DUST_EXTINCTION),
     TEXEL_DEGREES("texelDegrees", "Size of the sky's square texels in degrees. They are fixed to the sky like the "
             + "sun's texture. 0 draws a smooth sky.", Rebuilds.HALOS, 0.5, 0.0, 5.0);
 
