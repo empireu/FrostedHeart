@@ -260,13 +260,9 @@ public final class CalculatedSkyRenderer {
         if (current == null || pendingBuild != null || !isAllowed(level)) {
             return false;
         }
-        double sunElevation = Math.asin(Math.cos(level.getTimeOfDay(partialTick) * Math.PI * 2.0));
-        return matchesConfig(current.settings())
-                && current.haloIndex() == gridIndex(sunElevation, HALO_MAP_STEP_DEGREES, LOWEST_HALO_SUN_DEGREES,
-                        HIGHEST_HALO_SUN_DEGREES)
-                && current.depthIndex() == IceDepthGrid.index(IceWeatherDepth.update(partialTick))
-                && current.viewIndex() == gridIndex(sunElevation, VIEW_STEP_DEGREES, LOWEST_VIEW_SUN_DEGREES,
-                        HIGHEST_VIEW_SUN_DEGREES);
+        SkyFrame frame = SkyFrame.current(level, partialTick);
+        return matchesConfig(current.settings()) && current.haloIndex() == frame.haloIndex()
+                && current.depthIndex() == frame.depthIndex() && current.viewIndex() == frame.viewIndex();
     }
 
     private static boolean shaderPackInUse() {
@@ -287,13 +283,12 @@ public final class CalculatedSkyRenderer {
             return;
         }
         try {
-            double timeOfDayAngle = level.getTimeOfDay(partialTick) * Math.PI * 2.0;
-            double iceDepth = IceWeatherDepth.update(partialTick);
-            updateTables(Math.asin(Math.cos(timeOfDayAngle)), iceDepth);
+            SkyFrame frame = SkyFrame.current(level, partialTick);
+            updateTables(frame);
             if (failed || state == null || camera.getFluidInCamera() != FogType.NONE) {
                 return;
             }
-            draw(state, level, poseStack, projection, partialTick, timeOfDayAngle, iceDepth);
+            draw(state, frame, poseStack, projection);
             sunDrawn = true;
         } catch (RuntimeException exception) {
             fail("drawing", exception);
@@ -310,16 +305,13 @@ public final class CalculatedSkyRenderer {
         if (current == null || !isAllowed(level)) {
             return null;
         }
+        SkyFrame frame = SkyFrame.current(level, partialTick);
         Vector3f look = camera.getLookVector();
         double horizontalFraction = Math.min(1.0, Math.sqrt(look.x() * look.x() + look.z() * look.z()));
-        double timeOfDayAngle = level.getTimeOfDay(partialTick) * Math.PI * 2.0;
-        double azimuth = Math.atan2(look.z(), look.x() * sunSide(timeOfDayAngle));
-        float sunBlend = sunBlend(current, Math.asin(Math.cos(timeOfDayAngle)));
-        double depthBlend = IceDepthGrid.blendWeight(IceWeatherDepth.update(partialTick), current.depthIndex());
+        double azimuth = Math.atan2(look.z(), look.x() * frame.sunSide());
         SkyView.horizonDisplayColor(current.lowDepthLowSun(), current.lowDepthHighSun(), current.highDepthLowSun(),
-                current.highDepthHighSun(), sunBlend, depthBlend, azimuth, horizontalFraction,
-                FHConfig.CLIENT.calculatedSkyExposure.get(), level.getRainLevel(partialTick),
-                level.getThunderLevel(partialTick), reusedFogColor);
+                current.highDepthHighSun(), viewBlend(current, frame), depthBlend(current, frame), azimuth,
+                horizontalFraction, frame.exposure(), frame.rainLevel(), frame.thunderLevel(), reusedFogColor);
         return reusedFogColor;
     }
 
@@ -332,19 +324,20 @@ public final class CalculatedSkyRenderer {
         if (current == null || !isAllowed(level)) {
             return false;
         }
-        double sunElevation = Math.asin(Math.cos(level.getTimeOfDay(partialTick) * Math.PI * 2.0));
-        double depthBlend = IceDepthGrid.blendWeight(IceWeatherDepth.update(partialTick), current.depthIndex());
+        SkyFrame frame = SkyFrame.current(level, partialTick);
         SkyView.daylightColor(current.lowDepthLowSun(), current.lowDepthHighSun(), current.highDepthLowSun(),
-                current.highDepthHighSun(), sunBlend(current, sunElevation), depthBlend,
-                FHConfig.CLIENT.calculatedSkyExposure.get(), level.getRainLevel(partialTick), skyDarken, result);
+                current.highDepthHighSun(), viewBlend(current, frame), depthBlend(current, frame), frame.exposure(),
+                frame.rainLevel(), skyDarken, result);
         return true;
     }
 
-    /**
-     * The sign of the sun's x direction, which turns world azimuths into azimuths from the sun as the tables use them.
-     */
-    private static float sunSide(double timeOfDayAngle) {
-        return Math.sin(timeOfDayAngle) > 0.0 ? -1.0F : 1.0F;
+    static int haloGridIndex(double sunElevationRadians) {
+        return gridIndex(sunElevationRadians, HALO_MAP_STEP_DEGREES, LOWEST_HALO_SUN_DEGREES,
+                HIGHEST_HALO_SUN_DEGREES);
+    }
+
+    static int viewGridIndex(double sunElevationRadians) {
+        return gridIndex(sunElevationRadians, VIEW_STEP_DEGREES, LOWEST_VIEW_SUN_DEGREES, HIGHEST_VIEW_SUN_DEGREES);
     }
 
     /**
@@ -369,9 +362,18 @@ public final class CalculatedSkyRenderer {
         return (float) Math.max(0.0, Math.min(1.0, (sunElevation - lowElevation) / (highElevation - lowElevation)));
     }
 
-    private static float sunBlend(SkyState current, double sunElevation) {
-        return blendWeight(sunElevation, current.lowDepthLowSun().sunElevationRadians(),
+    private static float viewBlend(SkyState current, SkyFrame frame) {
+        return blendWeight(frame.sunElevationRadians(), current.lowDepthLowSun().sunElevationRadians(),
                 current.lowDepthHighSun().sunElevationRadians());
+    }
+
+    private static float haloBlend(SkyState current, SkyFrame frame) {
+        return blendWeight(frame.sunElevationRadians(), current.lowHalo().sunElevationRadians(),
+                current.highHalo().sunElevationRadians());
+    }
+
+    private static double depthBlend(SkyState current, SkyFrame frame) {
+        return IceDepthGrid.blendWeight(frame.iceDepth(), current.depthIndex());
     }
 
     /**
@@ -384,7 +386,7 @@ public final class CalculatedSkyRenderer {
                 && settings.texelDegrees() == FHConfig.CLIENT.calculatedSkyTexelDegrees.get();
     }
 
-    private static void updateTables(double sunElevation, double iceDepth) {
+    private static void updateTables(SkyFrame frame) {
         if (pendingBuild != null) {
             if (!pendingBuild.isDone()) {
                 return;
@@ -417,10 +419,9 @@ public final class CalculatedSkyRenderer {
 
         SkyState current = state;
         boolean settingsChanged = current == null || !matchesConfig(current.settings());
-        int haloIndex = gridIndex(sunElevation, HALO_MAP_STEP_DEGREES, LOWEST_HALO_SUN_DEGREES,
-                HIGHEST_HALO_SUN_DEGREES);
-        int depthIndex = IceDepthGrid.index(iceDepth);
-        int viewIndex = gridIndex(sunElevation, VIEW_STEP_DEGREES, LOWEST_VIEW_SUN_DEGREES, HIGHEST_VIEW_SUN_DEGREES);
+        int haloIndex = frame.haloIndex();
+        int depthIndex = frame.depthIndex();
+        int viewIndex = frame.viewIndex();
         if (!settingsChanged && current.haloIndex() == haloIndex && current.depthIndex() == depthIndex
                 && current.viewIndex() == viewIndex) {
             return;
@@ -690,23 +691,20 @@ public final class CalculatedSkyRenderer {
         return target;
     }
 
-    private static void draw(SkyState current, ClientLevel level, PoseStack poseStack, Matrix4f projection,
-            float partialTick, double timeOfDayAngle, double iceDepth) {
+    private static void draw(SkyState current, SkyFrame frame, PoseStack poseStack, Matrix4f projection) {
         ShaderProgram shaderProgram = program();
         inverseViewProjection.set(projection).mul(poseStack.last().pose()).invert();
-        float sunX = (float) -Math.sin(timeOfDayAngle);
-        float sunY = (float) Math.cos(timeOfDayAngle);
-        float sunSide = sunSide(timeOfDayAngle);
+        float sunX = frame.sunX();
+        float sunY = frame.sunY();
+        float sunSide = frame.sunSide();
         float[] fogColor = RenderSystem.getShaderFogColor();
-        float exposure = FHConfig.CLIENT.calculatedSkyExposure.get().floatValue();
-        float rainLevel = level.getRainLevel(partialTick);
-        float thunderLevel = level.getThunderLevel(partialTick);
+        float exposure = (float) frame.exposure();
+        float rainLevel = frame.rainLevel();
+        float thunderLevel = frame.thunderLevel();
         float texelFaceSize = current.settings().texelFaceSize();
-        double sunElevation = Math.asin(Math.cos(timeOfDayAngle));
-        float haloBlend = blendWeight(sunElevation, current.lowHalo().sunElevationRadians(),
-                current.highHalo().sunElevationRadians());
-        float viewBlend = sunBlend(current, sunElevation);
-        float depthBlend = (float) IceDepthGrid.blendWeight(iceDepth, current.depthIndex());
+        float haloBlend = haloBlend(current, frame);
+        float viewBlend = viewBlend(current, frame);
+        float depthBlend = (float) depthBlend(current, frame);
         for (int slot = 0; slot < VIEW_SLOTS; slot++) {
             drawnTextures[SKY_VIEW_UNIT + slot] = viewSkyTextures[slot];
             drawnTextures[ICE_VIEW_UNIT + slot] = viewIceTextures[slot];
