@@ -32,9 +32,8 @@ final class SkyTransmittance {
     private static final int HEIGHT = 128;
     private static final int ROWS_BELOW_ICE_BAND = 24;
     private static final int ROWS_IN_ICE_BAND = 64;
-    private static final int ROWS_ABOVE_ICE_BAND = HEIGHT - 1 - ROWS_BELOW_ICE_BAND - ROWS_IN_ICE_BAND;
     private static final int STEP_COUNT = 40;
-    private static final int ICE_BAND_STEPS = 12;
+    private static final int MAXIMUM_STEPS = SkyRaySteps.maximumSteps(STEP_COUNT, SkyRaySteps.ICE_BAND_STEPS);
     private static final double HORIZON_DISTANCE = Math.sqrt(
             SkyAtmosphere.TOP_RADIUS * SkyAtmosphere.TOP_RADIUS
                     - SkyAtmosphere.GROUND_RADIUS * SkyAtmosphere.GROUND_RADIUS);
@@ -44,6 +43,12 @@ final class SkyTransmittance {
     private static final double ICE_BAND_HIGH_HORIZONTAL = Math.sqrt(
             SkyAtmosphere.ICE_BAND_HIGH_RADIUS * SkyAtmosphere.ICE_BAND_HIGH_RADIUS
                     - SkyAtmosphere.GROUND_RADIUS * SkyAtmosphere.GROUND_RADIUS);
+    /**
+     * Rows by the distance from the ground's horizon point to a point of the row, sqrt(r^2 - R^2) for radius r and
+     * ground radius R.
+     */
+    private static final BandRows ROWS = new BandRows(HEIGHT, ROWS_BELOW_ICE_BAND, ROWS_IN_ICE_BAND,
+            ICE_BAND_LOW_HORIZONTAL, ICE_BAND_HIGH_HORIZONTAL, HORIZON_DISTANCE);
 
     private final float[] values = new float[WIDTH * HEIGHT * CHANNELS];
 
@@ -57,10 +62,10 @@ final class SkyTransmittance {
     SkyTransmittance(SkyAtmosphere atmosphere, double[] extinction) {
         double[] opticalDepth = new double[CHANNELS];
         double[] boundaries = new double[SkyRaySteps.MAXIMUM_BOUNDARIES];
-        double[] travelled = new double[SkyRaySteps.maximumSteps(STEP_COUNT, ICE_BAND_STEPS)];
-        double[] stepLengths = new double[SkyRaySteps.maximumSteps(STEP_COUNT, ICE_BAND_STEPS)];
+        double[] travelled = new double[MAXIMUM_STEPS];
+        double[] stepLengths = new double[MAXIMUM_STEPS];
         for (int row = 0; row < HEIGHT; row++) {
-            double horizontal = rowHorizontal(row);
+            double horizontal = ROWS.value(row);
             double radius = Math.sqrt(horizontal * horizontal
                     + SkyAtmosphere.GROUND_RADIUS * SkyAtmosphere.GROUND_RADIUS);
             double minimumDistance = SkyAtmosphere.TOP_RADIUS - radius;
@@ -73,8 +78,8 @@ final class SkyTransmittance {
                             / (2.0 * radius * distance);
                     cosine = Math.max(-1.0, Math.min(1.0, cosine));
                 }
-                int stepCount = SkyRaySteps.fill(radius, cosine, distance, STEP_COUNT, ICE_BAND_STEPS, boundaries,
-                        travelled, stepLengths, 0);
+                int stepCount = SkyRaySteps.fill(radius, cosine, distance, STEP_COUNT, SkyRaySteps.ICE_BAND_STEPS,
+                        boundaries, travelled, stepLengths, 0);
                 Arrays.fill(opticalDepth, 0.0);
                 for (int step = 0; step < stepCount; step++) {
                     int slot = atmosphere.altitudeSlot(SkyAtmosphere.radiusAlongRay(radius, cosine, travelled[step]));
@@ -88,34 +93,6 @@ final class SkyTransmittance {
                 }
             }
         }
-    }
-
-    /**
-     * The distance from the ground's horizon point to a point of the row, sqrt(r^2 - R^2) for radius r and ground
-     * radius R.
-     */
-    private static double rowHorizontal(int row) {
-        if (row <= ROWS_BELOW_ICE_BAND) {
-            return ICE_BAND_LOW_HORIZONTAL * row / ROWS_BELOW_ICE_BAND;
-        }
-        if (row <= ROWS_BELOW_ICE_BAND + ROWS_IN_ICE_BAND) {
-            return ICE_BAND_LOW_HORIZONTAL + (ICE_BAND_HIGH_HORIZONTAL - ICE_BAND_LOW_HORIZONTAL)
-                    * (row - ROWS_BELOW_ICE_BAND) / ROWS_IN_ICE_BAND;
-        }
-        return ICE_BAND_HIGH_HORIZONTAL + (HORIZON_DISTANCE - ICE_BAND_HIGH_HORIZONTAL)
-                * (row - ROWS_BELOW_ICE_BAND - ROWS_IN_ICE_BAND) / ROWS_ABOVE_ICE_BAND;
-    }
-
-    private static double rowPosition(double horizontal) {
-        if (horizontal <= ICE_BAND_LOW_HORIZONTAL) {
-            return horizontal / ICE_BAND_LOW_HORIZONTAL * ROWS_BELOW_ICE_BAND;
-        }
-        if (horizontal <= ICE_BAND_HIGH_HORIZONTAL) {
-            return ROWS_BELOW_ICE_BAND + (horizontal - ICE_BAND_LOW_HORIZONTAL)
-                    / (ICE_BAND_HIGH_HORIZONTAL - ICE_BAND_LOW_HORIZONTAL) * ROWS_IN_ICE_BAND;
-        }
-        return ROWS_BELOW_ICE_BAND + ROWS_IN_ICE_BAND + (horizontal - ICE_BAND_HIGH_HORIZONTAL)
-                / (HORIZON_DISTANCE - ICE_BAND_HIGH_HORIZONTAL) * ROWS_ABOVE_ICE_BAND;
     }
 
     void sample(double radius, double cosine, double[] result) {
@@ -132,7 +109,7 @@ final class SkyTransmittance {
         double minimumDistance = SkyAtmosphere.TOP_RADIUS - clampedRadius;
         double maximumDistance = horizontal + HORIZON_DISTANCE;
         double columnPosition = (distance - minimumDistance) / (maximumDistance - minimumDistance) * (WIDTH - 1);
-        double rowPosition = rowPosition(horizontal);
+        double rowPosition = ROWS.position(horizontal);
         columnPosition = Math.max(0.0, Math.min(WIDTH - 1.0, columnPosition));
         rowPosition = Math.max(0.0, Math.min(HEIGHT - 1.0, rowPosition));
 

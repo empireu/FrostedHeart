@@ -92,13 +92,10 @@ import static com.teammoeg.frostedheart.infrastructure.command.CommandHelper.lit
  * Each shot waits until the sky is built for its config and sun elevation, the terrain is drawn after a move, and fog
  * has settled, then saves the frame and a line of manifest.tsv in a new folder under screenshots/sky-shots.
  * The config, view, weather, and position the run started with are restored when it ends.
+ * Its subcommands are part of /calculatedSky, so nothing here runs while CalculatedSkyClientCommand.ENABLED is false.
  */
 @OnlyIn(Dist.CLIENT)
 public final class CalculatedSkyScreenshots {
-    /**
-     * Whether /calculatedSky screenshots is registered. Without the command no run starts, so nothing here runs.
-     */
-    public static final boolean ENABLED = true;
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final String FOLDER = "sky-shots";
     private static final double MINIMUM_SETTLE_SECONDS = 1.0;

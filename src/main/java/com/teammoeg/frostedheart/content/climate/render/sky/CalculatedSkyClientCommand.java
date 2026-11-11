@@ -42,16 +42,25 @@ import static com.teammoeg.frostedheart.infrastructure.command.CommandHelper.lit
 import static com.teammoeg.frostedheart.infrastructure.command.CommandHelper.registerCommand;
 
 /**
- * Client command that turns the calculated sky on and off and changes its settings in the client config.
- * With CalculatedSkyScreenshots.ENABLED it also records and takes screenshot sets.
+ * Client command that turns the calculated sky on and off, changes its settings in the client config, and records and
+ * takes screenshot sets through CalculatedSkyScreenshots.
  */
 @Mod.EventBusSubscriber(modid = FHMain.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
 public final class CalculatedSkyClientCommand {
+    /**
+     * Whether /calculatedSky is registered. Without it the sky follows the client config alone, and the screenshot
+     * harness never runs.
+     */
+    public static final boolean ENABLED = true;
+
     private CalculatedSkyClientCommand() {
     }
 
     @SubscribeEvent
     public static void register(RegisterClientCommandsEvent event) {
+        if (!ENABLED) {
+            return;
+        }
         LiteralArgumentBuilder<CommandSourceStack> set = literal("set");
         for (SkySetting setting : SkySetting.values()) {
             set.then(setting(setting));
@@ -62,9 +71,7 @@ public final class CalculatedSkyClientCommand {
                 .then(literal("off").executes(context -> setEnabled(context, false)))
                 .then(literal("reset").executes(CalculatedSkyClientCommand::reset))
                 .then(set);
-        if (CalculatedSkyScreenshots.ENABLED) {
-            CalculatedSkyScreenshots.addCommands(command);
-        }
+        CalculatedSkyScreenshots.addCommands(command);
         registerCommand(event.getDispatcher(), command);
     }
 

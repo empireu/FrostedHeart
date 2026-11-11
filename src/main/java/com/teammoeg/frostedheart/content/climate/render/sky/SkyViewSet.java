@@ -101,7 +101,7 @@ public final class SkyViewSet {
                     views[slot(0, 1)].horizonRadiance(channel, azimuth, horizontalFraction),
                     views[slot(1, 0)].horizonRadiance(channel, azimuth, horizontalFraction),
                     views[slot(1, 1)].horizonRadiance(channel, azimuth, horizontalFraction), sunWeight, depthWeight);
-            result[channel] = (float) encodeSrgb(1.0 - Math.exp(-exposure * Math.max(0.0, radiance)));
+            result[channel] = (float) SkyDisplay.displayValue(exposure, radiance);
         }
         greyByWeather(result, 0.6F, rainLevel);
         greyByWeather(result, 0.2F, thunderLevel);
@@ -116,12 +116,12 @@ public final class SkyViewSet {
      */
     public void daylightColor(double sunWeight, double depthWeight, double exposure, float rainLevel, float skyDarken,
             float[] result) {
-        double brightest = encodeSrgb(1.0 - Math.exp(-exposure * SkyAtmosphere.GROUND_ALBEDO / Math.PI));
+        double brightest = SkyDisplay.encodeSrgb(1.0 - Math.exp(-exposure * SkyAtmosphere.GROUND_ALBEDO / Math.PI));
         for (int channel = 0; channel < CHANNELS; channel++) {
             double radiance = blend(views[slot(0, 0)].groundRadiance()[channel],
                     views[slot(0, 1)].groundRadiance()[channel], views[slot(1, 0)].groundRadiance()[channel],
                     views[slot(1, 1)].groundRadiance()[channel], sunWeight, depthWeight);
-            result[channel] = (float) encodeSrgb(1.0 - Math.exp(-exposure * Math.max(0.0, radiance)));
+            result[channel] = (float) SkyDisplay.displayValue(exposure, radiance);
             brightest = Math.max(brightest, result[channel]);
         }
         for (int channel = 0; channel < CHANNELS; channel++) {
@@ -144,13 +144,5 @@ public final class SkyViewSet {
         for (int channel = 0; channel < CHANNELS; channel++) {
             color[channel] = grey + (color[channel] - grey) * kept;
         }
-    }
-
-    private static double encodeSrgb(double linear) {
-        double clamped = Math.max(0.0, Math.min(1.0, linear));
-        if (clamped < 0.0031308) {
-            return clamped * 12.92;
-        }
-        return 1.055 * Math.pow(clamped, 1.0 / 2.4) - 0.055;
     }
 }

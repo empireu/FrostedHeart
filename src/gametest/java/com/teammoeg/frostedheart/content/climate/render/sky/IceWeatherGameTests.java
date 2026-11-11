@@ -386,15 +386,7 @@ public final class IceWeatherGameTests {
     }
 
     private static double displaySteps(double radiance) {
-        return 255.0 * encodeSrgb(1.0 - Math.exp(-SkySetting.EXPOSURE.defaultValue() * Math.max(0.0, radiance)));
-    }
-
-    private static double encodeSrgb(double linear) {
-        double clamped = Math.max(0.0, Math.min(1.0, linear));
-        if (clamped < 0.0031308) {
-            return clamped * 12.92;
-        }
-        return 1.055 * Math.pow(clamped, 1.0 / 2.4) - 0.055;
+        return SkyDisplay.displaySteps(SkySetting.EXPOSURE.defaultValue(), radiance);
     }
 
     private static void assertRelative(GameTestHelper helper, String what, double actual, double expected) {

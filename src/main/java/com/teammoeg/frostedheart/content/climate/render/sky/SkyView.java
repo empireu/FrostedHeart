@@ -106,12 +106,8 @@ public final class SkyView {
      * Samples a table of one RGB entry per row of the sky view, with the same rows as sample.
      */
     static double sampleRow(float[] rowTable, int channel, double elevation) {
-        int height = SkyTables.VIEW_HEIGHT;
-        double latitude = elevationToLatitude(elevation);
-        double position = Math.signum(latitude) * Math.sqrt(Math.abs(latitude) * 2.0 / Math.PI);
-        double rowPosition = (0.5 + 0.5 * position) * height - 0.5;
-        rowPosition = Math.max(0.0, Math.min(height - 1.0, rowPosition));
-        int row = Math.min((int) rowPosition, height - 2);
+        double rowPosition = rowPositionAt(elevation);
+        int row = Math.min((int) rowPosition, SkyTables.VIEW_HEIGHT - 2);
         double rowFraction = rowPosition - row;
         return rowTable[row * CHANNELS + channel] * (1.0 - rowFraction)
                 + rowTable[(row + 1) * CHANNELS + channel] * rowFraction;
@@ -130,13 +126,22 @@ public final class SkyView {
         return offset / (1.0 - SkyAtmosphere.HORIZON_DIP_RADIANS * 2.0 / Math.PI);
     }
 
-    static double sample(float[] table, int channel, double azimuth, double elevation) {
-        int width = SkyTables.VIEW_WIDTH;
+    /**
+     * Where an elevation falls between the rows of the view, from 0 at the lowest row to VIEW_HEIGHT - 1 at the
+     * highest, by the latitude mapping of Hillaire 2020.
+     */
+    private static double rowPositionAt(double elevation) {
         int height = SkyTables.VIEW_HEIGHT;
         double latitude = elevationToLatitude(elevation);
         double position = Math.signum(latitude) * Math.sqrt(Math.abs(latitude) * 2.0 / Math.PI);
         double rowPosition = (0.5 + 0.5 * position) * height - 0.5;
-        rowPosition = Math.max(0.0, Math.min(height - 1.0, rowPosition));
+        return Math.max(0.0, Math.min(height - 1.0, rowPosition));
+    }
+
+    static double sample(float[] table, int channel, double azimuth, double elevation) {
+        int width = SkyTables.VIEW_WIDTH;
+        int height = SkyTables.VIEW_HEIGHT;
+        double rowPosition = rowPositionAt(elevation);
         double columnPosition = (azimuth + Math.PI) / (2.0 * Math.PI) * width - 0.5;
         int columnFloor = (int) Math.floor(columnPosition);
         double columnFraction = columnPosition - columnFloor;
@@ -157,10 +162,7 @@ public final class SkyView {
     static void sampleChannels(float[] table, double azimuth, double elevation, double[] result) {
         int width = SkyTables.VIEW_WIDTH;
         int height = SkyTables.VIEW_HEIGHT;
-        double latitude = elevationToLatitude(elevation);
-        double position = Math.signum(latitude) * Math.sqrt(Math.abs(latitude) * 2.0 / Math.PI);
-        double rowPosition = (0.5 + 0.5 * position) * height - 0.5;
-        rowPosition = Math.max(0.0, Math.min(height - 1.0, rowPosition));
+        double rowPosition = rowPositionAt(elevation);
         double columnPosition = (azimuth + Math.PI) / (2.0 * Math.PI) * width - 0.5;
         int columnFloor = (int) Math.floor(columnPosition);
         double columnFraction = columnPosition - columnFloor;

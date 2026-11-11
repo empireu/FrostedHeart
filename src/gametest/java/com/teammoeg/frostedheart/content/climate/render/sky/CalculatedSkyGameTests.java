@@ -54,7 +54,6 @@ public final class CalculatedSkyGameTests {
             {2.269845e-02, 1.908241e-02, 2.028031e-02}
     };
     private static final int UNIFORM_STEPS = 30;
-    private static final int ICE_BAND_STEPS = 12;
     private static final double[] RAY_START_ALTITUDES = {100.0, 5000.0, 11000.0, 20000.0, 60000.0};
     private static final double AUREOLE_ICE_OPTICAL_DEPTH = 0.5;
     private static final int[] AUREOLE_ROWS = {60, 65, 85};
@@ -292,9 +291,10 @@ public final class CalculatedSkyGameTests {
         double groundDistance = SkyAtmosphere.distanceToGroundOrInfinity(radius, cosine);
         double length = groundDistance < Double.POSITIVE_INFINITY ? groundDistance
                 : SkyAtmosphere.distanceToTop(radius, cosine);
-        double[] travelled = new double[SkyRaySteps.maximumSteps(UNIFORM_STEPS, ICE_BAND_STEPS)];
-        double[] lengths = new double[SkyRaySteps.maximumSteps(UNIFORM_STEPS, ICE_BAND_STEPS)];
-        int count = SkyRaySteps.fill(radius, cosine, length, UNIFORM_STEPS, ICE_BAND_STEPS,
+        int maximumSteps = SkyRaySteps.maximumSteps(UNIFORM_STEPS, SkyRaySteps.ICE_BAND_STEPS);
+        double[] travelled = new double[maximumSteps];
+        double[] lengths = new double[maximumSteps];
+        int count = SkyRaySteps.fill(radius, cosine, length, UNIFORM_STEPS, SkyRaySteps.ICE_BAND_STEPS,
                 new double[SkyRaySteps.MAXIMUM_BOUNDARIES], travelled, lengths, 0);
         String ray = "ray from radius " + radius + " with cosine " + cosine;
         double end = 0.0;

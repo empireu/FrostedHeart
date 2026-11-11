@@ -45,8 +45,7 @@ public final class SkyTables {
             / Math.sqrt(1.0 + 2.0 * SUN_HALF_TANGENT * SUN_HALF_TANGENT));
     private static final int CHANNELS = SkyAtmosphere.CHANNEL_COUNT;
     private static final int VIEW_STEPS = 30;
-    private static final int ICE_BAND_STEPS = 12;
-    private static final int MAXIMUM_VIEW_STEPS = SkyRaySteps.maximumSteps(VIEW_STEPS, ICE_BAND_STEPS);
+    private static final int MAXIMUM_VIEW_STEPS = SkyRaySteps.maximumSteps(VIEW_STEPS, SkyRaySteps.ICE_BAND_STEPS);
     /**
      * Rows of the multiple scattering table are spaced evenly below, inside, and above the ice band, with a third of
      * them inside it, because the light inside a thick ice layer changes over a few hundred meters.
@@ -55,12 +54,17 @@ public final class SkyTables {
     private static final int MULTIPLE_SCATTERING_COLUMNS = 32;
     private static final int ROWS_BELOW_ICE_BAND = 8;
     private static final int ROWS_IN_ICE_BAND = 16;
-    private static final int ROWS_ABOVE_ICE_BAND = MULTIPLE_SCATTERING_ROWS - 1 - ROWS_BELOW_ICE_BAND - ROWS_IN_ICE_BAND;
     private static final double ICE_BAND_LOW_ALTITUDE = SkyAtmosphere.ICE_BAND_LOW_RADIUS - SkyAtmosphere.GROUND_RADIUS;
     private static final double ICE_BAND_HIGH_ALTITUDE = SkyAtmosphere.ICE_BAND_HIGH_RADIUS - SkyAtmosphere.GROUND_RADIUS;
+    /**
+     * Rows of the multiple scattering table by altitude.
+     */
+    private static final BandRows MULTIPLE_SCATTERING_ROW_ALTITUDES = new BandRows(MULTIPLE_SCATTERING_ROWS,
+            ROWS_BELOW_ICE_BAND, ROWS_IN_ICE_BAND, ICE_BAND_LOW_ALTITUDE, ICE_BAND_HIGH_ALTITUDE,
+            SkyAtmosphere.ATMOSPHERE_HEIGHT);
     private static final int MULTIPLE_SCATTERING_STEPS = 20;
     private static final int MAXIMUM_STEPS = Math.max(MAXIMUM_VIEW_STEPS,
-            SkyRaySteps.maximumSteps(MULTIPLE_SCATTERING_STEPS, ICE_BAND_STEPS));
+            SkyRaySteps.maximumSteps(MULTIPLE_SCATTERING_STEPS, SkyRaySteps.ICE_BAND_STEPS));
     private static final int DIRECTION_ROOT = 8;
     private static final int GLOW_VIEW_SAMPLES = 64;
     private static final int GLOW_ALTITUDE_SAMPLES = 64;
@@ -157,8 +161,8 @@ public final class SkyTables {
             double groundDistance = SkyAtmosphere.distanceToGroundOrInfinity(radius, cosine);
             boolean hitsGround = groundDistance < Double.POSITIVE_INFINITY;
             double length = hitsGround ? groundDistance : SkyAtmosphere.distanceToTop(radius, cosine);
-            int stepCount = SkyRaySteps.fill(radius, cosine, length, VIEW_STEPS, ICE_BAND_STEPS, scratchBoundaries,
-                    rayTravelled, rayStepLength, row * MAXIMUM_VIEW_STEPS);
+            int stepCount = SkyRaySteps.fill(radius, cosine, length, VIEW_STEPS, SkyRaySteps.ICE_BAND_STEPS,
+                    scratchBoundaries, rayTravelled, rayStepLength, row * MAXIMUM_VIEW_STEPS);
             rayStepCount[row] = stepCount;
             Arrays.fill(viewTransmittance, 1.0);
             double iceDepth = 0.0;
@@ -236,7 +240,7 @@ public final class SkyTables {
         double[] transfer = new double[CHANNELS];
         double[] groundReach = new double[CHANNELS];
         for (int row = 0; row < MULTIPLE_SCATTERING_ROWS; row++) {
-            double altitude = Math.max(1.0, multipleScatteringRowAltitude(row));
+            double altitude = Math.max(1.0, MULTIPLE_SCATTERING_ROW_ALTITUDES.value(row));
             double radius = SkyAtmosphere.GROUND_RADIUS + altitude;
             for (int column = 0; column < MULTIPLE_SCATTERING_COLUMNS; column++) {
                 double sunCosine = column / (MULTIPLE_SCATTERING_COLUMNS - 1.0) * 2.0 - 1.0;
@@ -250,30 +254,6 @@ public final class SkyTables {
                 }
             }
         }
-    }
-
-    private static double multipleScatteringRowAltitude(int row) {
-        if (row <= ROWS_BELOW_ICE_BAND) {
-            return ICE_BAND_LOW_ALTITUDE * row / ROWS_BELOW_ICE_BAND;
-        }
-        if (row <= ROWS_BELOW_ICE_BAND + ROWS_IN_ICE_BAND) {
-            return ICE_BAND_LOW_ALTITUDE
-                    + (ICE_BAND_HIGH_ALTITUDE - ICE_BAND_LOW_ALTITUDE) * (row - ROWS_BELOW_ICE_BAND) / ROWS_IN_ICE_BAND;
-        }
-        return ICE_BAND_HIGH_ALTITUDE + (SkyAtmosphere.ATMOSPHERE_HEIGHT - ICE_BAND_HIGH_ALTITUDE)
-                * (row - ROWS_BELOW_ICE_BAND - ROWS_IN_ICE_BAND) / ROWS_ABOVE_ICE_BAND;
-    }
-
-    private static double multipleScatteringRowPosition(double altitude) {
-        if (altitude <= ICE_BAND_LOW_ALTITUDE) {
-            return altitude / ICE_BAND_LOW_ALTITUDE * ROWS_BELOW_ICE_BAND;
-        }
-        if (altitude <= ICE_BAND_HIGH_ALTITUDE) {
-            return ROWS_BELOW_ICE_BAND + (altitude - ICE_BAND_LOW_ALTITUDE)
-                    / (ICE_BAND_HIGH_ALTITUDE - ICE_BAND_LOW_ALTITUDE) * ROWS_IN_ICE_BAND;
-        }
-        return ROWS_BELOW_ICE_BAND + ROWS_IN_ICE_BAND + (altitude - ICE_BAND_HIGH_ALTITUDE)
-                / (SkyAtmosphere.ATMOSPHERE_HEIGHT - ICE_BAND_HIGH_ALTITUDE) * ROWS_ABOVE_ICE_BAND;
     }
 
     /**
@@ -297,8 +277,8 @@ public final class SkyTables {
                 double groundDistance = SkyAtmosphere.distanceToGroundOrInfinity(radius, cosine);
                 boolean hitsGround = groundDistance < Double.POSITIVE_INFINITY;
                 double length = hitsGround ? groundDistance : SkyAtmosphere.distanceToTop(radius, cosine);
-                int stepCount = SkyRaySteps.fill(radius, cosine, length, MULTIPLE_SCATTERING_STEPS, ICE_BAND_STEPS,
-                        scratchBoundaries, scratchTravelled, scratchStepLengths, 0);
+                int stepCount = SkyRaySteps.fill(radius, cosine, length, MULTIPLE_SCATTERING_STEPS,
+                        SkyRaySteps.ICE_BAND_STEPS, scratchBoundaries, scratchTravelled, scratchStepLengths, 0);
                 Arrays.fill(viewTransmittance, 1.0);
                 for (int step = 0; step < stepCount; step++) {
                     double travelled = scratchTravelled[step];
@@ -358,8 +338,8 @@ public final class SkyTables {
         for (int sample = 0; sample <= GLOW_VIEW_SAMPLES; sample++) {
             double cosine = sample / (double) GLOW_VIEW_SAMPLES;
             double length = SkyAtmosphere.distanceToTop(radius, cosine);
-            int stepCount = SkyRaySteps.fill(radius, cosine, length, VIEW_STEPS, ICE_BAND_STEPS, scratchBoundaries,
-                    scratchTravelled, scratchStepLengths, 0);
+            int stepCount = SkyRaySteps.fill(radius, cosine, length, VIEW_STEPS, SkyRaySteps.ICE_BAND_STEPS,
+                    scratchBoundaries, scratchTravelled, scratchStepLengths, 0);
             Arrays.fill(viewTransmittance, 1.0);
             for (int step = 0; step < stepCount; step++) {
                 double travelled = scratchTravelled[step];
@@ -399,7 +379,7 @@ public final class SkyTables {
 
     private void sampleMultipleScattering(double radius, double sunCosine, double[] result) {
         double columnPosition = (0.5 + 0.5 * sunCosine) * (MULTIPLE_SCATTERING_COLUMNS - 1);
-        double rowPosition = multipleScatteringRowPosition(radius - SkyAtmosphere.GROUND_RADIUS);
+        double rowPosition = MULTIPLE_SCATTERING_ROW_ALTITUDES.position(radius - SkyAtmosphere.GROUND_RADIUS);
         columnPosition = Math.max(0.0, Math.min(MULTIPLE_SCATTERING_COLUMNS - 1.0, columnPosition));
         rowPosition = Math.max(0.0, Math.min(MULTIPLE_SCATTERING_ROWS - 1.0, rowPosition));
         int column = Math.min((int) columnPosition, MULTIPLE_SCATTERING_COLUMNS - 2);

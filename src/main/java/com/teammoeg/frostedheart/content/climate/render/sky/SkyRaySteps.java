@@ -26,6 +26,10 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
  */
 final class SkyRaySteps {
     static final int MAXIMUM_BOUNDARIES = 6;
+    /**
+     * Steps per crossing of the ice band that the tables use.
+     */
+    static final int ICE_BAND_STEPS = 12;
 
     private SkyRaySteps() {
     }
