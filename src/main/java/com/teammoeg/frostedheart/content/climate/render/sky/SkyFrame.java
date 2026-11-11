@@ -20,7 +20,6 @@
 package com.teammoeg.frostedheart.content.climate.render.sky;
 
 import com.teammoeg.frostedheart.FHMain;
-import com.teammoeg.frostedheart.infrastructure.config.FHConfig;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
@@ -86,7 +85,7 @@ public final class SkyFrame {
         haloIndex = SkyBuilder.haloGridIndex(sunElevationRadians);
         depthIndex = IceDepthGrid.index(iceDepth);
         viewIndex = SkyBuilder.viewGridIndex(sunElevationRadians);
-        exposure = FHConfig.CLIENT.calculatedSkyExposure.get();
+        exposure = SkySetting.EXPOSURE.get();
         rainLevel = level.getRainLevel(partialTick);
         thunderLevel = level.getThunderLevel(partialTick);
         stale = false;

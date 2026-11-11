@@ -149,20 +149,19 @@ public final class SkyBuilder {
     }
 
     /**
-     * Starts a build for the grid indices unless one runs already. New settings build everything again, and with null
-     * settings a build starts only when the current state is for other indices, reusing what it has.
+     * Starts a build for the settings and grid indices unless one runs already or the current state is built for
+     * them. The build reuses what the current state has, apart from what a changed setting rebuilds.
      */
-    void request(@Nullable SkySettings newSettings, int haloIndex, int depthIndex, int viewIndex) {
+    void request(SkySettings settings, int haloIndex, int depthIndex, int viewIndex) {
         SkyState current = state;
         if (pendingBuild != null) {
             return;
         }
-        if (newSettings == null && (current == null || current.isFor(haloIndex, depthIndex, viewIndex))) {
+        if (current != null && current.isFor(haloIndex, depthIndex, viewIndex)
+                && settings.sameBuild(current.settings())) {
             return;
         }
-        SkyState previous = newSettings != null ? null : current;
-        SkySettings settings = newSettings != null ? newSettings : current.settings();
-        pendingBuild = CompletableFuture.supplyAsync(() -> build(previous, settings, haloIndex, depthIndex, viewIndex),
+        pendingBuild = CompletableFuture.supplyAsync(() -> build(current, settings, haloIndex, depthIndex, viewIndex),
                 Util.backgroundExecutor());
     }
 
@@ -206,31 +205,39 @@ public final class SkyBuilder {
 
     /**
      * Builds the next state, reusing what the previous state already has and filling spare halo maps and views where
-     * there are any. Without a previous state everything is built for the given settings.
+     * there are any. Tables are built again when a setting that rebuilds tables changed, the halo profile and maps
+     * when one that rebuilds halos changed, and the views when either did. Without a previous state everything is
+     * built for the given settings.
      */
     private BuildResult build(@Nullable SkyState previous, SkySettings settings, int haloIndex, int depthIndex,
             int viewIndex) {
         buildTablesMilliseconds = Double.NaN;
         buildHaloMapMilliseconds = Double.NaN;
         buildViewMilliseconds = Double.NaN;
+        SkyState tablesSource = previous != null
+                && settings.samePart(previous.settings(), SkySetting.Rebuilds.TABLES) ? previous : null;
+        SkyState halosSource = previous != null
+                && settings.samePart(previous.settings(), SkySetting.Rebuilds.HALOS) ? previous : null;
+        SkyState viewsSource = tablesSource != null && halosSource != null ? previous : null;
         long start = System.nanoTime();
         IceCrystalData data = IceCrystalData.get();
         double blurSigma = IceHaloMap.blurSigma(settings.actualTexelDegrees());
-        IceHaloProfile haloProfile = previous != null ? previous.haloProfile() : new IceHaloProfile(data, blurSigma);
-        double haloProfileMilliseconds = previous != null ? Double.NaN : (System.nanoTime() - start) / 1.0e6;
+        IceHaloProfile haloProfile = halosSource != null ? halosSource.haloProfile()
+                : new IceHaloProfile(data, blurSigma);
+        double haloProfileMilliseconds = halosSource != null ? Double.NaN : (System.nanoTime() - start) / 1.0e6;
         if (haloWorkspace == null) {
             haloWorkspace = new IceHaloMap.Workspace(data);
         }
 
-        IceHaloMap lowHalo = haloFor(previous, haloIndex, blurSigma);
-        IceHaloMap highHalo = haloFor(previous, haloIndex + 1, blurSigma);
-        SkyTables lowDepthTables = tablesFor(previous, depthIndex, settings);
-        SkyTables highDepthTables = tablesFor(previous, depthIndex + 1, settings);
+        IceHaloMap lowHalo = haloFor(halosSource, haloIndex, blurSigma);
+        IceHaloMap highHalo = haloFor(halosSource, haloIndex + 1, blurSigma);
+        SkyTables lowDepthTables = tablesFor(tablesSource, depthIndex, settings);
+        SkyTables highDepthTables = tablesFor(tablesSource, depthIndex + 1, settings);
         SkyViewSet views = new SkyViewSet();
         for (int depthEnd = 0; depthEnd < SkyViewSet.ENDS; depthEnd++) {
             SkyTables tables = depthEnd == 0 ? lowDepthTables : highDepthTables;
             for (int sunEnd = 0; sunEnd < SkyViewSet.ENDS; sunEnd++) {
-                views.setView(SkyViewSet.slot(depthEnd, sunEnd), viewFor(previous, depthIndex + depthEnd,
+                views.setView(SkyViewSet.slot(depthEnd, sunEnd), viewFor(viewsSource, depthIndex + depthEnd,
                         viewIndex + sunEnd, tables, haloProfile, lowHalo, highHalo));
             }
         }

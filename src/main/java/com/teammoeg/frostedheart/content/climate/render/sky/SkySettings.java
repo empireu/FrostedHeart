@@ -20,32 +20,119 @@
 package com.teammoeg.frostedheart.content.climate.render.sky;
 
 /**
- * Tunable inputs of the calculated sky.
- * Optical depths are vertical and measured at 550 nm. The spread is the geometric standard deviation of particle diameter.
- * The texel size is the side of the sky's square texels in degrees, and 0 draws a smooth sky.
+ * A value for every SkySetting, from the client config or given by a GameTest. Instances never change.
+ * Optical depths are vertical and measured at 550 nm. The spread is the geometric standard deviation of particle
+ * diameter. The texel size is the side of the sky's square texels in degrees, and 0 draws a smooth sky.
+ * A build reads only the settings that rebuild something, and tables use the ice optical depth of their grid depth.
  */
-public record SkySettings(double nanobotOpticalDepth, double nanobotMedianNanometers, double nanobotSpread,
-        double iceOpticalDepth, double texelDegrees) {
-    public static final SkySettings DEFAULT = new SkySettings(0.25, 100.0, 1.75, 0.1, 0.5);
-    public static final double DEFAULT_EXPOSURE = 6.0;
-    public static final double MINIMUM_EXPOSURE = 0.5;
-    public static final double MAXIMUM_EXPOSURE = 50.0;
-    public static final double MAXIMUM_NANOBOT_OPTICAL_DEPTH = 4.0;
-    public static final double MINIMUM_NANOBOT_MEDIAN_NANOMETERS = 50.0;
-    public static final double MAXIMUM_NANOBOT_MEDIAN_NANOMETERS = 1000.0;
-    public static final double MINIMUM_NANOBOT_SPREAD = 1.05;
-    public static final double MAXIMUM_NANOBOT_SPREAD = 3.0;
-    public static final double MAXIMUM_ICE_OPTICAL_DEPTH = 3.0;
-    public static final double MAXIMUM_TEXEL_DEGREES = 5.0;
+public final class SkySettings {
+    private static final SkySetting[] SETTINGS = SkySetting.values();
+    public static final SkySettings DEFAULT = defaults();
+
+    private final double[] values;
+
+    private SkySettings(double[] values) {
+        this.values = values;
+    }
+
+    private static SkySettings defaults() {
+        double[] values = new double[SETTINGS.length];
+        for (SkySetting setting : SETTINGS) {
+            values[setting.ordinal()] = setting.defaultValue();
+        }
+        return new SkySettings(values);
+    }
+
+    /**
+     * The settings the client config holds.
+     */
+    public static SkySettings fromConfig() {
+        double[] values = new double[SETTINGS.length];
+        for (SkySetting setting : SETTINGS) {
+            values[setting.ordinal()] = setting.get();
+        }
+        return new SkySettings(values);
+    }
+
+    /**
+     * Sets the client config to these settings without saving the config file.
+     */
+    public void applyToConfig() {
+        for (SkySetting setting : SETTINGS) {
+            setting.set(values[setting.ordinal()]);
+        }
+    }
+
+    public double get(SkySetting setting) {
+        return values[setting.ordinal()];
+    }
+
+    public SkySettings with(SkySetting setting, double value) {
+        double[] changed = values.clone();
+        changed[setting.ordinal()] = value;
+        return new SkySettings(changed);
+    }
 
     public SkySettings withIceOpticalDepth(double depth) {
-        return new SkySettings(nanobotOpticalDepth, nanobotMedianNanometers, nanobotSpread, depth, texelDegrees);
+        return with(SkySetting.ICE_OPTICAL_DEPTH, depth);
+    }
+
+    /**
+     * Whether every setting that rebuilds the part has the same value in both.
+     */
+    boolean samePart(SkySettings other, SkySetting.Rebuilds part) {
+        for (SkySetting setting : SETTINGS) {
+            if (setting.rebuilds() == part && values[setting.ordinal()] != other.values[setting.ordinal()]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Whether a build gives the same result for both, because every setting that rebuilds something is the same.
+     */
+    boolean sameBuild(SkySettings other) {
+        return samePart(other, SkySetting.Rebuilds.TABLES) && samePart(other, SkySetting.Rebuilds.HALOS);
+    }
+
+    /**
+     * Whether every setting that rebuilds something has the value the client config holds, without allocating.
+     */
+    boolean matchesConfig() {
+        for (SkySetting setting : SETTINGS) {
+            if (setting.rebuilds() != SkySetting.Rebuilds.NOTHING && values[setting.ordinal()] != setting.get()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public double nanobotOpticalDepth() {
+        return get(SkySetting.NANOBOT_OPTICAL_DEPTH);
+    }
+
+    public double nanobotMedianNanometers() {
+        return get(SkySetting.NANOBOT_MEDIAN_NANOMETERS);
+    }
+
+    public double nanobotSpread() {
+        return get(SkySetting.NANOBOT_SPREAD);
+    }
+
+    public double iceOpticalDepth() {
+        return get(SkySetting.ICE_OPTICAL_DEPTH);
+    }
+
+    public double texelDegrees() {
+        return get(SkySetting.TEXEL_DEGREES);
     }
 
     /**
      * Texels per edge of each face of the cube map that holds the sky texels, or 0 for a smooth sky.
      */
     public int texelFaceSize() {
+        double texelDegrees = texelDegrees();
         if (texelDegrees <= 0.0) {
             return 0;
         }

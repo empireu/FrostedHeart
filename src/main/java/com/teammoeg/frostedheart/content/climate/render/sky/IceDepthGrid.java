@@ -23,12 +23,13 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
  * Ice optical depths for which the calculated sky builds tables. The sky for any other depth blends the tables of the
  * two grid depths around it, linearly in depth, so the sky changes smoothly as the depth changes.
  * Grid depths are SCALE * (exp(index * STEP) - 1), close to even steps of SCALE * STEP below SCALE and to steps of a
- * constant ratio exp(STEP) above it. Index 0 is depth 0 and index CELL_COUNT is SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH.
+ * constant ratio exp(STEP) above it. Index 0 is depth 0 and index CELL_COUNT is the maximum of
+ * SkySetting.ICE_OPTICAL_DEPTH.
  */
 public final class IceDepthGrid {
     public static final double STEP = 0.2;
     public static final int CELL_COUNT = 21;
-    public static final double SCALE = SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH / Math.expm1(CELL_COUNT * STEP);
+    public static final double SCALE = SkySetting.ICE_OPTICAL_DEPTH.maximum() / Math.expm1(CELL_COUNT * STEP);
     /**
      * Added to the grid coordinate before rounding down, so that a grid depth maps to its own index despite rounding.
      */

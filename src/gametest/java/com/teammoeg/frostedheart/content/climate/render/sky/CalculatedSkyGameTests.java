@@ -20,6 +20,7 @@
 package com.teammoeg.frostedheart.content.climate.render.sky;
 
 import net.minecraft.gametest.framework.GameTest;
+import net.minecraft.gametest.framework.GameTestAssertException;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
@@ -63,6 +64,7 @@ public final class CalculatedSkyGameTests {
     private static final double[] PREVIEW_MAP_TOTAL_SUN_30 = {2.486358e-01, 2.481081e-01, 2.472797e-01};
     private static final double[] PREVIEW_MAP_TOTAL_SUN_8 = {1.982199e-01, 1.981322e-01, 1.984010e-01};
     private static final double PREVIEW_TEXEL_DEGREES = 0.5;
+    private static final double DEFAULT_EXPOSURE = SkySetting.EXPOSURE.defaultValue();
     private static final double[] DAYLIGHT_SUN_DEGREES = {
             90.0, 45.0, 30.0, 20.0, 12.0, 5.0, 2.0, 0.0, -2.0, -6.0, -12.0, -18.0
     };
@@ -184,9 +186,7 @@ public final class CalculatedSkyGameTests {
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void defaultSkyMatchesOfflinePreview(GameTestHelper helper) {
-        SkySettings settings = new SkySettings(SkySettings.DEFAULT.nanobotOpticalDepth(),
-                SkySettings.DEFAULT.nanobotMedianNanometers(), SkySettings.DEFAULT.nanobotSpread(),
-                SkySettings.DEFAULT.iceOpticalDepth(), PREVIEW_TEXEL_DEGREES);
+        SkySettings settings = SkySettings.DEFAULT.with(SkySetting.TEXEL_DEGREES, PREVIEW_TEXEL_DEGREES);
         SkyTables tables = new SkyTables(settings);
         helper.assertTrue(Math.abs(tables.nanobotMegatons() - 0.25 * 120.5512) < 0.01,
                 "Default nanobot mass is " + tables.nanobotMegatons() + " Mt");
@@ -212,9 +212,7 @@ public final class CalculatedSkyGameTests {
      */
     @GameTest(template = "phase0a_empty", timeoutTicks = 200)
     public static void sunSquareAndAureoleCarryTheDeltaScaledBeam(GameTestHelper helper) {
-        SkySettings settings = new SkySettings(SkySettings.DEFAULT.nanobotOpticalDepth(),
-                SkySettings.DEFAULT.nanobotMedianNanometers(), SkySettings.DEFAULT.nanobotSpread(),
-                AUREOLE_ICE_OPTICAL_DEPTH, SkySettings.DEFAULT.texelDegrees());
+        SkySettings settings = SkySettings.DEFAULT.withIceOpticalDepth(AUREOLE_ICE_OPTICAL_DEPTH);
         SkyTables tables = new SkyTables(settings);
         SkyAtmosphere atmosphere = new SkyAtmosphere(settings);
         IceCrystalData data = IceCrystalData.get();
@@ -269,8 +267,8 @@ public final class CalculatedSkyGameTests {
      */
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void rayStepsCoverTheIceLayerOnEveryPath(GameTestHelper helper) {
-        SkyAtmosphere atmosphere = new SkyAtmosphere(new SkySettings(0.0, SkySettings.DEFAULT.nanobotMedianNanometers(),
-                SkySettings.DEFAULT.nanobotSpread(), 1.0, SkySettings.DEFAULT.texelDegrees()));
+        SkyAtmosphere atmosphere = new SkyAtmosphere(
+                SkySettings.DEFAULT.with(SkySetting.NANOBOT_OPTICAL_DEPTH, 0.0).withIceOpticalDepth(1.0));
         assertStepsCoverIce(helper, atmosphere, SkyAtmosphere.CAMERA_RADIUS, 1.0, 0.01);
         for (int row = 0; row < SkyTables.VIEW_HEIGHT; row++) {
             assertStepsCoverIce(helper, atmosphere, SkyAtmosphere.CAMERA_RADIUS,
@@ -339,8 +337,8 @@ public final class CalculatedSkyGameTests {
         SkyViewSet views = SkyViewSet.of(view);
         float[] towardSun = new float[SkyAtmosphere.CHANNEL_COUNT];
         float[] awayFromSun = new float[SkyAtmosphere.CHANNEL_COUNT];
-        views.horizonDisplayColor(0.0, 0.0, 0.0, 1.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, towardSun);
-        views.horizonDisplayColor(0.0, 0.0, Math.PI, 1.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, awayFromSun);
+        views.horizonDisplayColor(0.0, 0.0, 0.0, 1.0, DEFAULT_EXPOSURE, 0.0F, 0.0F, towardSun);
+        views.horizonDisplayColor(0.0, 0.0, Math.PI, 1.0, DEFAULT_EXPOSURE, 0.0F, 0.0F, awayFromSun);
         helper.assertTrue(towardSun[0] / towardSun[2] > 1.1F * awayFromSun[0] / awayFromSun[2],
                 "Fog toward a sun at 4.5 degrees is warmer than away from it, red over blue "
                         + towardSun[0] / towardSun[2] + " against " + awayFromSun[0] / awayFromSun[2]);
@@ -351,8 +349,8 @@ public final class CalculatedSkyGameTests {
 
         float[] upTowardSun = new float[SkyAtmosphere.CHANNEL_COUNT];
         float[] upAwayFromSun = new float[SkyAtmosphere.CHANNEL_COUNT];
-        views.horizonDisplayColor(0.0, 0.0, 0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, upTowardSun);
-        views.horizonDisplayColor(0.0, 0.0, Math.PI, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 0.0F, upAwayFromSun);
+        views.horizonDisplayColor(0.0, 0.0, 0.0, 0.0, DEFAULT_EXPOSURE, 0.0F, 0.0F, upTowardSun);
+        views.horizonDisplayColor(0.0, 0.0, Math.PI, 0.0, DEFAULT_EXPOSURE, 0.0F, 0.0F, upAwayFromSun);
         for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
             helper.assertTrue(upTowardSun[channel] == upAwayFromSun[channel],
                     "Looking straight up uses the mean horizon in every direction, channel " + channel);
@@ -372,7 +370,7 @@ public final class CalculatedSkyGameTests {
             double sunElevation = Math.toRadians(sunElevationDegrees);
             IceHaloMap map = new IceHaloMap(data, Math.toRadians(Math.max(-6.0, sunElevationDegrees)), blurSigma);
             SkyViewSet views = SkyViewSet.of(tables.computeView(sunElevation, profile, map));
-            views.daylightColor(0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F,
+            views.daylightColor(0.0, 0.0, DEFAULT_EXPOSURE, 0.0F,
                     vanillaSkyDarken(sunElevationDegrees, 0.0F), daylight);
             double luminance = 0.2126 * daylight[0] + 0.7152 * daylight[1] + 0.0722 * daylight[2];
             helper.assertTrue(luminance <= previousLuminance + 1.0e-6,
@@ -393,7 +391,7 @@ public final class CalculatedSkyGameTests {
             }
             if (sunElevationDegrees == 30.0) {
                 float rainSkyDarken = vanillaSkyDarken(sunElevationDegrees, 1.0F);
-                views.daylightColor(0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 1.0F, rainSkyDarken, daylight);
+                views.daylightColor(0.0, 0.0, DEFAULT_EXPOSURE, 1.0F, rainSkyDarken, daylight);
                 for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
                     float vanilla = SkyView.vanillaSkyLight(channel, rainSkyDarken);
                     helper.assertTrue(Math.abs(daylight[channel] - vanilla) < 1.0e-6F,
@@ -444,6 +442,83 @@ public final class CalculatedSkyGameTests {
                 "Red over blue of the sun is " + redOverBlueAt2 + " at 2 degrees and " + redOverBlueAt30
                         + " at 30 degrees");
         helper.succeed();
+    }
+
+    /**
+     * A change of the texel size keeps the tables and builds the halo profile, the halo maps, and the views again.
+     * A change of the nanobots then keeps the halo profile and maps, builds the tables again, and fills the views that
+     * the first state dropped. A change of the exposure starts no build.
+     */
+    @GameTest(template = "phase0a_empty", timeoutTicks = 600)
+    public static void settingsRebuildOnlyWhatDependsOnThem(GameTestHelper helper) {
+        SkyBuilder builder = new SkyBuilder();
+        int haloIndex = SkyBuilder.haloGridIndex(Math.toRadians(20.0));
+        int depthIndex = IceDepthGrid.index(0.1);
+        int viewIndex = SkyBuilder.viewGridIndex(Math.toRadians(20.0));
+        SkySettings texelChanged = SkySettings.DEFAULT.with(SkySetting.TEXEL_DEGREES, 1.0);
+        SkySettings nanobotsChanged = texelChanged.with(SkySetting.NANOBOT_OPTICAL_DEPTH, 0.5);
+        SkySettings exposureChanged = nanobotsChanged.with(SkySetting.EXPOSURE, 12.0);
+        SkyState[] states = new SkyState[3];
+        helper.startSequence()
+                .thenExecute(() -> builder.request(SkySettings.DEFAULT, haloIndex, depthIndex, viewIndex))
+                .thenWaitUntil(() -> states[0] = installFinished(builder))
+                .thenExecute(() -> builder.request(texelChanged, haloIndex, depthIndex, viewIndex))
+                .thenWaitUntil(() -> states[1] = installFinished(builder))
+                .thenExecute(() -> {
+                    SkyState before = states[0];
+                    SkyState after = states[1];
+                    helper.assertTrue(after.lowDepthTables() == before.lowDepthTables()
+                                    && after.highDepthTables() == before.highDepthTables(),
+                            "A change of the texel size built the tables again");
+                    helper.assertTrue(after.haloProfile() != before.haloProfile(),
+                            "A change of the texel size kept the halo profile");
+                    for (int slot = 0; slot < SkyState.HALO_COUNT; slot++) {
+                        helper.assertTrue(!before.holdsHalo(after.halo(slot)),
+                                "A change of the texel size kept halo map " + slot);
+                    }
+                    for (int slot = 0; slot < SkyViewSet.VIEW_COUNT; slot++) {
+                        helper.assertTrue(!before.views().holds(after.views().view(slot)),
+                                "A change of the texel size kept view " + slot);
+                    }
+                    builder.request(nanobotsChanged, haloIndex, depthIndex, viewIndex);
+                })
+                .thenWaitUntil(() -> states[2] = installFinished(builder))
+                .thenExecute(() -> {
+                    SkyState before = states[1];
+                    SkyState after = states[2];
+                    helper.assertTrue(after.lowDepthTables() != before.lowDepthTables()
+                                    && after.highDepthTables() != before.highDepthTables(),
+                            "A change of the nanobots kept the tables");
+                    helper.assertTrue(after.haloProfile() == before.haloProfile(),
+                            "A change of the nanobots built the halo profile again");
+                    for (int slot = 0; slot < SkyState.HALO_COUNT; slot++) {
+                        helper.assertTrue(after.halo(slot) == before.halo(slot),
+                                "A change of the nanobots built halo map " + slot + " again");
+                    }
+                    for (int slot = 0; slot < SkyViewSet.VIEW_COUNT; slot++) {
+                        SkyView view = after.views().view(slot);
+                        helper.assertTrue(!before.views().holds(view),
+                                "A change of the nanobots kept view " + slot);
+                        helper.assertTrue(states[0].views().holds(view),
+                                "View " + slot + " after the nanobot change is not one the first state dropped");
+                    }
+                    builder.request(exposureChanged, haloIndex, depthIndex, viewIndex);
+                    helper.assertTrue(!builder.isBuilding() && builder.state() == after,
+                            "A change of the exposure started a build");
+                })
+                .thenSucceed();
+    }
+
+    /**
+     * Installs the build that finished and returns its state, or throws to wait another tick.
+     */
+    private static SkyState installFinished(SkyBuilder builder) {
+        SkyState finished = builder.takeFinished();
+        if (finished == null) {
+            throw new GameTestAssertException("Waiting for the build");
+        }
+        builder.install(finished);
+        return finished;
     }
 
     private static void assertMatchesPreview(GameTestHelper helper, SkyView view, IceHaloProfile profile,

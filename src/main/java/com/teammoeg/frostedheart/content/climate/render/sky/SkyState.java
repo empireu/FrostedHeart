@@ -24,7 +24,8 @@ import javax.annotation.Nullable;
 /**
  * Everything the calculated sky is drawn from. The low halo map is for the sun elevation of the halo index on its
  * grid, and the high one for the next grid step. Tables and views are on their own grids in the same way, with a view
- * for each pair of depth and sun elevation. The settings are those of the config, whatever their ice optical depth.
+ * for each pair of depth and sun elevation. The settings are those the build was asked for, of which only the ones
+ * that rebuild something were used.
  */
 record SkyState(SkySettings settings, IceHaloProfile haloProfile, int haloIndex, IceHaloMap lowHalo,
         IceHaloMap highHalo, int depthIndex, SkyTables lowDepthTables, SkyTables highDepthTables, int viewIndex,

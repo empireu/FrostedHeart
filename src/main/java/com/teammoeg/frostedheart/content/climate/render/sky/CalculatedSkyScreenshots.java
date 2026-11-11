@@ -67,12 +67,14 @@ import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.StringJoiner;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static com.teammoeg.frostedheart.infrastructure.command.CommandHelper.literal;
@@ -108,12 +110,9 @@ public final class CalculatedSkyScreenshots {
     private static final Set<String> GROUP_KEYS = Set.of("poses", "times", "weather", "variants");
     private static final Set<String> POSE_KEYS = Set.of("name", "yaw", "pitch", "position", "offset", "times",
             "weather");
-    private static final Set<String> VARIANT_KEYS = Set.of("name", "sky", "exposure", "nanobotOpticalDepth",
-            "nanobotMedianNanometers", "nanobotSpread", "iceFollowsWeather", "iceOpticalDepth", "texelDegrees");
-    private static final String MANIFEST_HEADER = String.join("\t", "index", "file", "pose", "x", "y", "z", "yaw",
-            "pitch", "time", "sunDegrees", "weather", "rain", "thunder", "variant", "sky", "exposure",
-            "nanobotOpticalDepth", "nanobotMedianNanometers", "nanobotSpread", "iceFollowsWeather", "iceOpticalDepth",
-            "drawnIceOpticalDepth", "texelDegrees", "status", "framesPerSecond", "waitSeconds");
+    private static final Set<String> VARIANT_KEYS = Stream.concat(Stream.of("name", "sky"),
+            Arrays.stream(SkySetting.values()).map(SkySetting::key)).collect(Collectors.toUnmodifiableSet());
+    private static final String MANIFEST_HEADER = manifestHeader();
 
     private static final Consumer<TickEvent.RenderTickEvent> HOLD_LISTENER = CalculatedSkyScreenshots::onHoldTick;
     private static final Consumer<ClientPlayerNetworkEvent.LoggingOut> LOGOUT_LISTENER =
@@ -175,21 +174,13 @@ public final class CalculatedSkyScreenshots {
         }
     }
 
-    private record Variant(String name, boolean sky, double exposure, double nanobotOpticalDepth,
-            double nanobotMedianNanometers, double nanobotSpread, boolean iceFollowsWeather, double iceOpticalDepth,
-            double texelDegrees) {
+    private record Variant(String name, boolean sky, SkySettings settings) {
         static Variant fromConfig(String name) {
-            return new Variant(name, FHConfig.CLIENT.calculatedSky.get(), FHConfig.CLIENT.calculatedSkyExposure.get(),
-                    FHConfig.CLIENT.calculatedSkyNanobotOpticalDepth.get(),
-                    FHConfig.CLIENT.calculatedSkyNanobotMedianNanometers.get(),
-                    FHConfig.CLIENT.calculatedSkyNanobotSpread.get(),
-                    FHConfig.CLIENT.calculatedSkyIceFollowsWeather.get(),
-                    FHConfig.CLIENT.calculatedSkyIceOpticalDepth.get(), FHConfig.CLIENT.calculatedSkyTexelDegrees.get());
+            return new Variant(name, FHConfig.CLIENT.calculatedSky.get(), SkySettings.fromConfig());
         }
 
         Variant withSky(String newName, boolean newSky) {
-            return new Variant(newName, newSky, exposure, nanobotOpticalDepth, nanobotMedianNanometers, nanobotSpread,
-                    iceFollowsWeather, iceOpticalDepth, texelDegrees);
+            return new Variant(newName, newSky, settings);
         }
 
         /**
@@ -197,13 +188,7 @@ public final class CalculatedSkyScreenshots {
          */
         void apply() {
             FHConfig.CLIENT.calculatedSky.set(sky);
-            FHConfig.CLIENT.calculatedSkyExposure.set(exposure);
-            FHConfig.CLIENT.calculatedSkyNanobotOpticalDepth.set(nanobotOpticalDepth);
-            FHConfig.CLIENT.calculatedSkyNanobotMedianNanometers.set(nanobotMedianNanometers);
-            FHConfig.CLIENT.calculatedSkyNanobotSpread.set(nanobotSpread);
-            FHConfig.CLIENT.calculatedSkyIceFollowsWeather.set(iceFollowsWeather);
-            FHConfig.CLIENT.calculatedSkyIceOpticalDepth.set(iceOpticalDepth);
-            FHConfig.CLIENT.calculatedSkyTexelDegrees.set(texelDegrees);
+            settings.applyToConfig();
         }
     }
 
@@ -734,24 +719,23 @@ public final class CalculatedSkyScreenshots {
         List<Variant> variants = new ArrayList<>();
         for (JsonObject entry : objects(object, "variants", warnings)) {
             warnUnknownKeys(entry, VARIANT_KEYS, "a variant", warnings);
-            variants.add(new Variant(name(entry, "variant" + (variants.size() + 1), warnings),
-                    bool(entry, "sky", startVariant.sky(), warnings),
-                    clamped(entry, "exposure", startVariant.exposure(), SkySettings.MINIMUM_EXPOSURE,
-                            SkySettings.MAXIMUM_EXPOSURE, warnings),
-                    clamped(entry, "nanobotOpticalDepth", startVariant.nanobotOpticalDepth(), 0.0,
-                            SkySettings.MAXIMUM_NANOBOT_OPTICAL_DEPTH, warnings),
-                    clamped(entry, "nanobotMedianNanometers", startVariant.nanobotMedianNanometers(),
-                            SkySettings.MINIMUM_NANOBOT_MEDIAN_NANOMETERS, SkySettings.MAXIMUM_NANOBOT_MEDIAN_NANOMETERS,
-                            warnings),
-                    clamped(entry, "nanobotSpread", startVariant.nanobotSpread(), SkySettings.MINIMUM_NANOBOT_SPREAD,
-                            SkySettings.MAXIMUM_NANOBOT_SPREAD, warnings),
-                    // A variant that names an ice optical depth draws it unless it asks to follow the weather:
-                    bool(entry, "iceFollowsWeather", !entry.has("iceOpticalDepth") && startVariant.iceFollowsWeather(),
-                            warnings),
-                    clamped(entry, "iceOpticalDepth", startVariant.iceOpticalDepth(), 0.0,
-                            SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH, warnings),
-                    clamped(entry, "texelDegrees", startVariant.texelDegrees(), 0.0, SkySettings.MAXIMUM_TEXEL_DEGREES,
-                            warnings)));
+            String name = name(entry, "variant" + (variants.size() + 1), warnings);
+            boolean sky = bool(entry, "sky", startVariant.sky(), warnings);
+            SkySettings settings = startVariant.settings();
+            for (SkySetting setting : SkySetting.values()) {
+                double startValue = startVariant.settings().get(setting);
+                double value;
+                if (setting.isSwitch()) {
+                    SkySetting manualValue = setting.manualValue();
+                    // A variant that names the manual value of a switch uses it unless it turns the switch on:
+                    boolean fallback = startValue != 0.0 && (manualValue == null || !entry.has(manualValue.key()));
+                    value = bool(entry, setting.key(), fallback, warnings) ? 1.0 : 0.0;
+                } else {
+                    value = clamped(entry, setting.key(), startValue, setting.minimum(), setting.maximum(), warnings);
+                }
+                settings = settings.with(setting, value);
+            }
+            variants.add(new Variant(name, sky, settings));
         }
         return variants;
     }
@@ -863,6 +847,19 @@ public final class CalculatedSkyScreenshots {
         }
         warnings.add("Skipped \"" + key + "\", which should be a list of three numbers: " + element);
         return null;
+    }
+
+    /**
+     * The column names of manifest.tsv, in the order of the fields that Run.take writes.
+     */
+    private static String manifestHeader() {
+        List<String> columns = new ArrayList<>(List.of("index", "file", "pose", "x", "y", "z", "yaw", "pitch",
+                "time", "sunDegrees", "weather", "rain", "thunder", "variant", "sky"));
+        for (SkySetting setting : SkySetting.values()) {
+            columns.add(setting.key());
+        }
+        columns.addAll(List.of("drawnIceOpticalDepth", "status", "framesPerSecond", "waitSeconds"));
+        return String.join("\t", columns);
     }
 
     private static String decimal(double value) {
@@ -1081,16 +1078,18 @@ public final class CalculatedSkyScreenshots {
             double sunDegrees = Math.toDegrees(Math.asin(Math.cos(level.getTimeOfDay(partialTick) * Math.PI * 2.0)));
             Vec3 position = player.position();
             Variant variant = shot.variant();
-            manifest.add(String.join("\t", Integer.toString(index + 1), fileName, shot.pose().name(),
+            List<String> fields = new ArrayList<>(List.of(Integer.toString(index + 1), fileName, shot.pose().name(),
                     decimal(position.x), decimal(position.y), decimal(position.z), decimal(shot.pose().yaw()),
                     decimal(shot.pose().pitch()), Long.toString(shot.time()), decimal(sunDegrees), shot.weather().key,
                     decimal(level.getRainLevel(partialTick)), decimal(level.getThunderLevel(partialTick)),
-                    variant.name(), Boolean.toString(variant.sky()), decimal(variant.exposure()),
-                    decimal(variant.nanobotOpticalDepth()), decimal(variant.nanobotMedianNanometers()),
-                    decimal(variant.nanobotSpread()), Boolean.toString(variant.iceFollowsWeather()),
-                    decimal(variant.iceOpticalDepth()), decimal(IceWeatherDepth.update(partialTick)),
-                    decimal(variant.texelDegrees()), status, decimal(framesWaited / Math.max(waited, 1.0e-3)),
-                    decimal(waited)));
+                    variant.name(), Boolean.toString(variant.sky())));
+            for (SkySetting setting : SkySetting.values()) {
+                double value = variant.settings().get(setting);
+                fields.add(setting.isSwitch() ? Boolean.toString(value != 0.0) : decimal(value));
+            }
+            fields.addAll(List.of(decimal(IceWeatherDepth.update(partialTick)), status,
+                    decimal(framesWaited / Math.max(waited, 1.0e-3)), decimal(waited)));
+            manifest.add(String.join("\t", fields));
         }
 
         /**

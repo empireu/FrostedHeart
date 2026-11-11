@@ -1,0 +1,192 @@
+/*
+ * Copyright (c) 2026 TeamMoeg
+ *
+ * This file is part of Frosted Heart.
+ *
+ * Frosted Heart is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3.
+ *
+ * Frosted Heart is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Frosted Heart. If not, see <https://www.gnu.org/licenses/>.
+ *
+ */
+
+package com.teammoeg.frostedheart.content.climate.render.sky;
+
+import net.minecraftforge.common.ForgeConfigSpec;
+
+import javax.annotation.Nullable;
+
+/**
+ * The settings of the calculated sky in the client config group CalculatedSky, with their keys, comments, defaults,
+ * and ranges, and what a build does again when one changes. FHConfig defines them all with define, in this order.
+ * The command, the status, SkySettings, and the screenshot harness read this table, so a new setting is one constant.
+ * Where settings are held as numbers, a switch is 1 when on and 0 when off.
+ */
+public enum SkySetting {
+    EXPOSURE("exposure", "Display exposure of the calculated sky.", Rebuilds.NOTHING, 6.0, 0.5, 50.0),
+    NANOBOT_OPTICAL_DEPTH("nanobotOpticalDepth", "Vertical optical depth of the nanobot layer at 550 nm. 0.25 is "
+            + "about 30 megatons worldwide at the default size.", Rebuilds.TABLES, 0.25, 0.0, 4.0),
+    NANOBOT_MEDIAN_NANOMETERS("nanobotMedianNanometers", "Median nanobot diameter in nanometers.", Rebuilds.TABLES,
+            100.0, 50.0, 1000.0),
+    NANOBOT_SPREAD("nanobotSpread", "Geometric standard deviation of nanobot diameter. Narrow sizes give colored "
+            + "skies, wide sizes give white haze.", Rebuilds.TABLES, 1.75, 1.05, 3.0),
+    /**
+     * IceDepthGrid ends at its maximum.
+     */
+    ICE_OPTICAL_DEPTH("iceOpticalDepth", "Vertical optical depth of the ice crystal layer, which also draws the "
+            + "halos, sun dogs, and arcs. Used while iceFollowsWeather is off.", Rebuilds.NOTHING, 0.1, 0.0, 3.0),
+    ICE_FOLLOWS_WEATHER("iceFollowsWeather", "Lets the ice crystal layer follow the weather, thin on clear days and "
+            + "thickening over the day before snow.", true, ICE_OPTICAL_DEPTH),
+    TEXEL_DEGREES("texelDegrees", "Size of the sky's square texels in degrees. They are fixed to the sky like the "
+            + "sun's texture. 0 draws a smooth sky.", Rebuilds.HALOS, 0.5, 0.0, 5.0);
+
+    /**
+     * What a build does again when a setting changes. The views are built again with either part.
+     */
+    public enum Rebuilds {
+        /**
+         * Nothing, because the setting is read every frame.
+         */
+        NOTHING,
+        /**
+         * The tables of every ice depth.
+         */
+        TABLES,
+        /**
+         * The halo profile and the halo maps, which are blurred by the texel size.
+         */
+        HALOS
+    }
+
+    private final String key;
+    private final String comment;
+    private final Rebuilds rebuilds;
+    private final boolean isSwitch;
+    private final double defaultValue;
+    private final double minimum;
+    private final double maximum;
+    @Nullable
+    private final SkySetting manualValue;
+    @Nullable
+    private ForgeConfigSpec.DoubleValue numberValue;
+    @Nullable
+    private ForgeConfigSpec.BooleanValue switchValue;
+
+    SkySetting(String key, String comment, Rebuilds rebuilds, double defaultValue, double minimum, double maximum) {
+        this.key = key;
+        this.comment = comment;
+        this.rebuilds = rebuilds;
+        this.isSwitch = false;
+        this.defaultValue = defaultValue;
+        this.minimum = minimum;
+        this.maximum = maximum;
+        this.manualValue = null;
+    }
+
+    /**
+     * A switch, which is read every frame. While it is off, the manual value takes its place.
+     */
+    SkySetting(String key, String comment, boolean defaultOn, @Nullable SkySetting manualValue) {
+        this.key = key;
+        this.comment = comment;
+        this.rebuilds = Rebuilds.NOTHING;
+        this.isSwitch = true;
+        this.defaultValue = defaultOn ? 1.0 : 0.0;
+        this.minimum = 0.0;
+        this.maximum = 1.0;
+        this.manualValue = manualValue;
+    }
+
+    /**
+     * Defines every setting in the config the builder builds, in the order of the constants.
+     */
+    public static void define(ForgeConfigSpec.Builder builder) {
+        for (SkySetting setting : values()) {
+            builder.comment(setting.comment);
+            if (setting.isSwitch) {
+                setting.switchValue = builder.define(setting.key, setting.defaultValue != 0.0);
+            } else {
+                setting.numberValue = builder.defineInRange(setting.key, setting.defaultValue, setting.minimum,
+                        setting.maximum);
+            }
+        }
+    }
+
+    /**
+     * The value in the client config.
+     */
+    public double get() {
+        if (isSwitch) {
+            return switchValue.get() ? 1.0 : 0.0;
+        }
+        return numberValue.get();
+    }
+
+    /**
+     * Whether the switch is on in the client config.
+     */
+    public boolean isOn() {
+        return get() != 0.0;
+    }
+
+    /**
+     * Sets the value in the client config without saving the config file.
+     */
+    public void set(double value) {
+        if (isSwitch) {
+            switchValue.set(value != 0.0);
+        } else {
+            numberValue.set(value);
+        }
+    }
+
+    /**
+     * Saves the client config file, which writes every value in it.
+     */
+    public void save() {
+        if (isSwitch) {
+            switchValue.save();
+        } else {
+            numberValue.save();
+        }
+    }
+
+    public String key() {
+        return key;
+    }
+
+    public Rebuilds rebuilds() {
+        return rebuilds;
+    }
+
+    public boolean isSwitch() {
+        return isSwitch;
+    }
+
+    public double defaultValue() {
+        return defaultValue;
+    }
+
+    public double minimum() {
+        return minimum;
+    }
+
+    public double maximum() {
+        return maximum;
+    }
+
+    /**
+     * The setting used in place of this switch while it is off, or null.
+     */
+    @Nullable
+    public SkySetting manualValue() {
+        return manualValue;
+    }
+}

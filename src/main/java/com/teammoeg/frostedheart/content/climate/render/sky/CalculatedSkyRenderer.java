@@ -123,7 +123,7 @@ public final class CalculatedSkyRenderer {
             return false;
         }
         SkyFrame frame = SkyFrame.current(level, partialTick);
-        return matchesConfig(current.settings())
+        return current.settings().matchesConfig()
                 && current.isFor(frame.haloIndex(), frame.depthIndex(), frame.viewIndex());
     }
 
@@ -215,18 +215,8 @@ public final class CalculatedSkyRenderer {
     }
 
     /**
-     * Whether the settings have the config's values apart from the ice optical depth, without allocating.
-     */
-    private static boolean matchesConfig(SkySettings settings) {
-        return settings.nanobotOpticalDepth() == FHConfig.CLIENT.calculatedSkyNanobotOpticalDepth.get()
-                && settings.nanobotMedianNanometers() == FHConfig.CLIENT.calculatedSkyNanobotMedianNanometers.get()
-                && settings.nanobotSpread() == FHConfig.CLIENT.calculatedSkyNanobotSpread.get()
-                && settings.texelDegrees() == FHConfig.CLIENT.calculatedSkyTexelDegrees.get();
-    }
-
-    /**
      * Uploads and installs a build that finished, then asks for a build when the config or the frame's grid indices
-     * no longer match the state and no build runs.
+     * no longer match the state and no build runs. The config is copied only when it changed.
      */
     private static void updateTables(SkyFrame frame) {
         SkyState finished;
@@ -244,17 +234,9 @@ public final class CalculatedSkyRenderer {
             return;
         }
         SkyState current = builder.state();
-        boolean settingsChanged = current == null || !matchesConfig(current.settings());
-        builder.request(settingsChanged ? configSettings() : null, frame.haloIndex(), frame.depthIndex(),
-                frame.viewIndex());
-    }
-
-    public static SkySettings configSettings() {
-        return new SkySettings(FHConfig.CLIENT.calculatedSkyNanobotOpticalDepth.get(),
-                FHConfig.CLIENT.calculatedSkyNanobotMedianNanometers.get(),
-                FHConfig.CLIENT.calculatedSkyNanobotSpread.get(),
-                FHConfig.CLIENT.calculatedSkyIceOpticalDepth.get(),
-                FHConfig.CLIENT.calculatedSkyTexelDegrees.get());
+        SkySettings settings = current != null && current.settings().matchesConfig() ? current.settings()
+                : SkySettings.fromConfig();
+        builder.request(settings, frame.haloIndex(), frame.depthIndex(), frame.viewIndex());
     }
 
     private static void draw(SkyState current, SkyFrame frame, PoseStack poseStack, Matrix4f projection) {

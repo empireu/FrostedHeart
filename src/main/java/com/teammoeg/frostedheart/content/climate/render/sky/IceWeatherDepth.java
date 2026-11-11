@@ -23,7 +23,6 @@ import com.teammoeg.frostedheart.content.climate.ClientClimateData;
 import com.teammoeg.frostedheart.content.climate.gamedata.climate.ClimateType;
 import com.teammoeg.frostedheart.content.climate.gamedata.climate.WorldClimate;
 import com.teammoeg.frostedheart.content.climate.render.weather.ClientWeatherState;
-import com.teammoeg.frostedheart.infrastructure.config.FHConfig;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
@@ -49,7 +48,7 @@ public final class IceWeatherDepth {
     }
 
     public static boolean followsWeather() {
-        return FHConfig.CLIENT.calculatedSkyIceFollowsWeather.get();
+        return SkySetting.ICE_FOLLOWS_WEATHER.isOn();
     }
 
     /**
@@ -59,7 +58,7 @@ public final class IceWeatherDepth {
     public static double update(float partialTick) {
         if (!followsWeather()) {
             depth = Double.NaN;
-            return FHConfig.CLIENT.calculatedSkyIceOpticalDepth.get();
+            return SkySetting.ICE_OPTICAL_DEPTH.get();
         }
         double seconds = ClientWeatherState.INSTANCE.frameClimateSeconds(partialTick);
         double hours = seconds / SECONDS_PER_CLIMATE_HOUR;

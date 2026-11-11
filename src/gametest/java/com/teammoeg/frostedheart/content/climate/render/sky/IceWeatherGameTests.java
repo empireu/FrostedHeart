@@ -95,14 +95,14 @@ public final class IceWeatherGameTests {
                     "Index of " + above + ", just above grid depth " + depth + ", is " + IceDepthGrid.index(above)
                             + " instead of " + index);
         }
-        helper.assertTrue(IceDepthGrid.index(SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH) == IceDepthGrid.HIGHEST_LOW_INDEX,
-                "Index of the maximum ice optical depth " + SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH + " is "
-                        + IceDepthGrid.index(SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH) + " instead of "
-                        + IceDepthGrid.HIGHEST_LOW_INDEX);
+        double maximumDepth = SkySetting.ICE_OPTICAL_DEPTH.maximum();
+        helper.assertTrue(IceDepthGrid.index(maximumDepth) == IceDepthGrid.HIGHEST_LOW_INDEX,
+                "Index of the maximum ice optical depth " + maximumDepth + " is "
+                        + IceDepthGrid.index(maximumDepth) + " instead of " + IceDepthGrid.HIGHEST_LOW_INDEX);
         double highest = IceDepthGrid.depth(IceDepthGrid.HIGHEST_LOW_INDEX + 1);
-        helper.assertTrue(highest >= SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH * (1.0 - RELATIVE_TOLERANCE),
+        helper.assertTrue(highest >= maximumDepth * (1.0 - RELATIVE_TOLERANCE),
                 "Grid depth " + (IceDepthGrid.HIGHEST_LOW_INDEX + 1) + " is " + highest
-                        + ", below the maximum ice optical depth " + SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH);
+                        + ", below the maximum ice optical depth " + maximumDepth);
         helper.assertTrue(IceDepthGrid.index(-1.0) == 0,
                 "Index of a negative depth is " + IceDepthGrid.index(-1.0) + " instead of 0");
         helper.assertTrue(IceDepthGrid.index(1.0e6) == IceDepthGrid.HIGHEST_LOW_INDEX,
@@ -212,7 +212,8 @@ public final class IceWeatherGameTests {
             for (int depth = 0; depth < tables.length; depth++) {
                 SkyView view = tables[depth].computeView(sunElevation, profile, map);
                 double[] ground = view.groundRadiance();
-                SkyViewSet.of(view).daylightColor(0.0, 0.0, SkySettings.DEFAULT_EXPOSURE, 0.0F, 1.0F, daylight);
+                SkyViewSet.of(view).daylightColor(0.0, 0.0, SkySetting.EXPOSURE.defaultValue(), 0.0F, 1.0F,
+                        daylight);
                 line.append(String.format(Locale.ROOT, " depth %.1f ground", GROUND_DEPTHS[depth]));
                 for (int channel = 0; channel < SkyAtmosphere.CHANNEL_COUNT; channel++) {
                     double ratio = ground[channel] / clear[channel];
@@ -385,7 +386,7 @@ public final class IceWeatherGameTests {
     }
 
     private static double displaySteps(double radiance) {
-        return 255.0 * encodeSrgb(1.0 - Math.exp(-SkySettings.DEFAULT_EXPOSURE * Math.max(0.0, radiance)));
+        return 255.0 * encodeSrgb(1.0 - Math.exp(-SkySetting.EXPOSURE.defaultValue() * Math.max(0.0, radiance)));
     }
 
     private static double encodeSrgb(double linear) {

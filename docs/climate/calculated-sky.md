@@ -3,7 +3,7 @@
 - Status: `Partial`
 - Last verified: `2026-11-08`, against source and the GameTests below. The ray steps across the ice band were checked against a converged reference outside the game that day, and delta scaled ice and the transmittance rows in the ice band against the preview's path tracer and a converged table. The diffuse totals of the multiple scattering table were checked against the path tracer that day and have not been seen in game. Delta scaled ice was seen in `runClient` the same day at ice optical depths `0.1` and `0.5`. The first version, with one ice lobe and no snow fade, was seen in `runClient` on `2026-11-05`. The three-part ice phase and a snow fade toward gray were seen in `runClient` on `2026-11-06`, and the fog color from the sky and the snow fade toward the fog color later that day. The ice crystal halos and the sky texels were first seen in `runClient` on `2026-11-07`, with no popping as the sun moves. The sky's own sun, which replaces vanilla's, and the blended sky views were seen in `runClient` the same day. The screenshot harness took its first sets in `runClient` the same day, the last one recorded with `beginSet` and `pose`. The daylight on the terrain was seen in `runClient` the same day, with torch light unchanged.
 - Scope: the optional overworld sky color calculated from air, titanium dioxide nanobots, and ice crystals, its halo display and sun, the fog color taken from it outside snow, the sky light of the lightmap taken from it outside rain, the client config and client command, and a screenshot harness for development. Clouds are unchanged.
-- Primary code anchors: `CalculatedSkyRenderer`, `SkyFrame`, `SkyBuilder`, `SkyState`, `SkyTextures`, `SkyGlPass`, `CalculatedSkyEffects`, `CalculatedSkyClientCommand`, `CalculatedSkyScreenshots`, `SkyTables`, `SkyView`, `SkyViewSet`, `SkyAtmosphere`, `SkyParticleOptics`, `SkyPhase`, `SkySettings`, `IceWeatherLaw`, `IceWeatherDepth`, `IceDepthGrid`, `WorldClimate.getLastSnowEndHour`, `WorldClimate.getNextSnowStartHour`, `FHClimatePacket`, `IceCrystalData`, `IceHaloProfile`, `IceHaloMap`, `IceHaloFormulas`, `IcePrism`, `LevelRendererMixin.frostedheart$drawCalculatedSky`, `LevelRendererMixin.frostedheart$hideVanillaSun`, `FogRendererMixin.frostedheart$useCalculatedSkyFogColor`, `FHClientEventsMod.registerDimensionEffects`, `assets/frostedheart/shaders/calculated_sky.fsh`, `assets/frostedheart/datasets/ice_halos`
+- Primary code anchors: `CalculatedSkyRenderer`, `SkyFrame`, `SkyBuilder`, `SkyState`, `SkyTextures`, `SkyGlPass`, `CalculatedSkyEffects`, `CalculatedSkyClientCommand`, `CalculatedSkyScreenshots`, `SkyTables`, `SkyView`, `SkyViewSet`, `SkyAtmosphere`, `SkyParticleOptics`, `SkyPhase`, `SkySetting`, `SkySettings`, `IceWeatherLaw`, `IceWeatherDepth`, `IceDepthGrid`, `WorldClimate.getLastSnowEndHour`, `WorldClimate.getNextSnowStartHour`, `FHClimatePacket`, `IceCrystalData`, `IceHaloProfile`, `IceHaloMap`, `IceHaloFormulas`, `IcePrism`, `LevelRendererMixin.frostedheart$drawCalculatedSky`, `LevelRendererMixin.frostedheart$hideVanillaSun`, `FogRendererMixin.frostedheart$useCalculatedSkyFogColor`, `FHClientEventsMod.registerDimensionEffects`, `assets/frostedheart/shaders/calculated_sky.fsh`, `assets/frostedheart/datasets/ice_halos`
 
 The feature is off by default. The plan and later stages are in [the calculated sky plan](../../plans/2026-11-05_21-16-30_calculated-sky.md).
 
@@ -169,10 +169,10 @@ With the default settings and exposure, the table displays white above about `8 
 
 | Step | Where | When |
 |---|---|---|
-| Transmittance, multiple scattering, `G`, `S`, view ray steps, sun radiance | `new SkyTables(settings)` on `Util.backgroundExecutor()` | For ice optical depths on `IceDepthGrid`. The two around the drawn depth are kept, and when the depth leaves them the missing one is built. All are built again when another setting changes |
-| Halo profile | `new IceHaloProfile` on `Util.backgroundExecutor()` | When a setting changes |
-| Halo maps | `new IceHaloMap` on `Util.backgroundExecutor()` | For sun elevations on a `0.5 degree` grid from `-6` to `90 degrees`. The two around the sun are kept, and when the sun leaves them the missing one is built |
-| Sky views and ice views | `SkyTables.computeView` on `Util.backgroundExecutor()` | For sun elevations on a `0.25 degree` grid from `-18` to `90 degrees`, with the tables of each of the two depths. The four around the sun and the depth are kept, and when either leaves them the missing ones are built |
+| Transmittance, multiple scattering, `G`, `S`, view ray steps, sun radiance | `new SkyTables(settings)` on `Util.backgroundExecutor()` | For ice optical depths on `IceDepthGrid`. The two around the drawn depth are kept, and when the depth leaves them the missing one is built. Both are built again when a setting that rebuilds tables changes |
+| Halo profile | `new IceHaloProfile` on `Util.backgroundExecutor()` | On the first build, and when a setting that rebuilds halos changes |
+| Halo maps | `new IceHaloMap` on `Util.backgroundExecutor()` | For sun elevations on a `0.5 degree` grid from `-6` to `90 degrees`. The two around the sun are kept, and when the sun leaves them the missing one is built. Both are built again when a setting that rebuilds halos changes |
+| Sky views and ice views | `SkyTables.computeView` on `Util.backgroundExecutor()` | For sun elevations on a `0.25 degree` grid from `-18` to `90 degrees`, with the tables of each of the two depths. The four around the sun and the depth are kept, and when either leaves them the missing ones are built. All four are built again when the tables or the halo maps are |
 | Upload as `RGB16F` textures | `SkyTextures.uploadTable`, render thread | When a build finishes, only content that no texture holds yet. A view or halo map that moves from the high end to the low end keeps its texture (`reassignSlots`) |
 | Draw | `calculated_sky.fsh` on the full-screen quad of `SkyGlPass`, render thread | Every frame while drawn |
 
@@ -232,7 +232,7 @@ Between these points the target changes evenly in its logarithm, and when the ra
 
 The client learns about snow from `FHClimatePacket`, which carries `lastSnowEndHour` and `nextSnowStartHour` as absolute climate hours, or `-1` for none (`ClientClimateData`). The server fills them with `WorldClimate.getLastSnowEndHour` and `getNextSnowStartHour`, which search the `24` hours before and after the current hour, not the current hour itself, in the hourly climate of `dailyTempData` merged with a white curtain that covers the player's chunk, sampled in the middle of each hour. The packet goes out every climate hour, after a jump of the clock, and on login, respawn, and dimension change, so after a relog the depth continues where the weather has it. The forecast reaches every player through the sky, whether or not they have the forecast research.
 
-The sky for a depth between two grid depths of `IceDepthGrid`, `S (exp(0.2 i) - 1)` for `i` from `0` to `21` with `S = 3 / (exp(4.2) - 1) = 0.0457`, is the linear blend in depth of the radiance of the two depths' views. The grid steps by about `0.009` near `0` and by a ratio of `exp(0.2) = 1.22` above `S`, and its last depth is `SkySettings.MAXIMUM_ICE_OPTICAL_DEPTH`, `3`, so the depth while it snows is drawn from the tables of a grid depth. A new end needs tables (about `150 ms`) and two views. In the last `12` hours before snow the ramp crosses a grid depth about every `55..75 s` at normal speed, and before that every `45..160 s` depending on the humidity. The recovery after snow, from `3` to a clear depth of `0.05` in `6` hours, crosses one about every `17 s`. While a build is pending the blend weight stops at the end of the cell, so the depth waits there instead of jumping. With `iceFollowsWeather` off, the depth is `iceOpticalDepth`, drawn through the same grid.
+The sky for a depth between two grid depths of `IceDepthGrid`, `S (exp(0.2 i) - 1)` for `i` from `0` to `21` with `S = 3 / (exp(4.2) - 1) = 0.0457`, is the linear blend in depth of the radiance of the two depths' views. The grid steps by about `0.009` near `0` and by a ratio of `exp(0.2) = 1.22` above `S`, and its last depth is the maximum of `SkySetting.ICE_OPTICAL_DEPTH`, `3`, so the depth while it snows is drawn from the tables of a grid depth. A new end needs tables (about `150 ms`) and two views. In the last `12` hours before snow the ramp crosses a grid depth about every `55..75 s` at normal speed, and before that every `45..160 s` depending on the humidity. The recovery after snow, from `3` to a clear depth of `0.05` in `6` hours, crosses one about every `17 s`. While a build is pending the blend weight stops at the end of the cell, so the depth waits there instead of jumping. With `iceFollowsWeather` off, the depth is `iceOpticalDepth`, drawn through the same grid.
 
 ### Daylight
 
@@ -264,34 +264,35 @@ Vanilla turns the light blue from a sun at about `24 degrees` down, and `D` stay
 
 ## 3. Configuration
 
-Client config, group `CalculatedSky`. Ranges come from `SkySettings`.
+Client config, group `CalculatedSky`. `enabled` is `FHConfig.Client.calculatedSky`. Every other key is a constant of the enum `SkySetting`, which holds its key, comment, default, range, and what a change rebuilds, and `FHConfig` defines them all with `SkySetting.define`. The command, its status, `SkySettings`, and the screenshot harness read that table, so a new setting is one constant. `SkySettings` holds a value of every setting, with a switch as `1` or `0`, and is what a build is asked for.
 
-| Key | Java anchor | Default | Range |
-|---|---|---:|---|
-| `enabled` | `calculatedSky` | `false` | |
-| `exposure` | `calculatedSkyExposure` | `6.0` | `0.5..50` |
-| `nanobotOpticalDepth` | `calculatedSkyNanobotOpticalDepth` | `0.25` | `0..4` |
-| `nanobotMedianNanometers` | `calculatedSkyNanobotMedianNanometers` | `100` | `50..1000` |
-| `nanobotSpread` | `calculatedSkyNanobotSpread` | `1.75` | `1.05..3` |
-| `iceOpticalDepth` | `calculatedSkyIceOpticalDepth` | `0.1` | `0..3` |
-| `iceFollowsWeather` | `calculatedSkyIceFollowsWeather` | `true` | |
-| `texelDegrees` | `calculatedSkyTexelDegrees` | `0.5` | `0..5` |
+| Key | Java anchor | Default | Range | A change rebuilds |
+|---|---|---:|---|---|
+| `enabled` | `FHConfig.Client.calculatedSky` | `false` | | |
+| `exposure` | `SkySetting.EXPOSURE` | `6.0` | `0.5..50` | nothing |
+| `nanobotOpticalDepth` | `SkySetting.NANOBOT_OPTICAL_DEPTH` | `0.25` | `0..4` | tables and views |
+| `nanobotMedianNanometers` | `SkySetting.NANOBOT_MEDIAN_NANOMETERS` | `100` | `50..1000` | tables and views |
+| `nanobotSpread` | `SkySetting.NANOBOT_SPREAD` | `1.75` | `1.05..3` | tables and views |
+| `iceOpticalDepth` | `SkySetting.ICE_OPTICAL_DEPTH` | `0.1` | `0..3` | nothing |
+| `iceFollowsWeather` | `SkySetting.ICE_FOLLOWS_WEATHER` | `true` | | nothing |
+| `texelDegrees` | `SkySetting.TEXEL_DEGREES` | `0.5` | `0..5` | halo profile, halo maps, and views |
+
+`SkySetting.Rebuilds` names what a change rebuilds. `TABLES` rebuilds the tables of both depths, `HALOS` the halo profile and both halo maps, which are blurred by the texel size, and either one the four views, whose ground light uses the tables and the halo maps. The rest is kept, so a change of `texelDegrees` keeps the tables, about `150 ms` each, and a change of the nanobots keeps the halo maps. Settings that rebuild nothing are read every frame. Ice tables are built at the grid depths of `IceDepthGrid` whatever `iceOpticalDepth` holds.
 
 Optical depths are vertical, at `550 nm`. `iceOpticalDepth` is drawn only while `iceFollowsWeather` is off, as described under [Ice optical depth from the weather](#ice-optical-depth-from-the-weather). The spread is the geometric standard deviation of diameter. Narrow spreads give colored skies, and wide ones give white haze. An optical depth of `0.25` at the default size is about `30 Mt` of nanobots worldwide. The texel size is rounded so that a whole number of texels fits along each cube face (`SkySettings.actualTexelDegrees`), and `0` draws a smooth sky. Vanilla's sun texture is about `1 degree` per texel. The exposure also sets the daylight on the terrain: a higher exposure keeps it near its noon brightness until the sun is lower.
 
-The renderer reads the config every frame, so changes from the command apply at once. Edits to the config file while the game runs depend on Forge reloading the file, which has not been tried. The existing key `Weather.skyRenderChanges` is unrelated. Its only reader, `DimensionSpecialEffectsMixin`, is not listed in `frostedheart.mixins.json`.
+The renderer compares the config with the settings of the drawn state every frame (`SkySettings.matchesConfig`, without allocating), so changes from the command apply at once. Edits to the config file while the game runs depend on Forge reloading the file, which has not been tried. The existing key `Weather.skyRenderChanges` is unrelated. Its only reader, `DimensionSpecialEffectsMixin`, is not listed in `frostedheart.mixins.json`.
 
 ## 4. Command
 
-`/calculatedSky` is a client command, also reachable as `/frostedheart calculatedSky`. It needs no permission and sends no packets. Every form prints the state, the settings, the drawn ice optical depth with its target, whether it snows, the hours until and since snow, and the humidity, and the last build times of the tables, the halo profile, a halo map, and the sky view.
+`/calculatedSky` is a client command, also reachable as `/frostedheart calculatedSky`. It needs no permission and sends no packets. Every form prints the state, every `SkySetting`, the nanobot mass and the drawn texel size, the drawn ice optical depth, and while it follows the weather its target, whether it snows, the hours until and since snow, and the humidity, and the last build times of the tables, the halo profile, a halo map, and the sky view.
 
 | Form | Effect |
 |---|---|
 | `/calculatedSky` | Prints the status |
 | `/calculatedSky on` and `off` | Sets `enabled`, saves the config, and clears a previous failure |
-| `/calculatedSky set <key> <value>` | Sets one of the six numeric keys and saves the config |
-| `/calculatedSky set iceFollowsWeather <true\|false>` | Sets `iceFollowsWeather` and saves the config |
-| `/calculatedSky reset` | Restores the six numeric keys and `iceFollowsWeather` to their defaults |
+| `/calculatedSky set <key> <value>` | Sets a key of `SkySetting`, a number in its range or `true` or `false` for a switch, and saves the config |
+| `/calculatedSky reset` | Restores every key of `SkySetting` to its default and saves the config |
 
 ### Screenshot harness
 
@@ -317,13 +318,13 @@ A set is one JSON object. Whatever it leaves out comes from the current view, ti
 | `poses` | List of `{name, yaw, pitch, position, offset, times, weather}`. `position` is `[x, y, z]` in the world and `offset` is `[x, y, z]` from where the run started. Without either the pose is where the run started. Yaw follows Minecraft, so `90` faces west toward the setting sun and `-90` faces east. `times` and `weather` replace those of the pose's group. Recorded poses go here, with the time and weather they were recorded with |
 | `times` | List of day times in ticks. `18000 + 24000 * n` shows the moon phase of day `n` |
 | `weather` | List of `world` (as the server has it), `clear`, `snow` (rain level `1`), and `storm` (rain and thunder level `1`) |
-| `variants` | List of `{name, sky, exposure, nanobotOpticalDepth, nanobotMedianNanometers, nanobotSpread, iceFollowsWeather, iceOpticalDepth, texelDegrees}`, clamped to the config ranges. A key left out keeps the config from the start of the run, except that a variant with `iceOpticalDepth` draws that depth unless it also sets `iceFollowsWeather` to `true`. Without variants each shot is taken with the sky off and on |
+| `variants` | List of objects with `name`, `sky`, and any key of `SkySetting`, clamped to its range. A key left out keeps the config from the start of the run, except that a variant that names the manual value of a switch (`SkySetting.manualValue`) turns the switch off unless it sets it to `true`. So a variant with `iceOpticalDepth` draws that depth unless it also sets `iceFollowsWeather` to `true`. Without variants each shot is taken with the sky off and on |
 | `groups` | List of objects with their own `poses`, `times`, `weather`, and `variants`. Each group takes its own combinations, and a list it leaves out comes from the set. Without groups the set is one group |
 | `hud` | `true` keeps the HUD and the hand. Default `false` |
 
 Shots run group by group, in the order pose, weather, time, variant. For each shot the harness sets the config without saving the file, holds the day time, the rain and thunder levels, and the view direction on the client every frame, and teleports the player through the integrated server when the pose is somewhere else, flying when the player may fly. It waits at least `1 s`, plus `4 s` after a weather change and `2 s` after a move. It also waits until the player has arrived, the terrain is drawn after a move (`LevelRenderer.hasRenderedAllChunks`, which Embeddium answers from its own renderer), and `CalculatedSkyRenderer.isSettled` reports the tables, halo maps, and views built for the config and sun elevation. After `20 s` it takes the shot anyway and says so in the manifest. An open screen, such as chat or the pause menu, restarts the wait, and pausing on lost focus is off while a run lasts.
 
-The frame is saved at the end of `TickEvent.RenderTickEvent` with vanilla's `Screenshot.grab`, into `screenshots/sky-shots/<set>-<date>_<time>/` as `NNN_<pose>_<time>_<weather>_<variant>.png`. `manifest.tsv` in that folder starts with the set, the world seed, and the window size. It then has one line per shot with the player's position, the sun elevation, the rain and thunder levels, the variant's config, the ice optical depth drawn (`drawnIceOpticalDepth`), a status (`settled`, `timed out waiting for ...`, or `sky not drawn, ...`), and the frames per second over the wait. When the run ends, the config, the HUD, the weather, the view direction, and the position are restored, and the server's next time update restores the day time within a second.
+The frame is saved at the end of `TickEvent.RenderTickEvent` with vanilla's `Screenshot.grab`, into `screenshots/sky-shots/<set>-<date>_<time>/` as `NNN_<pose>_<time>_<weather>_<variant>.png`. `manifest.tsv` in that folder starts with the set, the world seed, and the window size. It then has one line per shot with the player's position, the sun elevation, the rain and thunder levels, the variant's `sky` and every `SkySetting` in the enum's order, the ice optical depth drawn (`drawnIceOpticalDepth`), a status (`settled`, `timed out waiting for ...`, or `sky not drawn, ...`), and the frames per second over the wait. When the run ends, the config, the HUD, the weather, the view direction, and the position are restored, and the server's next time update restores the day time within a second.
 
 Only the client's time and weather are held, so the server's clock and climate keep running during a run. The client's climate clock follows the server's, not the held day time, so a variant that follows the weather draws the ice of the world's weather under the pose's sun, and the depth can move between shots. `snow` and `storm` only set the client's rain and thunder levels, so they show vanilla snowfall and the snow fades of the sky and the fog. FrostedHeart's storms from the climate (`ClientWeatherFrame`) need a world that is in a real storm, with `world` weather. The contributor's grid tool `ScreenshotGrid`, which lives with the preview outside this repository, lays a run out with `--manifest`, one row per pose, weather, and time and one column per variant.
 
@@ -340,7 +341,8 @@ Only the client's time and weather are held, so the server's clock and climate k
 - that the ray steps of every row of the sky view, and of rays from `0.1` to `60 km` in every vertical direction, follow each other without gaps up to the ray's end and see the ice optical depth of a fine integration within `1%` for the view and `2%` for the others. Measured over `401` directions, the view is within `0.45%`, and rays from above that graze the band reach `1.5%`, where its `12` steps spread over a chord of about `340 km`;
 - that the fog color is warmer toward a sun at `4.5 degrees` than away from it, and that looking straight up gives the same color in every direction;
 - that the sun's radiance is zero below the horizon, has red at least green and green at least blue above it, and has more than ten times the red over blue at `2 degrees` that it has at `30 degrees`;
-- that the daylight is within `0.95` of white at noon, never gets brighter as the sun sinks from `90` to `-18 degrees`, equals vanilla's night sky light at `-18 degrees`, and equals vanilla's sky light in full rain.
+- that the daylight is within `0.95` of white at noon, never gets brighter as the sun sinks from `90` to `-18 degrees`, equals vanilla's night sky light at `-18 degrees`, and equals vanilla's sky light in full rain;
+- that `SkyBuilder` rebuilds only what a changed setting needs (`settingsRebuildOnlyWhatDependsOnThem`): a change of `texelDegrees` keeps both tables and builds the halo profile, the halo maps, and the views again, a change of `nanobotOpticalDepth` then keeps the halo profile and maps, builds the tables again, and fills the four views the first state dropped instead of allocating, and a change of `exposure` starts no build.
 
 `IceWeatherGameTests` and `SnowHistoryGameTests`, in the same namespace, check:
 
