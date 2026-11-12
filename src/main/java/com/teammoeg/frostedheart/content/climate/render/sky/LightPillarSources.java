@@ -388,6 +388,20 @@ public final class LightPillarSources {
     }
 
     /**
+     * The pillars chosen in the last client tick, with their fades.
+     */
+    static LightPillarSelection selection() {
+        return selection;
+    }
+
+    /**
+     * The height of the bottom of the dust, or NaN while it is unknown.
+     */
+    static double dustBottomY() {
+        return dustBottomY;
+    }
+
+    /**
      * Forgets the colors found for block states, after a resource reload.
      */
     public static void clearColors() {

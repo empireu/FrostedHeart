@@ -33,8 +33,9 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Checks the reflection off plate crystals and the light pillar they show against an integral along the view ray, and
- * how the lights that show pillars are merged, colored, chosen, and faded.
+ * Checks the reflection off plate crystals and the light pillar they show against an integral along the view ray, the
+ * pillar in the diamond dust that the shader draws with its ribbons and brightness, and how the lights that show
+ * pillars are merged, colored, chosen, and faded.
  */
 @GameTestHolder("frostedheart_calculated_sky")
 @PrefixGameTestTemplate(false)
@@ -62,6 +63,42 @@ public final class LightPillarGameTests {
     private static final double PILLAR_TOLERANCE = 0.05;
     private static final int RAY_STEPS = 40000;
     private static final double RAY_WINDOWS = 60.0;
+    /**
+     * Horizontal distance and height of the light, then the height of the dust bottom, all relative to the eye.
+     */
+    private static final double[][] RIBBON_LIGHTS = {
+            {4.0, 20.0, -1.62}, {8.0, -1.12, -1.62}, {32.0, -1.12, -1.62}, {32.0, 0.0, 30.0}, {128.0, -40.0, -1.62},
+            {128.0, 20.0, -40.0}, {256.0, -1.12, -1.62}
+    };
+    /**
+     * A torch, and a cluster of 16 lights of full strength such as a lava lake's.
+     */
+    private static final double[] RIBBON_STRENGTHS = {196.0 / 225.0, 16.0};
+    private static final double RIBBON_EXTINCTION = 0.001;
+    /**
+     * The angle of a pixel at the center of a screen 1080 pixels tall with a vertical field of view of 70 degrees, as
+     * LightPillarOptics.BRIGHTNESS is calibrated with.
+     */
+    private static final double REFERENCE_PIXEL_ANGLE = pixelAngle(1080);
+    /**
+     * Screen heights in pixels, with a vertical field of view of 70 degrees, that set the margin and blur of ribbons.
+     */
+    private static final int[] RIBBON_SCREEN_HEIGHTS = {720, 1080, 2160};
+    /**
+     * As SEGMENTS and WIDEST_RIBBON_ANGLE in light_pillars.glsl.
+     */
+    private static final int RIBBON_SEGMENTS = 16;
+    private static final double WIDEST_RIBBON_ANGLE = 1.4;
+    private static final int EDGE_STEPS = 40;
+    /**
+     * The scene distance of directions where no scene stands.
+     */
+    private static final double NO_SCENE = Double.POSITIVE_INFINITY;
+    /**
+     * Scene distances as shares of the distance to the crystals with level faces.
+     */
+    private static final double[] SCENE_DISTANCE_SHARES = {0.25, 0.75, 0.95, 1.0, 1.05, 1.5, 4.0};
+    private static final double[] SCENE_LATERAL_SPREADS = {0.0, 1.0};
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void iceMirrorReflectsLikeASlab(GameTestHelper helper) {
@@ -160,7 +197,7 @@ public final class LightPillarGameTests {
                         for (double spreads : PILLAR_LATERAL_SPREADS) {
                             double lateralAngle = spreads * spread;
                             double expected = rayIntegral(elevation, lateralAngle, horizontalDistance, lightHeight,
-                                    tiltSigma, refractiveIndex);
+                                    tiltSigma, refractiveIndex, NO_SCENE);
                             double actual = LightPillarOptics.radiance(elevation, lateralAngle, horizontalDistance,
                                     lightHeight, tiltSigma, refractiveIndex);
                             double difference = Math.abs(actual / expected - 1.0);
@@ -185,6 +222,302 @@ public final class LightPillarGameTests {
         helper.assertTrue(worst <= PILLAR_TOLERANCE,
                 "Light pillar differs from the ray integral by " + worst + " at " + worstWhere + ", more than "
                         + PILLAR_TOLERANCE);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 600)
+    public static void lightPillarCountsOnlyCrystalsInFrontOfTheScene(GameTestHelper helper) {
+        double refractiveIndex = IceHaloFormulas.refractiveIndex(1);
+        double worst = -1.0;
+        String worstWhere = "nowhere";
+        for (IceCrystalData.Crystal crystal : plates()) {
+            double tiltSigma = Math.toRadians(crystal.tiltDegrees());
+            for (double[] light : PILLAR_LIGHTS) {
+                double horizontalDistance = light[0];
+                for (int height = 1; height < light.length; height++) {
+                    double lightHeight = light[height];
+                    for (double elevationDegrees : PILLAR_ELEVATIONS_DEGREES) {
+                        double elevation = Math.toRadians(elevationDegrees);
+                        double crystalHeight = LightPillarOptics.mirrorHeight(elevation, horizontalDistance,
+                                lightHeight);
+                        if (crystalHeight <= Math.max(0.0, lightHeight) + 0.05) {
+                            continue;
+                        }
+                        double mirrorDistance = crystalHeight / Math.sin(elevation);
+                        double spread = LightPillarOptics.lateralSpread(elevation, horizontalDistance, lightHeight,
+                                tiltSigma);
+                        for (double spreads : SCENE_LATERAL_SPREADS) {
+                            double lateralAngle = spreads * spread;
+                            double whole = rayIntegral(elevation, lateralAngle, horizontalDistance, lightHeight,
+                                    tiltSigma, refractiveIndex, NO_SCENE);
+                            for (double share : SCENE_DISTANCE_SHARES) {
+                                double sceneDistance = share * mirrorDistance;
+                                double expected = rayIntegral(elevation, lateralAngle, horizontalDistance,
+                                        lightHeight, tiltSigma, refractiveIndex, sceneDistance);
+                                double actual = LightPillarOptics.dustRadiance(elevation, lateralAngle,
+                                        horizontalDistance, lightHeight, tiltSigma, refractiveIndex, 0.0, 1.0e9, 0.0,
+                                        sceneDistance);
+                                double difference = Math.abs(actual - expected) / whole;
+                                if (!(difference <= worst)) {
+                                    worst = difference;
+                                    worstWhere = String.format(Locale.ROOT,
+                                            "%s, light %.0f away and %.0f high, elevation %.0f degrees, %.0f spreads "
+                                                    + "off the center, scene at %.2f of the crystals, %.4g against "
+                                                    + "%.4g of %.4g",
+                                            crystal.name(), horizontalDistance, lightHeight, elevationDegrees, spreads,
+                                            share, actual, expected, whole);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        LOGGER.info("Light pillar in front of a scene differs from the ray integral by at most " + worst
+                + " of the whole pillar, at " + worstWhere);
+        helper.assertTrue(worst <= PILLAR_TOLERANCE, "Light pillar in front of a scene differs from the ray integral by "
+                + worst + " of the whole pillar, at " + worstWhere);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarLightPassesBelowTheViewRayBeforeTheLight(GameTestHelper helper) {
+        int checked = 0;
+        for (IceCrystalData.Crystal crystal : plates()) {
+            double tiltSigma = Math.toRadians(crystal.tiltDegrees());
+            for (double[] light : PILLAR_LIGHTS) {
+                double horizontalDistance = light[0];
+                for (int height = 1; height < light.length; height++) {
+                    double lightHeight = light[height];
+                    double lightElevation = Math.atan2(lightHeight, horizontalDistance);
+                    double lightDistance = Math.hypot(horizontalDistance, lightHeight);
+                    for (double elevationDegrees = -60.0; elevationDegrees <= 85.0; elevationDegrees += 0.5) {
+                        double elevation = Math.toRadians(elevationDegrees);
+                        double lowestTilt = Math.max(-4.0 * tiltSigma, elevation - 0.5 * Math.PI);
+                        double highestTilt = Math.min(4.0 * tiltSigma, 0.5 * (elevation + lightElevation));
+                        if (!(Math.sin(elevation - lightElevation) > 0.0) || !(highestTilt > lowestTilt)) {
+                            continue;
+                        }
+                        for (int step = 1; step < 20; step++) {
+                            double alongTilt = lowestTilt + (highestTilt - lowestTilt) * step / 20.0;
+                            double lightDepression = elevation - 2.0 * alongTilt;
+                            double eyeLeg = lightDistance * Math.sin(lightDepression + lightElevation)
+                                    / Math.sin(elevation + lightDepression);
+                            double crystalX = eyeLeg * Math.cos(elevation);
+                            double crystalY = eyeLeg * Math.sin(elevation);
+                            if (!(crystalX < horizontalDistance)) {
+                                continue;
+                            }
+                            double towardLight = Math.atan2(lightHeight - crystalY, horizontalDistance - crystalX);
+                            boolean mirrored = Math.abs(towardLight + lightDepression) <= 1.0e-9;
+                            boolean below = true;
+                            for (double fraction : new double[]{0.25, 0.5, 0.75}) {
+                                double between = crystalX + fraction * (horizontalDistance - crystalX);
+                                double rayHeight = between * Math.tan(elevation);
+                                double legHeight = crystalY + fraction * (lightHeight - crystalY);
+                                below &= legHeight < rayHeight;
+                            }
+                            if (!mirrored || !below) {
+                                helper.fail(String.format(Locale.ROOT, "The light %s for %s, light %.0f away and %.0f "
+                                                + "high, elevation %.1f degrees, tilt %.2f degrees",
+                                        mirrored ? "passes above the view ray on its way to the crystals"
+                                                : "is not where the crystals see it", crystal.name(), horizontalDistance,
+                                        lightHeight, elevationDegrees, Math.toDegrees(alongTilt)));
+                            }
+                            checked++;
+                        }
+                    }
+                }
+            }
+        }
+        helper.assertTrue(checked > 1000, "Only " + checked + " crystals were checked");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarInDustReducesToTheUniformPillar(GameTestHelper helper) {
+        double refractiveIndex = IceHaloFormulas.refractiveIndex(1);
+        for (IceCrystalData.Crystal crystal : plates()) {
+            double tiltSigma = Math.toRadians(crystal.tiltDegrees());
+            for (double[] light : PILLAR_LIGHTS) {
+                double horizontalDistance = light[0];
+                for (int height = 1; height < light.length; height++) {
+                    double lightHeight = light[height];
+                    for (double elevationDegrees : PILLAR_ELEVATIONS_DEGREES) {
+                        double elevation = Math.toRadians(elevationDegrees);
+                        for (double spreads : PILLAR_LATERAL_SPREADS) {
+                            double lateralAngle = spreads * tiltSigma * Math.sin(elevation);
+                            double uniform = LightPillarOptics.radiance(elevation, lateralAngle, horizontalDistance,
+                                    lightHeight, tiltSigma, refractiveIndex);
+                            double inDust = LightPillarOptics.dustRadiance(elevation, lateralAngle,
+                                    horizontalDistance, lightHeight, tiltSigma, refractiveIndex, 0.0, 1.0e9, 0.0, NO_SCENE);
+                            helper.assertTrue(Math.abs(inDust - uniform) <= 1.0e-9 * uniform,
+                                    "The pillar in dust of the same density everywhere is " + inDust + " instead of "
+                                            + uniform + " for " + crystal.name() + ", light " + horizontalDistance
+                                            + " away and " + lightHeight + " high, elevation " + elevationDegrees);
+                            double dimmed = LightPillarOptics.dustRadiance(elevation, lateralAngle,
+                                    horizontalDistance, lightHeight, tiltSigma, refractiveIndex, 0.0, -1.62, 0.001, NO_SCENE);
+                            helper.assertTrue(dimmed <= uniform, "Thinning dust and extinction brighten the pillar");
+                        }
+                    }
+                }
+            }
+        }
+        double scaleHeight = LightPillarSelection.DUST_SCALE_HEIGHT;
+        double upward = LightPillarOptics.dustOpticalDepth(-2.0, -2.0 + scaleHeight, scaleHeight, 0.001, -2.0);
+        helper.assertTrue(Math.abs(upward - 0.001 * scaleHeight * (1.0 - Math.exp(-1.0))) <= 1.0e-12,
+                "The optical depth up through one scale height is " + upward);
+        double level = LightPillarOptics.dustOpticalDepth(-5.0, -5.0, 100.0, 0.001, -2.0);
+        helper.assertTrue(Math.abs(level - 0.1) <= 1.0e-12,
+                "The optical depth of a level path below the dust bottom is " + level);
+        double downward = LightPillarOptics.dustOpticalDepth(-2.0 + scaleHeight, -2.0, scaleHeight, 0.001, -2.0);
+        helper.assertTrue(Math.abs(downward - upward) <= 1.0e-12, "The optical depth depends on the direction");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 400)
+    public static void lightPillarRibbonsHoldTheVisibleLight(GameTestHelper helper) {
+        double refractiveIndex = IceHaloFormulas.refractiveIndex(1);
+        double lateralBlur = LightPillarOptics.lateralBlur(REFERENCE_PIXEL_ANGLE);
+        double visible = LightPillarOptics.VISIBLE_VALUE;
+        List<IceCrystalData.Crystal> plates = plates();
+        double worstBlurChange = 0.0;
+        double worstOutside = 0.0;
+        String worstOutsideWhere = "nowhere";
+        for (IceCrystalData.Crystal crystal : plates) {
+            double tiltSigma = Math.toRadians(crystal.tiltDegrees());
+            double share = IceCrystalData.get().shareOf(crystal);
+            for (double[] light : RIBBON_LIGHTS) {
+                double horizontalDistance = light[0];
+                double lightHeight = light[1];
+                double dustBottomHeight = light[2];
+                for (double elevationDegrees : new double[]{5.0, 10.0, 20.0, 40.0, 70.0}) {
+                    double elevation = Math.toRadians(elevationDegrees);
+                    double width = LightPillarOptics.widestLateralSpread(elevation, horizontalDistance, lightHeight,
+                            tiltSigma, lateralBlur);
+                    if (width > 0.0) {
+                        double sharp = lateralIntegral(elevation, horizontalDistance, lightHeight, tiltSigma,
+                                refractiveIndex, 0.0, dustBottomHeight, 10.0 * width);
+                        double blurred = lateralIntegral(elevation, horizontalDistance, lightHeight, tiltSigma,
+                                refractiveIndex, lateralBlur, dustBottomHeight, 10.0 * width);
+                        helper.assertTrue(sharp > 0.0, "A pillar with a width has no light across it");
+                        worstBlurChange = Math.max(worstBlurChange, Math.abs(blurred / sharp - 1.0));
+                    }
+                }
+                for (double strength : RIBBON_STRENGTHS) {
+                    double scale = LightPillarOptics.BRIGHTNESS * strength * share * RIBBON_EXTINCTION;
+                    double lowest = LightPillarOptics.lowestRibbonElevation(horizontalDistance, lightHeight,
+                            tiltSigma);
+                    for (double elevationDegrees = -45.0; elevationDegrees < 89.5; elevationDegrees += 0.5) {
+                        double elevation = Math.toRadians(elevationDegrees);
+                        double center = scale * LightPillarOptics.dustRadiance(elevation, 0.0, horizontalDistance,
+                                lightHeight, tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight,
+                                RIBBON_EXTINCTION, NO_SCENE);
+                        double halfWidth = elevation < lowest || elevation > LightPillarOptics.HIGHEST_RIBBON_ELEVATION
+                                ? 0.0 : LightPillarOptics.ribbonHalfWidth(center, visible,
+                                LightPillarOptics.widestLateralSpread(elevation, horizontalDistance, lightHeight,
+                                        tiltSigma, lateralBlur));
+                        for (double lateralDegrees = Math.toDegrees(halfWidth) + 0.01; lateralDegrees < 60.0;
+                                lateralDegrees += 0.05) {
+                            double value = scale * LightPillarOptics.dustRadiance(elevation,
+                                    Math.toRadians(lateralDegrees), horizontalDistance, lightHeight, tiltSigma,
+                                    refractiveIndex, lateralBlur, dustBottomHeight, RIBBON_EXTINCTION, NO_SCENE);
+                            if (value > worstOutside) {
+                                worstOutside = value;
+                                worstOutsideWhere = String.format(Locale.ROOT,
+                                        "%s of strength %.2f, light %.0f away and %.2f high, dust bottom %.2f, "
+                                                + "elevation %.1f, %.2f degrees off the center",
+                                        crystal.name(), strength, horizontalDistance, lightHeight, dustBottomHeight,
+                                        elevationDegrees, lateralDegrees);
+                            }
+                            if (value < 1.0e-3 * visible) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        LOGGER.info("Light pillar blur changes the light across a pillar by at most " + worstBlurChange
+                + ", and outside the ribbons a pillar shows at most " + worstOutside / visible
+                + " times the visible value, at " + worstOutsideWhere);
+        helper.assertTrue(worstBlurChange <= 0.005,
+                "The lateral blur changes the light across a pillar by " + worstBlurChange);
+        helper.assertTrue(worstOutside <= 1.01 * visible, "A pillar shows " + worstOutside / visible
+                + " times the visible value outside its ribbon, at " + worstOutsideWhere);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 200)
+    public static void lightPillarRibbonEdgesHoldTheVisibleLight(GameTestHelper helper) {
+        double refractiveIndex = IceHaloFormulas.refractiveIndex(1);
+        double visible = LightPillarOptics.VISIBLE_VALUE;
+        double worst = 0.0;
+        String worstWhere = "nowhere";
+        for (int screenHeight : RIBBON_SCREEN_HEIGHTS) {
+            double pixelAngle = pixelAngle(screenHeight);
+            double lateralBlur = LightPillarOptics.lateralBlur(pixelAngle);
+            for (IceCrystalData.Crystal crystal : plates()) {
+                double tiltSigma = Math.toRadians(crystal.tiltDegrees());
+                double share = IceCrystalData.get().shareOf(crystal);
+                for (double[] light : RIBBON_LIGHTS) {
+                    for (double strength : RIBBON_STRENGTHS) {
+                        double scale = LightPillarOptics.BRIGHTNESS * strength * share * RIBBON_EXTINCTION;
+                        double[][] corners = ribbonEdge(light[0], light[1], light[2], tiltSigma, refractiveIndex,
+                                lateralBlur, pixelAngle, scale);
+                        if (corners == null) {
+                            continue;
+                        }
+                        for (int segment = 0; segment < RIBBON_SEGMENTS; segment++) {
+                            double[] below = corners[segment];
+                            double[] above = corners[segment + 1];
+                            for (int step = 0; step <= EDGE_STEPS; step++) {
+                                double fraction = (double) step / EDGE_STEPS;
+                                double x = below[0] + (above[0] - below[0]) * fraction;
+                                double y = below[1] + (above[1] - below[1]) * fraction;
+                                double z = below[2] + (above[2] - below[2]) * fraction;
+                                double length = Math.sqrt(x * x + y * y + z * z);
+                                double elevation = Math.asin(y / length);
+                                double lateralAngle = Math.asin(z / length);
+                                double value = scale * LightPillarOptics.dustRadiance(elevation, lateralAngle,
+                                        light[0], light[1], tiltSigma, refractiveIndex, lateralBlur, light[2],
+                                        RIBBON_EXTINCTION, NO_SCENE);
+                                if (value > worst) {
+                                    worst = value;
+                                    worstWhere = String.format(Locale.ROOT,
+                                            "%s of strength %.2f, light %.0f away and %.2f high, dust bottom %.2f, "
+                                                    + "screen %d pixels tall, elevation %.2f, %.3f degrees off the "
+                                                    + "center", crystal.name(), strength, light[0], light[1],
+                                            light[2], screenHeight, Math.toDegrees(elevation),
+                                            Math.toDegrees(lateralAngle));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        LOGGER.info("On the edges of light pillar ribbons a pillar shows at most " + worst / visible
+                + " times the visible value, at " + worstWhere);
+        helper.assertTrue(worst <= 1.01 * visible, "A pillar shows " + worst / visible
+                + " times the visible value on the edge of its ribbon, at " + worstWhere);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarBrightnessIsCalibratedOnATorch(GameTestHelper helper) {
+        double refractiveIndex = IceHaloFormulas.refractiveIndex(1);
+        double lateralBlur = LightPillarOptics.lateralBlur(REFERENCE_PIXEL_ANGLE);
+        double radiance = 0.0;
+        for (IceCrystalData.Crystal crystal : plates()) {
+            radiance += IceCrystalData.get().shareOf(crystal) * 0.001 * LightPillarOptics.dustRadiance(
+                    Math.toRadians(10.0), 0.0, 32.0, -1.12, Math.toRadians(crystal.tiltDegrees()), refractiveIndex,
+                    lateralBlur, -1.62, 0.001, NO_SCENE);
+        }
+        double value = LightPillarOptics.BRIGHTNESS * LightPillarEmitters.strength(14) * radiance;
+        double shown = 1.0 - Math.exp(-value);
+        helper.assertTrue(Math.abs(shown - 0.1) <= 0.001,
+                "The calibrated torch's pillar shows " + shown + " of the display at 10 degrees instead of 0.1");
         helper.succeed();
     }
 
@@ -382,6 +715,71 @@ public final class LightPillarGameTests {
         }
     }
 
+    /**
+     * The radiance of the pillar in dust summed across it, from the given lateral angle on one side to the other.
+     */
+    private static double lateralIntegral(double elevation, double horizontalDistance, double lightHeight,
+            double tiltSigma, double refractiveIndex, double lateralBlur, double dustBottomHeight, double end) {
+        int steps = 4000;
+        double step = 2.0 * end / steps;
+        double total = 0.0;
+        for (int index = 0; index < steps; index++) {
+            double lateralAngle = -end + (index + 0.5) * step;
+            total += LightPillarOptics.dustRadiance(elevation, lateralAngle, horizontalDistance, lightHeight,
+                    tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight, RIBBON_EXTINCTION, NO_SCENE) * step;
+        }
+        return total;
+    }
+
+    /**
+     * The corners on one side of a pillar's ribbon from the bottom row up, as the vertex stage of light_pillars.glsl
+     * places them at a distance of 1, with x level toward the light, y up, and z across. It is null where the ribbon is
+     * collapsed.
+     */
+    private static double[][] ribbonEdge(double horizontalDistance, double lightHeight, double dustBottomHeight,
+            double tiltSigma, double refractiveIndex, double lateralBlur, double marginAngle, double valueScale) {
+        double lowest = LightPillarOptics.lowestRibbonElevation(horizontalDistance, lightHeight, tiltSigma);
+        double highest = LightPillarOptics.HIGHEST_RIBBON_ELEVATION;
+        if (!(highest > lowest)) {
+            return null;
+        }
+        double firstRow = lowest - marginAngle;
+        double lowestEvaluated = Math.min(lowest + 1.0e-3, highest);
+        double[] halfWidths = new double[RIBBON_SEGMENTS + 1];
+        for (int row = 0; row <= RIBBON_SEGMENTS; row++) {
+            double evaluated = Math.max(lowestEvaluated, Math.min(ribbonRowElevation(row, firstRow), highest));
+            double center = valueScale * LightPillarOptics.dustRadiance(evaluated, 0.0, horizontalDistance,
+                    lightHeight, tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight, RIBBON_EXTINCTION, NO_SCENE);
+            double halfWidth = LightPillarOptics.ribbonHalfWidth(center, LightPillarOptics.VISIBLE_VALUE,
+                    LightPillarOptics.widestLateralSpread(evaluated, horizontalDistance, lightHeight, tiltSigma,
+                            lateralBlur));
+            halfWidths[row] = center > LightPillarOptics.VISIBLE_VALUE
+                    ? Math.min(halfWidth + marginAngle, WIDEST_RIBBON_ANGLE) : 0.0;
+        }
+        double[][] corners = new double[RIBBON_SEGMENTS + 1][];
+        for (int row = 0; row <= RIBBON_SEGMENTS; row++) {
+            double halfWidth = halfWidths[row];
+            if (row > 0) {
+                halfWidth = Math.max(halfWidth, halfWidths[row - 1]);
+            }
+            if (row < RIBBON_SEGMENTS) {
+                halfWidth = Math.max(halfWidth, halfWidths[row + 1]);
+            }
+            double elevation = ribbonRowElevation(row, firstRow);
+            corners[row] = new double[]{Math.cos(elevation), Math.sin(elevation), Math.tan(halfWidth)};
+        }
+        return corners;
+    }
+
+    private static double ribbonRowElevation(int row, double firstRow) {
+        double rowFraction = (double) row / RIBBON_SEGMENTS;
+        return firstRow + (LightPillarOptics.HIGHEST_RIBBON_ELEVATION - firstRow) * rowFraction * rowFraction;
+    }
+
+    private static double pixelAngle(int screenHeight) {
+        return 2.0 * Math.tan(Math.toRadians(35.0)) / screenHeight;
+    }
+
     private static double decodeSrgb(double encoded) {
         return encoded <= 0.04045 ? encoded / 12.92 : Math.pow((encoded + 0.055) / 1.055, 2.4);
     }
@@ -397,11 +795,11 @@ public final class LightPillarGameTests {
     }
 
     /**
-     * The radiance of the pillar summed along the view ray from the eye, with the reflection of every crystal worked
-     * out in three dimensions. The light is on the x axis and z points up.
+     * The radiance of the pillar summed along the view ray from the eye up to the scene distance, with the reflection
+     * of every crystal worked out in three dimensions. The light is on the x axis and z points up.
      */
     private static double rayIntegral(double elevation, double lateralAngle, double horizontalDistance,
-            double lightHeight, double tiltSigma, double refractiveIndex) {
+            double lightHeight, double tiltSigma, double refractiveIndex, double sceneDistance) {
         double azimuth = Math.asin(Math.sin(lateralAngle) / Math.cos(elevation));
         double directionX = Math.cos(elevation) * Math.cos(azimuth);
         double directionY = Math.cos(elevation) * Math.sin(azimuth);
@@ -412,7 +810,10 @@ public final class LightPillarGameTests {
                 crystalHeight - lightHeight);
         double window = tiltSigma * lightLeg / (Math.sin(elevation) * Math.cos(elevation));
         double start = Math.max(1.0e-6, mirrorDistance - RAY_WINDOWS * window);
-        double end = mirrorDistance + RAY_WINDOWS * window;
+        double end = Math.min(mirrorDistance + RAY_WINDOWS * window, sceneDistance);
+        if (!(end > start)) {
+            return 0.0;
+        }
         double step = (end - start) / RAY_STEPS;
         double total = 0.0;
         for (int index = 0; index < RAY_STEPS; index++) {

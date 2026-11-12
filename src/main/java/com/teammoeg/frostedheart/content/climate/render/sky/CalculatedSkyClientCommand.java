@@ -102,6 +102,7 @@ public final class CalculatedSkyClientCommand {
         if (enabled) {
             CalculatedSkyRenderer.clearFailure();
             LightPillarSources.clearFailure();
+            LightPillarRenderer.clearFailure();
         }
         return status(context);
     }
@@ -147,6 +148,7 @@ public final class CalculatedSkyClientCommand {
             return 0;
         }
         send(context, LightPillarSources.describe(level));
+        send(context, LightPillarRenderer.describe());
         for (String line : LightPillarSources.describePillars(
                 Minecraft.getInstance().gameRenderer.getMainCamera().getPosition())) {
             send(context, line);

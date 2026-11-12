@@ -40,6 +40,7 @@ import net.minecraftforge.fml.common.Mod;
 @Mod.EventBusSubscriber(modid = FHMain.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
 public final class SkyFrame {
     private static final SkyFrame CURRENT = new SkyFrame();
+    private static long frameNumber;
 
     private boolean stale = true;
     private float partialTick;
@@ -63,7 +64,15 @@ public final class SkyFrame {
     public static void onRenderTick(TickEvent.RenderTickEvent event) {
         if (event.phase == TickEvent.Phase.START) {
             CURRENT.stale = true;
+            frameNumber++;
         }
+    }
+
+    /**
+     * A number that changes with every frame.
+     */
+    public static long frameNumber() {
+        return frameNumber;
     }
 
     /**

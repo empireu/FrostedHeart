@@ -50,6 +50,8 @@ public enum SkySetting {
             + "gone a climate day later.", true, DUST_EXTINCTION),
     PILLAR_CHUNK_RADIUS("pillarChunkRadius", "Radius in chunks around the player in which lights can show light "
             + "pillars in diamond dust. The render distance limits it.", Rebuilds.NOTHING, 8.0, 2.0, 16.0),
+    PILLAR_BRIGHTNESS("pillarBrightness", "Brightness of light pillars, as a factor on their calibrated brightness.",
+            Rebuilds.NOTHING, 1.0, 0.0, 10.0),
     TEXEL_DEGREES("texelDegrees", "Size of the sky's square texels in degrees. They are fixed to the sky like the "
             + "sun's texture. 0 draws a smooth sky.", Rebuilds.HALOS, 0.5, 0.0, 5.0);
 

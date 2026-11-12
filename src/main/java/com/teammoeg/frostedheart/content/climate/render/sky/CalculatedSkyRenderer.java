@@ -96,6 +96,7 @@ public final class CalculatedSkyRenderer {
     private static int thunderLevelUniform;
     private static boolean failed;
     private static boolean sunDrawn;
+    private static long drawnFrameNumber = -1;
 
     private CalculatedSkyRenderer() {
     }
@@ -138,6 +139,14 @@ public final class CalculatedSkyRenderer {
         return sunDrawn;
     }
 
+    /**
+     * Whether the calculated sky was drawn in the current frame. It is not when vanilla skips its sky, for example in
+     * a fluid, in fog, or with blindness.
+     */
+    public static boolean isDrawnThisFrame() {
+        return drawnFrameNumber == SkyFrame.frameNumber();
+    }
+
     public static void render(ClientLevel level, PoseStack poseStack, Matrix4f projection, float partialTick,
             Camera camera) {
         sunDrawn = false;
@@ -153,6 +162,7 @@ public final class CalculatedSkyRenderer {
             }
             draw(current, frame, poseStack, projection);
             sunDrawn = true;
+            drawnFrameNumber = SkyFrame.frameNumber();
         } catch (RuntimeException exception) {
             fail("drawing", exception);
         }

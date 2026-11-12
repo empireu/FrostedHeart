@@ -855,7 +855,8 @@ public final class CalculatedSkyScreenshots {
         for (SkySetting setting : SkySetting.values()) {
             columns.add(setting.key());
         }
-        columns.addAll(List.of("drawnIceOpticalDepth", "status", "framesPerSecond", "waitSeconds"));
+        columns.addAll(List.of("drawnIceOpticalDepth", "drawnDustExtinction", "status", "framesPerSecond",
+                "waitSeconds"));
         return String.join("\t", columns);
     }
 
@@ -1084,7 +1085,8 @@ public final class CalculatedSkyScreenshots {
                 double value = variant.settings().get(setting);
                 fields.add(setting.isSwitch() ? Boolean.toString(value != 0.0) : decimal(value));
             }
-            fields.addAll(List.of(decimal(IceWeatherDepth.update(partialTick)), status,
+            fields.addAll(List.of(decimal(IceWeatherDepth.update(partialTick)),
+                    decimal(DiamondDustExtinction.lastValue()), status,
                     decimal(framesWaited / Math.max(waited, 1.0e-3)), decimal(waited)));
             manifest.add(String.join("\t", fields));
         }
