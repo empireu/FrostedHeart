@@ -29,8 +29,9 @@ import net.minecraftforge.fml.common.Mod;
 
 /**
  * What the calculated sky draws from in one frame, which is the sun, the ice optical depth, the grid indices they call
- * for, the exposure, and the weather. It is filled at its first use in a frame and reused by the draw, the fog color,
- * the daylight, and CalculatedSkyRenderer.isSettled, so the renderer calls IceWeatherDepth.update once per frame.
+ * for, the diamond dust, the exposure, and the weather. It is filled at its first use in a frame and reused by the draw,
+ * the fog color, the daylight, and CalculatedSkyRenderer.isSettled, so the renderer calls IceWeatherDepth.update and
+ * DiamondDustExtinction.update once per frame.
  * A new frame begins with each render tick, and a call with another partial tick fills it again. Render thread only.
  * Blend weights are not part of the frame, because they depend on the state the renderer draws from, and a build that
  * finishes in CalculatedSkyRenderer.render replaces that state after the fog color and the daylight of the same frame.
@@ -50,6 +51,7 @@ public final class SkyFrame {
     private int haloIndex;
     private int depthIndex;
     private int viewIndex;
+    private double dustExtinction;
     private double exposure;
     private float rainLevel;
     private float thunderLevel;
@@ -85,6 +87,7 @@ public final class SkyFrame {
         haloIndex = SkyBuilder.haloGridIndex(sunElevationRadians);
         depthIndex = IceDepthGrid.index(iceDepth);
         viewIndex = SkyBuilder.viewGridIndex(sunElevationRadians);
+        dustExtinction = DiamondDustExtinction.update(partialTick);
         exposure = SkySetting.EXPOSURE.get();
         rainLevel = level.getRainLevel(partialTick);
         thunderLevel = level.getThunderLevel(partialTick);
@@ -139,6 +142,13 @@ public final class SkyFrame {
      */
     public int viewIndex() {
         return viewIndex;
+    }
+
+    /**
+     * The extinction of the diamond dust near the ground in this frame, per kilometer, as DiamondDustExtinction gives it.
+     */
+    public double dustExtinction() {
+        return dustExtinction;
     }
 
     public double exposure() {

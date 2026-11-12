@@ -42,8 +42,17 @@ public final class DiamondDustExtinction {
     private static double updatedSeconds;
     private static boolean snowing;
     private static double hoursSinceSnow = Double.POSITIVE_INFINITY;
+    private static double lastValue;
 
     private DiamondDustExtinction() {
+    }
+
+    /**
+     * The extinction the last update returned, or 0 before the first. Code outside the frame reads this instead of
+     * calling update, because an update with an earlier clock than the last sets the extinction to its target at once.
+     */
+    public static double lastValue() {
+        return lastValue;
     }
 
     public static boolean followsWeather() {
@@ -57,7 +66,8 @@ public final class DiamondDustExtinction {
     public static double update(float partialTick) {
         if (!followsWeather()) {
             extinction = Double.NaN;
-            return SkySetting.DUST_EXTINCTION.get();
+            lastValue = SkySetting.DUST_EXTINCTION.get();
+            return lastValue;
         }
         double seconds = ClientWeatherState.INSTANCE.frameClimateSeconds(partialTick);
         double hours = seconds / SECONDS_PER_CLIMATE_HOUR;
@@ -72,6 +82,7 @@ public final class DiamondDustExtinction {
             extinction = DiamondDustLaw.smoothedExtinction(extinction, targetExtinction, seconds - updatedSeconds);
         }
         updatedSeconds = seconds;
+        lastValue = extinction;
         return extinction;
     }
 

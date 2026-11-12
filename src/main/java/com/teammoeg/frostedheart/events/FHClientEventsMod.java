@@ -49,6 +49,7 @@ import com.teammoeg.frostedheart.content.climate.particle.SnowParticle;
 import com.teammoeg.frostedheart.content.climate.particle.SteamParticle;
 import com.teammoeg.frostedheart.content.climate.particle.WetSteamParticle;
 import com.teammoeg.frostedheart.content.climate.render.sky.CalculatedSkyEffects;
+import com.teammoeg.frostedheart.content.climate.render.sky.LightPillarSources;
 import com.teammoeg.frostedheart.content.climate.tooltips.BlockTempStats;
 import com.teammoeg.frostedheart.content.climate.tooltips.EquipmentTempStats;
 import com.teammoeg.frostedheart.content.climate.tooltips.FoodTempStats;
@@ -76,6 +77,7 @@ import com.teammoeg.frostedheart.content.world.entities.CuriosityEntityRenderer;
 import com.teammoeg.frostedheart.content.world.entities.CuriosityMoundRenderer;
 import com.teammoeg.frostedresearch.gui.InsightOverlay;
 import net.minecraft.client.Minecraft;
+import net.minecraft.server.packs.resources.ResourceManagerReloadListener;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.FarmBlock;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
@@ -333,6 +335,7 @@ public class FHClientEventsMod {
     @SubscribeEvent
     public static void registerReloadListeners(RegisterClientReloadListenersEvent event) {
         event.registerReloadListener(KGlyphProvider.INSTANCE);
+        event.registerReloadListener((ResourceManagerReloadListener) resourceManager -> LightPillarSources.clearColors());
     }
     
 

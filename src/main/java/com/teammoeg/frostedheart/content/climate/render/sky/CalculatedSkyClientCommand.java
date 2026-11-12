@@ -70,6 +70,7 @@ public final class CalculatedSkyClientCommand {
                 .then(literal("on").executes(context -> setEnabled(context, true)))
                 .then(literal("off").executes(context -> setEnabled(context, false)))
                 .then(literal("reset").executes(CalculatedSkyClientCommand::reset))
+                .then(literal("pillars").executes(CalculatedSkyClientCommand::pillars))
                 .then(set);
         CalculatedSkyScreenshots.addCommands(command);
         registerCommand(event.getDispatcher(), command);
@@ -100,6 +101,7 @@ public final class CalculatedSkyClientCommand {
         FHConfig.CLIENT.calculatedSky.save();
         if (enabled) {
             CalculatedSkyRenderer.clearFailure();
+            LightPillarSources.clearFailure();
         }
         return status(context);
     }
@@ -131,10 +133,24 @@ public final class CalculatedSkyClientCommand {
                 settings.actualTexelDegrees()));
         send(context, IceWeatherDepth.describe(Minecraft.getInstance().getFrameTime()));
         send(context, DiamondDustExtinction.describe(Minecraft.getInstance().getFrameTime()));
+        send(context, LightPillarSources.describe(level));
         send(context, String.format(Locale.ROOT,
                 "Last build: tables %.1f ms, halo profile %.1f ms, halo map %.1f ms, sky view %.1f ms",
                 CalculatedSkyRenderer.lastTablesMilliseconds(), CalculatedSkyRenderer.lastHaloProfileMilliseconds(),
                 CalculatedSkyRenderer.lastHaloMapMilliseconds(), CalculatedSkyRenderer.lastViewMilliseconds()));
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int pillars(CommandContext<CommandSourceStack> context) {
+        var level = Minecraft.getInstance().level;
+        if (level == null) {
+            return 0;
+        }
+        send(context, LightPillarSources.describe(level));
+        for (String line : LightPillarSources.describePillars(
+                Minecraft.getInstance().gameRenderer.getMainCamera().getPosition())) {
+            send(context, line);
+        }
         return Command.SINGLE_SUCCESS;
     }
 

@@ -20,8 +20,10 @@
 package com.teammoeg.frostedheart.content.climate.render.sky;
 
 import com.mojang.logging.LogUtils;
+import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
 import org.slf4j.Logger;
@@ -31,7 +33,8 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Checks the reflection off plate crystals and the light pillar they show against an integral along the view ray.
+ * Checks the reflection off plate crystals and the light pillar they show against an integral along the view ray, and
+ * how the lights that show pillars are merged, colored, chosen, and faded.
  */
 @GameTestHolder("frostedheart_calculated_sky")
 @PrefixGameTestTemplate(false)
@@ -183,6 +186,204 @@ public final class LightPillarGameTests {
                 "Light pillar differs from the ray integral by " + worst + " at " + worstWhere + ", more than "
                         + PILLAR_TOLERANCE);
         helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightClustersMergeLightsPerCell(GameTestHelper helper) {
+        LightPillarClusters clusters = new LightPillarClusters();
+        clusters.beginSection(2, 4, -1);
+        clusters.addLight(33, 65, -15, 1.0F, 0.5F, 0.25F);
+        clusters.addLight(35, 66, -13, 0.5F, 0.25F, 0.125F);
+        clusters.addLight(40, 65, -15, 0.0F, 0.0F, 1.0F);
+        clusters.endSection();
+        helper.assertTrue(clusters.count() == 0 && clusters.fillingCount() == 2,
+                "A pass that is not finished shows " + clusters.count() + " clusters and fills "
+                        + clusters.fillingCount() + " instead of 0 and 2");
+        clusters.finishPass();
+        helper.assertTrue(clusters.count() == 2, "The finished pass has " + clusters.count() + " clusters, not 2");
+        int merged = clusterWithKey(clusters, BlockPos.asLong(8, 16, -4));
+        int single = clusterWithKey(clusters, BlockPos.asLong(10, 16, -4));
+        helper.assertTrue(merged >= 0 && single >= 0, "The clusters do not have the keys of their cells");
+        double firstWeight = 1.75;
+        double secondWeight = 0.875;
+        double expectedX = (firstWeight * 33.5 + secondWeight * 35.5) / (firstWeight + secondWeight);
+        double expectedY = (firstWeight * 65.5 + secondWeight * 66.5) / (firstWeight + secondWeight);
+        double expectedZ = (firstWeight * -14.5 + secondWeight * -12.5) / (firstWeight + secondWeight);
+        helper.assertTrue(Math.abs(clusters.x(merged) - expectedX) < 1.0e-9
+                        && Math.abs(clusters.y(merged) - expectedY) < 1.0e-9
+                        && Math.abs(clusters.z(merged) - expectedZ) < 1.0e-9,
+                "The merged cluster is centered at " + clusters.x(merged) + " " + clusters.y(merged) + " "
+                        + clusters.z(merged) + " instead of " + expectedX + " " + expectedY + " " + expectedZ);
+        helper.assertTrue(clusters.red(merged) == 1.5F && clusters.green(merged) == 0.75F
+                        && clusters.blue(merged) == 0.375F,
+                "The merged cluster has the strengths " + clusters.red(merged) + " " + clusters.green(merged) + " "
+                        + clusters.blue(merged) + " instead of 1.5 0.75 0.375");
+        helper.assertTrue(clusters.x(single) == 40.5 && clusters.y(single) == 65.5 && clusters.z(single) == -14.5,
+                "A single light's cluster is not centered on its block");
+        clusters.beginSection(2, 4, -1);
+        clusters.endSection();
+        clusters.finishPass();
+        helper.assertTrue(clusters.count() == 0, "A pass without lights still has " + clusters.count() + " clusters");
+        helper.assertTrue(LightPillarClusters.sectionCanShowPillars(63, 71)
+                        && !LightPillarClusters.sectionCanShowPillars(63, 72),
+                "Sections are not skipped 8 blocks below the lowest surface");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarSelectionKeepsTheBrightestAndFades(GameTestHelper helper) {
+        double near = LightPillarSelection.score(1.0, 1.0, 1.0, 10.0, 0.0, 0.0, 1000.0);
+        double far = LightPillarSelection.score(1.0, 1.0, 1.0, 20.0, 0.0, 0.0, 1000.0);
+        helper.assertTrue(Math.abs(near / far - 2.0) < 1.0e-12, "Scores do not fall with the distance: " + near
+                + " at 10 blocks and " + far + " at 20");
+        helper.assertTrue(LightPillarSelection.score(1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1000.0)
+                        == LightPillarSelection.score(1.0, 1.0, 1.0, LightPillarSelection.NEAREST_SCORED_DISTANCE, 0.0,
+                        0.0, 1000.0),
+                "A light next to the eye scores differently from one at the nearest scored distance");
+        double inDust = LightPillarSelection.score(1.0, 1.0, 1.0, 100.0, 0.0, 0.0, 0.0);
+        double crystalHeight = 0.5 * 100.0 * Math.tan(Math.toRadians(10.0));
+        double expectedDensity = Math.exp(-crystalHeight / LightPillarSelection.DUST_SCALE_HEIGHT);
+        helper.assertTrue(Math.abs(inDust / (expectedDensity / 100.0) - 1.0) < 1.0e-12,
+                "A light 100 blocks away scores " + inDust + " instead of " + expectedDensity / 100.0);
+        helper.assertTrue(LightPillarSelection.score(1.0, 1.0, 1.0, 100.0, 40.0, 0.0, 0.0) < inDust,
+                "A light 40 blocks above the eye scores as high as one at the eye");
+
+        int lightCount = LightPillarSelection.SLOT_COUNT + 10;
+        LightPillarClusters clusters = new LightPillarClusters();
+        addLightsInARow(clusters, lightCount, -1);
+        LightPillarSelection selection = new LightPillarSelection();
+        selection.choose(clusters, 0.0, 0.5, 0.5, 1000.0);
+        helper.assertTrue(selection.chosenCount() == LightPillarSelection.SLOT_COUNT
+                        && selection.usedCount() == LightPillarSelection.SLOT_COUNT,
+                "The selection chose " + selection.chosenCount() + " and uses " + selection.usedCount() + " slots");
+        for (int light = 0; light < lightCount; light++) {
+            boolean shouldBeChosen = light < LightPillarSelection.SLOT_COUNT;
+            helper.assertTrue((slotWithKey(selection, rowKey(light)) >= 0) == shouldBeChosen,
+                    "Light " + light + " of the row is " + (shouldBeChosen ? "not chosen" : "chosen"));
+        }
+        int nearestSlot = slotWithKey(selection, rowKey(0));
+        float fadeStep = 1.0F / LightPillarSelection.FADE_TICKS;
+        helper.assertTrue(selection.fade(nearestSlot, 1.0F) == fadeStep && selection.fade(nearestSlot, 0.0F) == 0.0F
+                        && Math.abs(selection.fade(nearestSlot, 0.5F) - 0.5F * fadeStep) < 1.0e-6F,
+                "A new slot does not start its fade from 0");
+        stepSelection(selection, clusters, LightPillarSelection.FADE_TICKS);
+        helper.assertTrue(selection.fade(nearestSlot, 1.0F) == 1.0F, "A chosen slot does not fade in fully");
+
+        LightPillarClusters withoutNearest = new LightPillarClusters();
+        addLightsInARow(withoutNearest, lightCount, 0);
+        int stepsToFreeASlot = LightPillarSelection.FADE_TICKS;
+        stepSelection(selection, withoutNearest, 1);
+        long nextKey = rowKey(LightPillarSelection.SLOT_COUNT);
+        helper.assertTrue(selection.isUsed(nearestSlot) && selection.key(nearestSlot) == rowKey(0)
+                        && slotWithKey(selection, nextKey) < 0,
+                "A newly chosen light did not wait while every slot is used");
+        stepSelection(selection, withoutNearest, stepsToFreeASlot - 1);
+        helper.assertTrue(!selection.isUsed(nearestSlot) && slotWithKey(selection, nextKey) < 0,
+                "The slot of a light that went away is not free once it faded out");
+        stepSelection(selection, withoutNearest, 1);
+        helper.assertTrue(slotWithKey(selection, nextKey) == nearestSlot && selection.fade(nearestSlot, 1.0F) == fadeStep,
+                "The waiting light did not take the freed slot");
+
+        for (int step = 0; step < stepsToFreeASlot; step++) {
+            selection.chooseNone();
+        }
+        helper.assertTrue(selection.usedCount() == 0, "Slots stay used after choosing nothing");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarEmittersTakeTheirColors(GameTestHelper helper) {
+        float[] color = new float[3];
+        LightPillarEmitters.averageTextureColor(new int[]{0xFF0000FF}, 1, color);
+        helper.assertTrue(color[0] == 1.0F && color[1] == 0.0F && color[2] == 0.0F,
+                "A red pixel reads as " + color[0] + " " + color[1] + " " + color[2]);
+        LightPillarEmitters.averageTextureColor(new int[]{0x00FFFFFF, 0xFFFF0000}, 2, color);
+        helper.assertTrue(color[0] == 0.0F && color[1] == 0.0F && color[2] == 1.0F,
+                "A transparent white pixel and a blue pixel read as " + color[0] + " " + color[1] + " " + color[2]);
+        LightPillarEmitters.averageTextureColor(new int[]{0x00FFFFFF, 0xFF000000}, 2, color);
+        helper.assertTrue(color[0] == 1.0F && color[1] == 1.0F && color[2] == 1.0F,
+                "A texture without a bright opaque pixel is not white");
+        int flame = 0xFF64C8FF;
+        int stick = 0xFF102040;
+        LightPillarEmitters.averageTextureColor(new int[]{stick, flame, stick, stick, stick}, 5, color);
+        double expectedGreen = decodeSrgb(200.0 / 255.0);
+        double expectedBlue = decodeSrgb(100.0 / 255.0);
+        helper.assertTrue(color[0] == 1.0F && Math.abs(color[1] - expectedGreen) < 0.01
+                        && Math.abs(color[2] - expectedBlue) < 0.01,
+                "A torch-like texture reads as " + color[0] + " " + color[1] + " " + color[2] + " instead of its flame, 1 "
+                        + expectedGreen + " " + expectedBlue);
+
+        LightPillarEmitters overrides = LightPillarEmitters.overrides();
+        float[] campfire = overrides.overrideColor(Blocks.CAMPFIRE.defaultBlockState());
+        helper.assertTrue(campfire != null && campfire[0] == 1.0F && Math.abs(campfire[1] - 0.680F) < 1.0e-6F
+                        && Math.abs(campfire[2] - 0.224F) < 1.0e-6F,
+                "The campfire has no override or the wrong one");
+        float[] soulCampfire = overrides.overrideColor(Blocks.SOUL_CAMPFIRE.defaultBlockState());
+        helper.assertTrue(soulCampfire != null && soulCampfire[2] == 1.0F && soulCampfire[0] < soulCampfire[1],
+                "The soul campfire's override is not normalized to its blue");
+        float[] candle = overrides.overrideColor(Blocks.RED_CANDLE.defaultBlockState());
+        helper.assertTrue(candle != null && Math.abs(candle[2] - 0.077F) < 1.0e-6F,
+                "A red candle does not take the candle tag's override");
+        helper.assertTrue(overrides.overrideColor(Blocks.TORCH.defaultBlockState()) == null,
+                "The torch has an override although its texture gives its color");
+
+        helper.assertTrue(LightPillarEmitters.showsPillar(Blocks.TORCH.defaultBlockState())
+                        && LightPillarEmitters.showsPillar(Blocks.REDSTONE_TORCH.defaultBlockState())
+                        && !LightPillarEmitters.showsPillar(Blocks.MAGMA_BLOCK.defaultBlockState())
+                        && !LightPillarEmitters.showsPillar(Blocks.STONE.defaultBlockState()),
+                "Lights below " + LightPillarEmitters.MINIMUM_EMISSION + " or above it are sorted wrongly");
+        helper.assertTrue(LightPillarEmitters.strength(15) == 1.0F
+                        && Math.abs(LightPillarEmitters.strength(14) - 196.0F / 225.0F) < 1.0e-6F,
+                "Light strength is not the square of the emission over 15");
+        helper.succeed();
+    }
+
+    private static int clusterWithKey(LightPillarClusters clusters, long key) {
+        for (int cluster = 0; cluster < clusters.count(); cluster++) {
+            if (clusters.key(cluster) == key) {
+                return cluster;
+            }
+        }
+        return -1;
+    }
+
+    private static int slotWithKey(LightPillarSelection selection, long key) {
+        for (int slot = 0; slot < LightPillarSelection.SLOT_COUNT; slot++) {
+            if (selection.isUsed(slot) && selection.key(slot) == key) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Adds equal lights along the x axis, one per section from x = 8 on, leaving out the light at the skipped index,
+     * and finishes the pass.
+     */
+    private static void addLightsInARow(LightPillarClusters clusters, int count, int skipped) {
+        for (int light = 0; light < count; light++) {
+            if (light == skipped) {
+                continue;
+            }
+            clusters.beginSection(light, 0, 0);
+            clusters.addLight(16 * light + 8, 0, 0, 1.0F, 1.0F, 1.0F);
+            clusters.endSection();
+        }
+        clusters.finishPass();
+    }
+
+    private static long rowKey(int light) {
+        return BlockPos.asLong(4 * light + 2, 0, 0);
+    }
+
+    private static void stepSelection(LightPillarSelection selection, LightPillarClusters clusters, int steps) {
+        for (int step = 0; step < steps; step++) {
+            selection.choose(clusters, 0.0, 0.5, 0.5, 1000.0);
+        }
+    }
+
+    private static double decodeSrgb(double encoded) {
+        return encoded <= 0.04045 ? encoded / 12.92 : Math.pow((encoded + 0.055) / 1.055, 2.4);
     }
 
     private static List<IceCrystalData.Crystal> plates() {

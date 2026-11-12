@@ -48,6 +48,8 @@ public enum SkySetting {
             + "in the clear air after snow. Used while dustFollowsWeather is off.", Rebuilds.NOTHING, 0.0, 0.0, 3.0),
     DUST_FOLLOWS_WEATHER("dustFollowsWeather", "Lets the diamond dust follow the weather, forming after each snow and "
             + "gone a climate day later.", true, DUST_EXTINCTION),
+    PILLAR_CHUNK_RADIUS("pillarChunkRadius", "Radius in chunks around the player in which lights can show light "
+            + "pillars in diamond dust. The render distance limits it.", Rebuilds.NOTHING, 8.0, 2.0, 16.0),
     TEXEL_DEGREES("texelDegrees", "Size of the sky's square texels in degrees. They are fixed to the sky like the "
             + "sun's texture. 0 draws a smooth sky.", Rebuilds.HALOS, 0.5, 0.0, 5.0);
 
