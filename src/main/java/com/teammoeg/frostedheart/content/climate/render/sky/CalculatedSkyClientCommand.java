@@ -70,7 +70,8 @@ public final class CalculatedSkyClientCommand {
                 .then(literal("on").executes(context -> setEnabled(context, true)))
                 .then(literal("off").executes(context -> setEnabled(context, false)))
                 .then(literal("reset").executes(CalculatedSkyClientCommand::reset))
-                .then(literal("pillars").executes(CalculatedSkyClientCommand::pillars))
+                .then(literal("pillars").executes(CalculatedSkyClientCommand::pillars)
+                        .then(literal("fill").executes(CalculatedSkyClientCommand::toggleFillView)))
                 .then(set);
         CalculatedSkyScreenshots.addCommands(command);
         registerCommand(event.getDispatcher(), command);
@@ -156,6 +157,14 @@ public final class CalculatedSkyClientCommand {
                 Minecraft.getInstance().gameRenderer.getMainCamera().getPosition())) {
             send(context, line);
         }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int toggleFillView(CommandContext<CommandSourceStack> context) {
+        send(context, LightPillarRenderer.toggleFillView()
+                ? "Light pillar fill view on: green pixels show light, red ones are computed for nothing, and "
+                        + "overlapping ribbons add up"
+                : "Light pillar fill view off");
         return Command.SINGLE_SUCCESS;
     }
 

@@ -126,6 +126,11 @@ public final class LightPillarRenderer {
     private static int screenSizeUniform;
     private static int crystalCountScaleUniform;
     private static int twinkleClockUniform;
+    private static int fillViewUniform;
+    /**
+     * Whether the ribbons show where the fragment stage runs instead of the pillars, for the client command.
+     */
+    private static boolean fillView;
     private static double twinkleClock;
     private static long lastTwinkleNanos;
     private static double lastTwinkleX;
@@ -330,6 +335,7 @@ public final class LightPillarRenderer {
             GL20.glUniform1f(crystalCountScaleUniform, (float) LightPillarOptics.crystalCountScale(pixelAngle,
                     SkySetting.PILLAR_CRYSTAL_SIZE.get()));
             GL20.glUniform1f(twinkleClockUniform, (float) twinkleClock);
+            GL20.glUniform1f(fillViewUniform, fillView ? 1.0F : 0.0F);
             RenderSystem.enableBlend();
             RenderSystem.blendEquation(GL14.GL_FUNC_ADD);
             RenderSystem.blendFuncSeparate(GL11.GL_ONE_MINUS_DST_COLOR, GL11.GL_ONE, GL11.GL_ZERO, GL11.GL_ONE);
@@ -413,6 +419,7 @@ public final class LightPillarRenderer {
                 (float) LightPillarSelection.DUST_SCALE_HEIGHT);
         GL20.glUniform1f(GL20.glGetUniformLocation(programId, "visibleValue"),
                 (float) LightPillarOptics.VISIBLE_VALUE);
+        GL20.glUniform1f(GL20.glGetUniformLocation(programId, "glintValue"), (float) LightPillarOptics.GLINT_VALUE);
         GL20.glUniform1f(GL20.glGetUniformLocation(programId, "highestElevation"),
                 (float) LightPillarOptics.HIGHEST_RIBBON_ELEVATION);
         GL20.glUniform1i(GL20.glGetUniformLocation(programId, "sceneDepth"), SCENE_DEPTH_UNIT);
@@ -429,6 +436,7 @@ public final class LightPillarRenderer {
         screenSizeUniform = GL20.glGetUniformLocation(programId, "screenSize");
         crystalCountScaleUniform = GL20.glGetUniformLocation(programId, "crystalCountScale");
         twinkleClockUniform = GL20.glGetUniformLocation(programId, "twinkleClock");
+        fillViewUniform = GL20.glGetUniformLocation(programId, "fillView");
     }
 
     /**
@@ -494,6 +502,16 @@ public final class LightPillarRenderer {
     }
 
     /**
+     * Switches the fill view on or off and returns whether it is on. While it is on, every pixel that a ribbon covers
+     * shows green where its pillar adds to the display and red where the fragment stage runs for nothing, and
+     * overlapping ribbons add up.
+     */
+    public static boolean toggleFillView() {
+        fillView = !fillView;
+        return fillView;
+    }
+
+    /**
      * A line about the slots drawn in the last frame and the time their draw takes, for the client command. A slot
      * counts when its fade is above 0, whether or not its pillar is in view.
      */
@@ -501,7 +519,7 @@ public final class LightPillarRenderer {
         if (failed) {
             return "Light pillar drawing stopped after an error, see the log";
         }
-        return String.format(Locale.ROOT, "Light pillar slots drawn in the last frame: %d; %s", drawnPillars,
-                timer.describe());
+        return String.format(Locale.ROOT, "Light pillar slots drawn in the last frame: %d; %s%s", drawnPillars,
+                timer.describe(), fillView ? "; fill view on" : "");
     }
 }

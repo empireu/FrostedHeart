@@ -18,6 +18,7 @@ uniform float scaleHeight;
 uniform float lateralBlur;
 uniform float marginAngle;
 uniform float visibleValue;
+uniform float glintValue;
 uniform float highestElevation;
 // Crystals nearer to the eye than this many blocks count less, and none count nearer than a quarter of it, unless it is 0:
 uniform float nearFade;
@@ -25,6 +26,7 @@ uniform float nearFade;
 uniform float crystalCountScale;
 
 const float PI = 3.14159265358979;
+const float INVERSE_SQUARE_ROOT_OF_TWO_PI = 0.3989422804014327;
 // A scene distance beyond every crystal, for directions where no scene stands:
 const float NO_SCENE_DISTANCE = 1.0e30;
 const int NODE_COUNT = 8;
@@ -39,24 +41,23 @@ const float MOST_RIBBON_SPREADS = 8.0;
 const float NEAR_FADE_START_SHARE = 0.25;
 const float SMALLEST_SINE_OF_GRAZING = 0.02;
 const float MOST_SPARKLE = 64.0;
-const float RIBBON_GLINT_CHANCE = 0.002;
-const float RIBBON_GLINT_SIGMAS = 2.878;
+const float RIBBON_GLINT_CHANCE = 0.01;
+const float RIBBON_GLINT_SIGMAS = 2.326;
+const float RIBBON_GLINT_MARGIN = 0.1;
 
-float slabReflectance(float sineOfGrazingAngle) {
+// As IceMirror.slabReflectance. Each polarization reflects r / (1 + r) with r = ((a - b) / (a + b))^2, which is (a - b)^2 / (2 a^2 + 2 b^2):
+float slabReflectance(float sineOfGrazingAngle, float inverseSquaredIndex) {
     float cosineOfIncidence = clamp(sineOfGrazingAngle, 0.0, 1.0);
     float squaredSineOfIncidence = 1.0 - cosineOfIncidence * cosineOfIncidence;
-    float cosineOfRefraction = sqrt(1.0 - squaredSineOfIncidence / (refractiveIndex * refractiveIndex));
-    float perpendicular = (cosineOfIncidence - refractiveIndex * cosineOfRefraction)
-            / (cosineOfIncidence + refractiveIndex * cosineOfRefraction);
-    float parallel = (refractiveIndex * cosineOfIncidence - cosineOfRefraction)
-            / (refractiveIndex * cosineOfIncidence + cosineOfRefraction);
-    float perpendicularFace = perpendicular * perpendicular;
-    float parallelFace = parallel * parallel;
-    return perpendicularFace / (1.0 + perpendicularFace) + parallelFace / (1.0 + parallelFace);
-}
-
-float dustDensity(float height) {
-    return exp(-max(0.0, height - dustBottomHeight) / scaleHeight);
+    float cosineOfRefraction = sqrt(1.0 - squaredSineOfIncidence * inverseSquaredIndex);
+    float perpendicularFar = refractiveIndex * cosineOfRefraction;
+    float parallelNear = refractiveIndex * cosineOfIncidence;
+    float perpendicularDifference = cosineOfIncidence - perpendicularFar;
+    float parallelDifference = parallelNear - cosineOfRefraction;
+    float perpendicularSquares = cosineOfIncidence * cosineOfIncidence + perpendicularFar * perpendicularFar;
+    float parallelSquares = parallelNear * parallelNear + cosineOfRefraction * cosineOfRefraction;
+    return 0.5 * (perpendicularDifference * perpendicularDifference * parallelSquares
+            + parallelDifference * parallelDifference * perpendicularSquares) / (perpendicularSquares * parallelSquares);
 }
 
 float dustColumn(float height) {
@@ -64,19 +65,9 @@ float dustColumn(float height) {
     return above <= 0.0 ? above : scaleHeight * (1.0 - exp(-above / scaleHeight));
 }
 
-float dustOpticalDepth(float fromHeight, float toHeight, float pathLength) {
-    float rise = toHeight - fromHeight;
-    float meanDensity = abs(rise) > SMALLEST_RISE ? (dustColumn(toHeight) - dustColumn(fromHeight)) / rise
-            : dustDensity(0.5 * (fromHeight + toHeight));
-    return extinction * pathLength * meanDensity;
-}
-
-float gaussian(float value, float variance) {
-    return exp(-value * value / (2.0 * variance)) / sqrt(2.0 * PI * variance);
-}
-
-float nearWeight(float eyeLeg) {
-    return nearFade > 0.0 ? smoothstep(NEAR_FADE_START_SHARE * nearFade, nearFade, eyeLeg) : 1.0;
+// The dust density at a height less than SMALLEST_RISE from a crystal, from the density at the crystal, which is linear there to well within float precision:
+float densityNearCrystal(float crystalDensity, float crystalAboveBottom, float aboveBottom, float inverseScaleHeight) {
+    return crystalDensity * (1.0 - (max(0.0, aboveBottom) - max(0.0, crystalAboveBottom)) * inverseScaleHeight);
 }
 
 // The tilt of the crystals on the view ray at the distance from the eye. The distance falls as the tilt rises:
@@ -94,27 +85,66 @@ float tiltSum(float lowestTilt, float highestTilt, float elevation, float latera
     float crystals = 0.0;
     float middleTilt = 0.5 * (highestTilt + lowestTilt);
     float halfRange = 0.5 * (highestTilt - lowestTilt);
+    // The sines at each point come from the sine and cosine of its tilt by the angle sum formulas:
     float sineOfElevation = sin(elevation);
+    float cosineOfElevation = cos(elevation);
+    float sineOfDoubleElevation = 2.0 * sineOfElevation * cosineOfElevation;
+    float cosineOfDoubleElevation = cosineOfElevation * cosineOfElevation - sineOfElevation * sineOfElevation;
+    float sineAboveLight = sin(elevation + lightElevation);
+    float cosineAboveLight = cos(elevation + lightElevation);
+    float legRatioScale = lightDistance / lightToRay;
     float tiltVariance = tiltSigma * tiltSigma;
+    float halfInverseTiltVariance = 0.5 / tiltVariance;
+    float normalization = INVERSE_SQUARE_ROOT_OF_TWO_PI * INVERSE_SQUARE_ROOT_OF_TWO_PI / tiltSigma;
+    float blurVariance = lateralBlur * lateralBlur;
+    float inverseSquaredIndex = 1.0 / (refractiveIndex * refractiveIndex);
+    float inverseScaleHeight = 1.0 / scaleHeight;
+    float lightColumn = dustColumn(lightHeight);
+    float eyeColumn = dustColumn(0.0);
+    // The near weight is the smoothstep of nearShare, which stays 1 without a near fade:
+    float inverseNearRange = nearFade > 0.0 ? 1.0 / ((1.0 - NEAR_FADE_START_SHARE) * nearFade) : 0.0;
+    float nearOffset = nearFade > 0.0 ? -NEAR_FADE_START_SHARE / (1.0 - NEAR_FADE_START_SHARE) : 1.0;
     float sum = 0.0;
     for (int node = 0; node < NODE_COUNT; node++) {
         float alongTilt = middleTilt + halfRange * NODES[node];
-        float lightDepression = elevation - 2.0 * alongTilt;
-        float sineAtCrystal = max(sin(elevation + lightDepression), SMALLEST_SINE_AT_CRYSTAL);
-        float eyeLeg = lightDistance * sin(lightDepression + lightElevation) / sineAtCrystal;
-        float lightLeg = lightToRay / sineAtCrystal;
+        float sineOfTilt = sin(alongTilt);
+        float cosineOfTilt = cos(alongTilt);
+        float sineOfDoubleTilt = 2.0 * sineOfTilt * cosineOfTilt;
+        float cosineOfDoubleTilt = cosineOfTilt * cosineOfTilt - sineOfTilt * sineOfTilt;
+        // The light depression is the elevation minus twice the tilt:
+        float sineOfLightDepression = sineOfElevation * cosineOfDoubleTilt - cosineOfElevation * sineOfDoubleTilt;
+        float sineAtCrystal = max(sineOfDoubleElevation * cosineOfDoubleTilt
+                - cosineOfDoubleElevation * sineOfDoubleTilt, SMALLEST_SINE_AT_CRYSTAL);
+        float sineOfDepressionAboveLight = sineAboveLight * cosineOfDoubleTilt - cosineAboveLight * sineOfDoubleTilt;
+        float inverseSineAtCrystal = 1.0 / sineAtCrystal;
+        float eyeLeg = lightDistance * sineOfDepressionAboveLight * inverseSineAtCrystal;
+        float lightLeg = lightToRay * inverseSineAtCrystal;
         float crystalHeight = eyeLeg * sineOfElevation;
-        float acrossScale = (1.0 + eyeLeg / lightLeg) / (sin(lightDepression) + sineOfElevation);
-        float acrossVariance = tiltVariance + lateralBlur * lateralBlur * acrossScale * acrossScale;
-        widestSpread = max(widestSpread, sqrt(acrossVariance) / acrossScale);
-        float opticalDepth = dustOpticalDepth(lightHeight, crystalHeight, lightLeg)
-                + dustOpticalDepth(crystalHeight, 0.0, eyeLeg);
-        float sineOfGrazing = sin(elevation - alongTilt);
-        float present = WEIGHTS[node] * gaussian(alongTilt, tiltVariance)
-                * gaussian(lateralAngle * acrossScale, acrossVariance) * dustDensity(crystalHeight) * nearWeight(eyeLeg);
-        sum += present * slabReflectance(sineOfGrazing) * exp(-opticalDepth);
-        float spreadSine = max(sineOfGrazing, SMALLEST_SINE_OF_GRAZING);
-        crystals += present * eyeLeg * eyeLeg * lightLeg * lightLeg / (spreadSine * spreadSine);
+        float acrossScale = (1.0 + legRatioScale * sineOfDepressionAboveLight)
+                / (sineOfLightDepression + sineOfElevation);
+        float acrossVariance = tiltVariance + blurVariance * acrossScale * acrossScale;
+        float inverseAcrossSpread = inversesqrt(acrossVariance);
+        widestSpread = max(widestSpread, 1.0 / (inverseAcrossSpread * acrossScale));
+        float crystalAboveBottom = crystalHeight - dustBottomHeight;
+        float crystalDensity = exp(-max(0.0, crystalAboveBottom) * inverseScaleHeight);
+        float crystalColumn = crystalAboveBottom <= 0.0 ? crystalAboveBottom : scaleHeight * (1.0 - crystalDensity);
+        float lightRise = crystalHeight - lightHeight;
+        float lightMeanDensity = abs(lightRise) > SMALLEST_RISE ? (crystalColumn - lightColumn) / lightRise
+                : densityNearCrystal(crystalDensity, crystalAboveBottom,
+                        0.5 * (lightHeight + crystalHeight) - dustBottomHeight, inverseScaleHeight);
+        float eyeMeanDensity = abs(crystalHeight) > SMALLEST_RISE ? (crystalColumn - eyeColumn) / crystalHeight
+                : densityNearCrystal(crystalDensity, crystalAboveBottom, 0.5 * crystalHeight - dustBottomHeight,
+                        inverseScaleHeight);
+        float opticalDepth = extinction * (lightLeg * lightMeanDensity + eyeLeg * eyeMeanDensity);
+        float sineOfGrazing = sineOfElevation * cosineOfTilt - cosineOfElevation * sineOfTilt;
+        float acrossOffset = lateralAngle * acrossScale * inverseAcrossSpread;
+        float exponent = -alongTilt * alongTilt * halfInverseTiltVariance - 0.5 * acrossOffset * acrossOffset;
+        float nearShare = clamp(eyeLeg * inverseNearRange + nearOffset, 0.0, 1.0);
+        float weight = WEIGHTS[node] * normalization * inverseAcrossSpread * crystalDensity
+                * nearShare * nearShare * (3.0 - 2.0 * nearShare);
+        sum += weight * exp(exponent - opticalDepth) * slabReflectance(sineOfGrazing, inverseSquaredIndex);
+        float legsOverSpread = eyeLeg * lightLeg / max(sineOfGrazing, SMALLEST_SINE_OF_GRAZING);
+        crystals += weight * exp(exponent) * legsOverSpread * legsOverSpread;
     }
     crystalSum += crystals * halfRange;
     return sum * halfRange;
@@ -127,17 +157,16 @@ float sparkleCap(float meanCount) {
 
 // Returns the radiance per unit intensity and unit face area per volume at the dust bottom from the crystals nearer than the scene distance whose light gets past the blocks around the light, and writes the widest spread across the pillar.
 // Also writes the crystals that mirror the light per unit face area per volume and unit crystalCountScale, as LightPillarOptics.dustCrystalCount.
+// The light stands at the height above the eye, seen at the light elevation, at the light distance from the eye.
 // The horizons are the horizon, the ceiling, and the top of LightPillarHorizons:
-float pillarRadiance(float elevation, float lateralAngle, float horizontalDistance, float lightHeight, float tiltSigma,
-        float sceneDistance, vec3 horizons, out float widestSpread, out float crystalCount) {
+float pillarRadiance(float elevation, float lateralAngle, float lightHeight, float lightElevation, float lightDistance,
+        float tiltSigma, float sceneDistance, vec3 horizons, out float widestSpread, out float crystalCount) {
     widestSpread = 0.0;
     crystalCount = 0.0;
-    float lightElevation = atan(lightHeight, horizontalDistance);
     float sineOfOffset = sin(elevation - lightElevation);
     if (!(sineOfOffset > 0.0)) {
         return 0.0;
     }
-    float lightDistance = length(vec2(horizontalDistance, lightHeight));
     float lightToRay = lightDistance * sineOfOffset;
     float lowestTilt = max(-TILT_RANGE_SIGMAS * tiltSigma,
             tiltAtDistance(elevation, lightElevation, lightDistance, lightToRay, sceneDistance));
@@ -162,6 +191,8 @@ float pillarRadiance(float elevation, float lateralAngle, float horizontalDistan
 in vec3 Position;
 out vec3 relativePosition;
 flat out vec3 pillarLight;
+flat out float pillarLightElevation;
+flat out float pillarLightDistance;
 flat out vec3 pillarColor;
 flat out float pillarOpacity;
 flat out float pillarTiltSigma;
@@ -181,9 +212,9 @@ float rowElevation(float row, float firstRow) {
     return firstRow + (highestElevation - firstRow) * rowFraction * rowFraction;
 }
 
-// The mean count of crystals per sky cell below which the cell shows the visible value with less than RIBBON_GLINT_CHANCE, as LightPillarOptics.leastVisibleCount:
-float leastVisibleCount(float crystalOverVisible) {
-    float ratio = 1.0 / crystalOverVisible;
+// The mean count of crystals per sky cell below which the cell shows the glint value with less than RIBBON_GLINT_CHANCE, as LightPillarOptics.leastVisibleCount:
+float leastVisibleCount(float crystalOverGlint) {
+    float ratio = 1.0 / ((1.0 + RIBBON_GLINT_MARGIN) * crystalOverGlint);
     float needed = max(1.0, ceil(ratio));
     float chanceCount;
     if (needed <= 2.0) {
@@ -198,28 +229,31 @@ float leastVisibleCount(float crystalOverVisible) {
 }
 
 // Returns the angle off the center beyond which the pillar stays below the visible value, plus the margin.
-// Where crystals glitter, beyond it a pixel shows the visible value with less than RIBBON_GLINT_CHANCE, as LightPillarOptics.ribbonHalfWidth:
-float halfWidthAt(float elevation, float horizontalDistance, float lightHeight, float tiltSigma, vec3 horizons,
-        float valueScale, float countScale) {
+// Where crystals glitter, beyond it a pixel also shows the glint value with less than RIBBON_GLINT_CHANCE, as LightPillarOptics.ribbonHalfWidth:
+float halfWidthAt(float elevation, float lightHeight, float lightElevation, float lightDistance, float tiltSigma,
+        vec3 horizons, float valueScale, float countScale) {
     float widestSpread;
     float crystalCount;
-    float center = valueScale * pillarRadiance(elevation, 0.0, horizontalDistance, lightHeight, tiltSigma,
+    float center = valueScale * pillarRadiance(elevation, 0.0, lightHeight, lightElevation, lightDistance, tiltSigma,
             NO_SCENE_DISTANCE, horizons, widestSpread, crystalCount);
     float meanCount = countScale * crystalCount;
-    float spreads;
-    if (meanCount > 0.0) {
-        float leastCount = leastVisibleCount(center / (meanCount * visibleValue));
-        if (!(meanCount > leastCount)) {
-            return 0.0;
-        }
-        spreads = min(MOST_RIBBON_SPREADS, sqrt(2.0 * log(meanCount / leastCount)));
-    } else {
-        if (!(center > visibleValue)) {
-            return 0.0;
-        }
-        spreads = min(MOST_RIBBON_SPREADS, sqrt(2.0 * log(center / visibleValue)));
+    bool shows = false;
+    float spreads = 0.0;
+    if (center > visibleValue) {
+        shows = true;
+        spreads = sqrt(2.0 * log(center / visibleValue));
     }
-    return min(spreads * widestSpread + marginAngle, WIDEST_RIBBON_ANGLE);
+    if (meanCount > 0.0) {
+        float leastCount = leastVisibleCount(center / (meanCount * glintValue));
+        if (meanCount > leastCount) {
+            shows = true;
+            spreads = max(spreads, sqrt(2.0 * log(meanCount / leastCount)));
+        }
+    }
+    if (!shows) {
+        return 0.0;
+    }
+    return min(min(MOST_RIBBON_SPREADS, spreads) * widestSpread + marginAngle, WIDEST_RIBBON_ANGLE);
 }
 
 void main() {
@@ -232,6 +266,8 @@ void main() {
     float tiltSigma = tiltSigmas[kind];
     float share = shares[kind];
     pillarLight = light;
+    pillarLightElevation = 0.0;
+    pillarLightDistance = 0.0;
     pillarColor = color.rgb;
     pillarOpacity = color.a;
     pillarTiltSigma = tiltSigma;
@@ -248,6 +284,9 @@ void main() {
         return;
     }
     float lightElevation = atan(light.y, horizontalDistance);
+    float lightDistance = length(light);
+    pillarLightElevation = lightElevation;
+    pillarLightDistance = lightDistance;
     // Below the horizon minus the most tilted faces, no crystal gets light past the blocks around the light:
     float lowest = max(max(lightElevation, -lightElevation - 2.0 * TILT_RANGE_SIGMAS * tiltSigma),
             horizons.x - 2.0 * TILT_RANGE_SIGMAS * tiltSigma);
@@ -262,15 +301,15 @@ void main() {
     float halfWidth = 0.0;
     for (float row = max(Position.y - 1.0, 0.0); row <= min(Position.y + 1.0, SEGMENTS); row += 0.5) {
         float rowEvaluated = clamp(rowElevation(row, firstRow), lowestEvaluated, highestElevation);
-        halfWidth = max(halfWidth, halfWidthAt(rowEvaluated, horizontalDistance, light.y, tiltSigma, horizons,
-                valueScale, countScale));
+        halfWidth = max(halfWidth, halfWidthAt(rowEvaluated, light.y, lightElevation, lightDistance, tiltSigma,
+                horizons, valueScale, countScale));
     }
     // The pillar can show again above the top in a band narrower than a half row:
     float reappearance = horizons.z + 2.0 * tiltSigma;
     if (horizons.y < horizons.z && reappearance > rowElevation(max(Position.y - 1.0, 0.0), firstRow)
             && reappearance < rowElevation(min(Position.y + 1.0, SEGMENTS), firstRow)) {
-        halfWidth = max(halfWidth, halfWidthAt(clamp(reappearance, lowestEvaluated, highestElevation),
-                horizontalDistance, light.y, tiltSigma, horizons, valueScale, countScale));
+        halfWidth = max(halfWidth, halfWidthAt(clamp(reappearance, lowestEvaluated, highestElevation), light.y,
+                lightElevation, lightDistance, tiltSigma, horizons, valueScale, countScale));
     }
 
     vec2 toward = light.xz / horizontalDistance;
@@ -290,8 +329,12 @@ uniform mat4 inverseViewProjection;
 uniform vec2 screenSize;
 // Twinkle periods passed, which also run on as the eye moves:
 uniform float twinkleClock;
+// Above 0, every pixel a ribbon covers shows FILL_SHOWN where the pillar adds to the display and FILL_WASTED elsewhere:
+uniform float fillView;
 in vec3 relativePosition;
 flat in vec3 pillarLight;
+flat in float pillarLightElevation;
+flat in float pillarLightDistance;
 flat in vec3 pillarColor;
 flat in float pillarOpacity;
 flat in float pillarTiltSigma;
@@ -303,6 +346,10 @@ out vec4 fragColor;
 const float LARGEST_COUNTED_MEAN = 16.0;
 const float MOST_DRAWN = 48.0;
 const uint GOLDEN_RATIO_STEP = 0x9e3779b9u;
+const vec3 FILL_SHOWN = vec3(0.0, 0.25, 0.0);
+const vec3 FILL_WASTED = vec3(0.25, 0.0, 0.0);
+// Half a step of 255, below which the display shows nothing:
+const float SHOWN_STEP = 0.5 / 255.0;
 
 // The lowbias32 integer hash by Chris Wellons:
 uint hashOf(uint value) {
@@ -364,6 +411,10 @@ void main() {
     float horizontalDistance = length(pillarLight.xz);
     vec2 toward = pillarLight.xz / horizontalDistance;
     if (dot(direction.xz, toward) <= 0.0) {
+        if (fillView > 0.0) {
+            fragColor = vec4(FILL_WASTED, 1.0);
+            return;
+        }
         discard;
     }
     float sceneDistance = NO_SCENE_DISTANCE;
@@ -376,11 +427,17 @@ void main() {
     float lateralAngle = asin(clamp(dot(direction.xz, vec2(-toward.y, toward.x)), -1.0, 1.0));
     float widestSpread;
     float crystalCount;
-    float radiance = pillarShare * extinction * pillarRadiance(elevation, lateralAngle, horizontalDistance,
-            pillarLight.y, pillarTiltSigma, sceneDistance, pillarHorizons, widestSpread, crystalCount);
+    float radiance = pillarShare * extinction * pillarRadiance(elevation, lateralAngle, pillarLight.y,
+            pillarLightElevation, pillarLightDistance, pillarTiltSigma, sceneDistance, pillarHorizons, widestSpread,
+            crystalCount);
     if (crystalCountScale > 0.0) {
         radiance *= sparkle(pillarShare * extinction * crystalCountScale * crystalCount,
                 vec2(lateralAngle, elevation));
+    }
+    if (fillView > 0.0) {
+        vec3 shown = encodeSrgb(1.0 - exp(-pillarColor * radiance)) * pillarOpacity;
+        fragColor = vec4(max(shown.r, max(shown.g, shown.b)) >= SHOWN_STEP ? FILL_SHOWN : FILL_WASTED, 1.0);
+        return;
     }
     if (!(radiance > 0.0)) {
         discard;

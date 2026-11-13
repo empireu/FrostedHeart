@@ -59,6 +59,12 @@ final class LightPillarOptics {
      */
     static final double VISIBLE_VALUE = 0.5 / 255.0 / 12.92;
     /**
+     * The smallest value before sRGB encoding at which a lone glint of a single pixel shows against the night sky,
+     * which encodes to eight steps of 255. Ribbons hold glints from this value on and the smooth pillar from
+     * VISIBLE_VALUE on.
+     */
+    static final double GLINT_VALUE = 8.0 / 255.0 / 12.92;
+    /**
      * Ribbons end here, short of the zenith, where every pillar meets.
      */
     static final double HIGHEST_RIBBON_ELEVATION = Math.toRadians(89.5);
@@ -94,13 +100,19 @@ final class LightPillarOptics {
     private static final int MOST_DRAWN = 48;
     private static final int GOLDEN_RATIO_STEP = 0x9e3779b9;
     /**
-     * Outside its ribbon, a pixel of a pillar shows the visible value with less than this chance per twinkle period.
+     * Outside its ribbon, a pixel of a pillar shows the glint value with less than this chance per twinkle period.
      */
-    static final double RIBBON_GLINT_CHANCE = 0.002;
+    static final double RIBBON_GLINT_CHANCE = 0.01;
+    /**
+     * Crystals count as showing the glint value from this share below it on, since the value of one crystal changes
+     * along the pillar between the rows whose widths the ribbon takes, and the count it takes to reach the glint value
+     * jumps where one crystal shows just that value.
+     */
+    private static final double RIBBON_GLINT_MARGIN = 0.1;
     /**
      * The standard normal quantile of RIBBON_GLINT_CHANCE.
      */
-    private static final double RIBBON_GLINT_SIGMAS = 2.878;
+    private static final double RIBBON_GLINT_SIGMAS = 2.326;
 
     private LightPillarOptics() {
     }
@@ -518,35 +530,37 @@ final class LightPillarOptics {
 
     /**
      * Half the width of the ribbon of a pillar whose crystals glitter, given its mean value and its mean count of
-     * crystals per sky cell at the center, as ribbonHalfWidth without glitter where the count is 0. Across the pillar
-     * the count falls with the value, so each crystal shows about the same value, and beyond the half width a cell
-     * shows the visible value with less than RIBBON_GLINT_CHANCE.
+     * crystals per sky cell at the center. It holds the mean value down to the visible value as ribbonHalfWidth does
+     * without glitter, and where the count is above 0 also the glints, so that beyond the half width a cell shows the
+     * glint value with less than RIBBON_GLINT_CHANCE. Across the pillar the count falls with the value, so each
+     * crystal shows about the same value.
      */
-    static double ribbonHalfWidth(double centerValue, double meanCount, double visibleValue,
+    static double ribbonHalfWidth(double centerValue, double meanCount, double visibleValue, double glintValue,
             double widestLateralSpread) {
+        double smoothHalfWidth = ribbonHalfWidth(centerValue, visibleValue, widestLateralSpread);
         if (!(meanCount > 0.0)) {
-            return ribbonHalfWidth(centerValue, visibleValue, widestLateralSpread);
+            return smoothHalfWidth;
         }
-        double leastCount = leastVisibleCount(centerValue / (meanCount * visibleValue));
+        double leastCount = leastVisibleCount(centerValue / (meanCount * glintValue));
         if (!(meanCount > leastCount)) {
-            return 0.0;
+            return smoothHalfWidth;
         }
         double spreads = Math.min(MOST_RIBBON_SPREADS, Math.sqrt(2.0 * Math.log(meanCount / leastCount)));
-        return spreads * widestLateralSpread;
+        return Math.max(smoothHalfWidth, spreads * widestLateralSpread);
     }
 
     /**
-     * The mean count of crystals per sky cell below which the cell shows the visible value with less than
-     * RIBBON_GLINT_CHANCE, for the value of one crystal over the visible value. Where one or two crystals show it, the
-     * chance is about the count to that power over its factorial, and from three on the Wilson Hilferty approximation
-     * of the Poisson distribution gives it. sparkleCap and MOST_SPARKLE also keep cells with few crystals below the
-     * visible value.
+     * The mean count of crystals per sky cell below which the cell shows the glint value with less than
+     * RIBBON_GLINT_CHANCE, for the value of one crystal over the glint value, with RIBBON_GLINT_MARGIN. Where one or
+     * two crystals show it, the chance is about the count to that power over its factorial, and from three on the
+     * Wilson Hilferty approximation of the Poisson distribution gives it. sparkleCap and MOST_SPARKLE also keep cells
+     * with few crystals below the glint value.
      */
-    static double leastVisibleCount(double crystalOverVisible) {
-        if (!(crystalOverVisible > 0.0)) {
+    static double leastVisibleCount(double crystalOverGlint) {
+        if (!(crystalOverGlint > 0.0)) {
             return Double.POSITIVE_INFINITY;
         }
-        double ratio = 1.0 / crystalOverVisible;
+        double ratio = 1.0 / ((1.0 + RIBBON_GLINT_MARGIN) * crystalOverGlint);
         double needed = Math.max(1.0, Math.ceil(ratio));
         double chanceCount;
         if (needed <= 2.0) {

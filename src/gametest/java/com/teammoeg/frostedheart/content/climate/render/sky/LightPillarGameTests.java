@@ -1312,13 +1312,16 @@ public final class LightPillarGameTests {
     public static void lightPillarRibbonsHoldTheGlints(GameTestHelper helper) {
         double refractiveIndex = IceHaloFormulas.refractiveIndex(1);
         double visible = LightPillarOptics.VISIBLE_VALUE;
+        double glint = LightPillarOptics.GLINT_VALUE;
         double pixelAngle = pixelAngle(1080);
         double lateralBlur = LightPillarOptics.lateralBlur(pixelAngle);
         double open = LightPillarHorizons.OPEN;
         double worstMiddle = 0.0;
         double worst = 0.0;
         String worstWhere = "nowhere";
-        for (double micrometers : new double[]{50.0, 100.0, 200.0}) {
+        double worstMean = 0.0;
+        String worstMeanWhere = "nowhere";
+        for (double micrometers : new double[]{50.0, 65.0, 100.0, 200.0}) {
             double countScale = LightPillarOptics.crystalCountScale(pixelAngle, micrometers);
             for (IceCrystalData.Crystal crystal : plates()) {
                 double tiltSigma = Math.toRadians(crystal.tiltDegrees());
@@ -1349,19 +1352,24 @@ public final class LightPillarGameTests {
                                 double meanCount = counts * LightPillarOptics.dustCrystalCount(elevation,
                                         lateralAngle, light[0], light[1], tiltSigma, lateralBlur, light[2], NO_SCENE,
                                         0.0, open, open, open);
-                                double chance = visibleGlintChance(mean, meanCount, visible);
+                                double chance = visibleGlintChance(mean, meanCount, glint);
                                 if (segment >= 1 && segment < RIBBON_SEGMENTS - 2) {
                                     worstMiddle = Math.max(worstMiddle, chance);
                                 }
+                                String where = String.format(Locale.ROOT,
+                                        "%.0f micrometers, %s of strength %.2f, light %.0f away and %.2f high, "
+                                                + "dust bottom %.2f, elevation %.2f, %.3f degrees off the center, "
+                                                + "%.3g crystals, mean %.3g times the visible value",
+                                        micrometers, crystal.name(), strength, light[0], light[1], light[2],
+                                        Math.toDegrees(elevation), Math.toDegrees(lateralAngle), meanCount,
+                                        mean / visible);
                                 if (chance > worst) {
                                     worst = chance;
-                                    worstWhere = String.format(Locale.ROOT,
-                                            "%.0f micrometers, %s of strength %.2f, light %.0f away and %.2f high, "
-                                                    + "dust bottom %.2f, elevation %.2f, %.3f degrees off the center, "
-                                                    + "%.3g crystals, mean %.3g times the visible value",
-                                            micrometers, crystal.name(), strength, light[0], light[1], light[2],
-                                            Math.toDegrees(elevation), Math.toDegrees(lateralAngle), meanCount,
-                                            mean / visible);
+                                    worstWhere = where;
+                                }
+                                if (mean > worstMean) {
+                                    worstMean = mean;
+                                    worstMeanWhere = where;
                                 }
                             }
                         }
@@ -1369,14 +1377,18 @@ public final class LightPillarGameTests {
                 }
             }
         }
-        LOGGER.info("On the edges of glittering light pillar ribbons a pixel shows the visible value with a chance of "
+        LOGGER.info("On the edges of glittering light pillar ribbons a pixel shows the glint value with a chance of "
                 + "at most " + worstMiddle + " away from the ends of the ribbon and " + worst + " anywhere, at "
-                + worstWhere);
+                + worstWhere + ", and a mean of at most " + worstMean / visible + " times the visible value, at "
+                + worstMeanWhere);
         // The top rows come close to the zenith and the bottom row to the light, where the half rows sample coarsely:
-        helper.assertTrue(worstMiddle <= 0.01, "Away from the ends of glittering light pillar ribbons a pixel on "
-                + "their edges shows the visible value with a chance of " + worstMiddle);
-        helper.assertTrue(worst <= 0.05, "On the edges of glittering light pillar ribbons a pixel shows the visible "
-                + "value with a chance of " + worst + ", at " + worstWhere);
+        helper.assertTrue(worstMiddle <= 1.5 * LightPillarOptics.RIBBON_GLINT_CHANCE, "Away from the ends of "
+                + "glittering light pillar ribbons a pixel on their edges shows the glint value with a chance of "
+                + worstMiddle);
+        helper.assertTrue(worst <= 10.0 * LightPillarOptics.RIBBON_GLINT_CHANCE, "On the edges of glittering light "
+                + "pillar ribbons a pixel shows the glint value with a chance of " + worst + ", at " + worstWhere);
+        helper.assertTrue(worstMean <= 1.01 * visible, "On the edges of glittering light pillar ribbons a pillar "
+                + "shows " + worstMean / visible + " times the visible value on average, at " + worstMeanWhere);
         helper.succeed();
     }
 
@@ -2174,34 +2186,33 @@ public final class LightPillarGameTests {
             double dustBottomHeight, double tiltSigma, double refractiveIndex, double lateralBlur, double marginAngle,
             double valueScale, double countScale, double nearFade, double horizon, double ceiling, double top) {
         double visible = LightPillarOptics.VISIBLE_VALUE;
+        double glint = LightPillarOptics.GLINT_VALUE;
         double center = valueScale * LightPillarOptics.dustRadiance(evaluated, 0.0, horizontalDistance, lightHeight,
                 tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight, RIBBON_EXTINCTION, NO_SCENE, nearFade,
                 horizon, ceiling, top);
         double meanCount = countScale * LightPillarOptics.dustCrystalCount(evaluated, 0.0, horizontalDistance,
                 lightHeight, tiltSigma, lateralBlur, dustBottomHeight, NO_SCENE, nearFade, horizon, ceiling, top);
-        if (meanCount > 0.0) {
-            if (!(meanCount > LightPillarOptics.leastVisibleCount(center / (meanCount * visible)))) {
-                return 0.0;
-            }
-        } else if (!(center > visible)) {
+        boolean glintsShow = meanCount > 0.0
+                && meanCount > LightPillarOptics.leastVisibleCount(center / (meanCount * glint));
+        if (!(center > visible) && !glintsShow) {
             return 0.0;
         }
-        double halfWidth = LightPillarOptics.ribbonHalfWidth(center, meanCount, visible,
+        double halfWidth = LightPillarOptics.ribbonHalfWidth(center, meanCount, visible, glint,
                 LightPillarOptics.widestLateralSpread(evaluated, horizontalDistance, lightHeight, tiltSigma,
                         lateralBlur, nearFade, horizon, ceiling, top));
         return Math.min(halfWidth + marginAngle, WIDEST_RIBBON_ANGLE);
     }
 
     /**
-     * The chance per twinkle period that a sky cell shows at least the visible value, for its mean value and its mean
+     * The chance per twinkle period that a sky cell shows at least the shown value, for its mean value and its mean
      * count of crystals, as LightPillarOptics.sparkle draws the counts.
      */
-    private static double visibleGlintChance(double mean, double meanCount, double visible) {
+    private static double visibleGlintChance(double mean, double meanCount, double shownValue) {
         if (!(meanCount > 0.0) || !(mean > 0.0)
-                || LightPillarOptics.sparkleCap(meanCount) * mean < visible) {
+                || LightPillarOptics.sparkleCap(meanCount) * mean < shownValue) {
             return 0.0;
         }
-        double neededCount = visible * meanCount / mean;
+        double neededCount = shownValue * meanCount / mean;
         if (meanCount > 16.0) {
             return 0.5 * complementaryErrorFunction((neededCount - meanCount) / Math.sqrt(2.0 * meanCount));
         }
