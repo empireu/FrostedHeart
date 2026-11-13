@@ -74,6 +74,33 @@ final class LightPillarOptics {
      * crystals.csv and the lateral blur of a screen 1080 pixels tall with a vertical field of view of 70 degrees.
      */
     static final double BRIGHTNESS = 433.0;
+    /**
+     * The wavelength in blocks that spreads each crystal's reflection by diffraction.
+     */
+    private static final double WAVELENGTH = 550.0e-9;
+    /**
+     * Keeps the diffraction of a face seen nearly edge on finite.
+     */
+    private static final double SMALLEST_SINE_OF_GRAZING = 0.02;
+    /**
+     * The most that the crystals of a sky cell show, as a multiple of their mean value. Rarer and brighter glints show
+     * at this value, so cells with fewer crystals than its inverse show less than their mean on average.
+     */
+    static final double MOST_SPARKLE = 64.0;
+    /**
+     * Mean counts of crystals above this are drawn from a normal distribution instead of the Poisson distribution.
+     */
+    private static final double LARGEST_COUNTED_MEAN = 16.0;
+    private static final int MOST_DRAWN = 48;
+    private static final int GOLDEN_RATIO_STEP = 0x9e3779b9;
+    /**
+     * Outside its ribbon, a pixel of a pillar shows the visible value with less than this chance per twinkle period.
+     */
+    static final double RIBBON_GLINT_CHANCE = 0.002;
+    /**
+     * The standard normal quantile of RIBBON_GLINT_CHANCE.
+     */
+    private static final double RIBBON_GLINT_SIGMAS = 2.878;
 
     private LightPillarOptics() {
     }
@@ -209,6 +236,27 @@ final class LightPillarOptics {
     static double dustRadiance(double elevation, double lateralAngle, double horizontalDistance, double lightHeight,
             double tiltSigma, double refractiveIndex, double lateralBlur, double dustBottomHeight, double extinction,
             double sceneDistance, double nearFade, double horizon, double ceiling, double top) {
+        return dustIntegral(false, elevation, lateralAngle, horizontalDistance, lightHeight, tiltSigma, refractiveIndex,
+                lateralBlur, dustBottomHeight, extinction, sceneDistance, nearFade, horizon, ceiling, top);
+    }
+
+    /**
+     * The mean count of crystals that mirror the light toward a direction, per unit face area of the plates per volume
+     * at the bottom of the dust and per unit crystalCountScale, among the crystals that dustRadiance with the same
+     * arguments counts. A face mirrors the light while it lies within the spread of its reflection by diffraction,
+     * which widens as the face is seen more nearly edge on.
+     */
+    static double dustCrystalCount(double elevation, double lateralAngle, double horizontalDistance,
+            double lightHeight, double tiltSigma, double lateralBlur, double dustBottomHeight, double sceneDistance,
+            double nearFade, double horizon, double ceiling, double top) {
+        return dustIntegral(true, elevation, lateralAngle, horizontalDistance, lightHeight, tiltSigma, 1.0,
+                lateralBlur, dustBottomHeight, 0.0, sceneDistance, nearFade, horizon, ceiling, top);
+    }
+
+    private static double dustIntegral(boolean countsCrystals, double elevation, double lateralAngle,
+            double horizontalDistance, double lightHeight, double tiltSigma, double refractiveIndex,
+            double lateralBlur, double dustBottomHeight, double extinction, double sceneDistance, double nearFade,
+            double horizon, double ceiling, double top) {
         double lightElevation = Math.atan2(lightHeight, horizontalDistance);
         double sineOfOffset = Math.sin(elevation - lightElevation);
         if (!(sineOfOffset > 0.0)) {
@@ -223,23 +271,27 @@ final class LightPillarOptics {
                 tiltAtDistance(elevation, lightElevation, lightDistance, lightToRay, sceneDistance));
         double highestTilt = highestTilt(elevation, lightElevation, tiltSigma, lightDistance, lightToRay, nearFade);
         // The light leaves the light rising at the elevation minus twice the tilt:
-        double sum = tiltSum(lowestTilt, Math.min(highestTilt, 0.5 * (elevation - top)), elevation, lateralAngle,
-                lightHeight, lightElevation, lightDistance, lightToRay, tiltSigma, refractiveIndex, lateralBlur,
-                dustBottomHeight, extinction, nearFade)
-                + tiltSum(Math.max(lowestTilt, 0.5 * (elevation - ceiling)),
+        double sum = tiltSum(countsCrystals, lowestTilt, Math.min(highestTilt, 0.5 * (elevation - top)), elevation,
+                lateralAngle, lightHeight, lightElevation, lightDistance, lightToRay, tiltSigma, refractiveIndex,
+                lateralBlur, dustBottomHeight, extinction, nearFade)
+                + tiltSum(countsCrystals, Math.max(lowestTilt, 0.5 * (elevation - ceiling)),
                 Math.min(highestTilt, 0.5 * (elevation - horizon)), elevation, lateralAngle, lightHeight,
                 lightElevation, lightDistance, lightToRay, tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight,
                 extinction, nearFade);
+        if (countsCrystals) {
+            return 2.0 * sum / lightToRay;
+        }
         return sum / (2.0 * lightToRay);
     }
 
     /**
-     * The reflections of dustRadiance for the tilts from the lowest to the highest tilt, summed with the 8 point Gauss
-     * Legendre rule.
+     * The reflections of dustRadiance, or the crystals of dustCrystalCount, for the tilts from the lowest to the
+     * highest tilt, summed with the 8 point Gauss Legendre rule.
      */
-    private static double tiltSum(double lowestTilt, double highestTilt, double elevation, double lateralAngle,
-            double lightHeight, double lightElevation, double lightDistance, double lightToRay, double tiltSigma,
-            double refractiveIndex, double lateralBlur, double dustBottomHeight, double extinction, double nearFade) {
+    private static double tiltSum(boolean countsCrystals, double lowestTilt, double highestTilt, double elevation,
+            double lateralAngle, double lightHeight, double lightElevation, double lightDistance, double lightToRay,
+            double tiltSigma, double refractiveIndex, double lateralBlur, double dustBottomHeight, double extinction,
+            double nearFade) {
         if (!(highestTilt > lowestTilt)) {
             return 0.0;
         }
@@ -257,14 +309,113 @@ final class LightPillarOptics {
             double crystalHeight = eyeLeg * sineOfElevation;
             double acrossScale = (1.0 + eyeLeg / lightLeg) / (Math.sin(lightDepression) + sineOfElevation);
             double acrossVariance = tiltVariance + lateralBlur * lateralBlur * acrossScale * acrossScale;
-            double opticalDepth = dustOpticalDepth(lightHeight, crystalHeight, lightLeg, extinction, dustBottomHeight)
-                    + dustOpticalDepth(crystalHeight, 0.0, eyeLeg, extinction, dustBottomHeight);
-            sum += WEIGHTS[node] * IceMirror.slabReflectance(Math.sin(elevation - alongTilt), refractiveIndex)
-                    * gaussian(alongTilt, tiltVariance) * gaussian(lateralAngle * acrossScale, acrossVariance)
-                    * dustDensity(crystalHeight, dustBottomHeight) * Math.exp(-opticalDepth)
-                    * nearWeight(eyeLeg, nearFade);
+            if (countsCrystals) {
+                // The crystals in the pixel's cone along the ray, whose faces lie within the spread of the reflection:
+                double sineOfGrazing = Math.max(Math.sin(elevation - alongTilt), SMALLEST_SINE_OF_GRAZING);
+                sum += WEIGHTS[node] * gaussian(alongTilt, tiltVariance)
+                        * gaussian(lateralAngle * acrossScale, acrossVariance)
+                        * dustDensity(crystalHeight, dustBottomHeight) * nearWeight(eyeLeg, nearFade)
+                        * eyeLeg * eyeLeg * lightLeg * lightLeg / (sineOfGrazing * sineOfGrazing);
+            } else {
+                double opticalDepth = dustOpticalDepth(lightHeight, crystalHeight, lightLeg, extinction,
+                        dustBottomHeight) + dustOpticalDepth(crystalHeight, 0.0, eyeLeg, extinction, dustBottomHeight);
+                sum += WEIGHTS[node] * IceMirror.slabReflectance(Math.sin(elevation - alongTilt), refractiveIndex)
+                        * gaussian(alongTilt, tiltVariance) * gaussian(lateralAngle * acrossScale, acrossVariance)
+                        * dustDensity(crystalHeight, dustBottomHeight) * Math.exp(-opticalDepth)
+                        * nearWeight(eyeLeg, nearFade);
+            }
         }
         return sum * halfRange;
+    }
+
+    /**
+     * Turns dustCrystalCount times the face area per volume in 1 per block into the mean count of crystals in a sky
+     * cell one pixel wide, for the angle of a pixel and the diameter of the plates in micrometers, or 0 where the
+     * diameter is 0. A face of area A reflects into a solid angle of about lambda^2 / A, so its face directions within
+     * lambda^2 / (4 A) mirror the light, and each unit of face area per volume is 1 / A crystals.
+     */
+    static double crystalCountScale(double pixelAngle, double crystalMicrometers) {
+        if (!(crystalMicrometers > 0.0)) {
+            return 0.0;
+        }
+        double diameter = crystalMicrometers * 1.0e-6;
+        double faceArea = 3.0 * Math.sqrt(3.0) / 8.0 * diameter * diameter;
+        return pixelAngle * pixelAngle * WAVELENGTH * WAVELENGTH / (4.0 * faceArea * faceArea);
+    }
+
+    /**
+     * The most that the crystals of a sky cell show, as a multiple of their mean value, for their mean count. It
+     * covers counts up to three standard deviations and one crystal above the mean.
+     */
+    static double sparkleCap(double meanCount) {
+        if (!(meanCount > 0.0)) {
+            return MOST_SPARKLE;
+        }
+        return Math.min(MOST_SPARKLE, 1.0 + 3.0 / Math.sqrt(meanCount) + 1.0 / meanCount);
+    }
+
+    /**
+     * The share of its mean value that a pillar shows in a sky cell, as light_pillars.glsl draws it, for the mean count
+     * of crystals in the cell, the cell's place in pixels along the lateral angle and the elevation, the ribbon, and
+     * the twinkle clock in twinkle periods. Each cell draws a count of crystals per period and blends to the next.
+     */
+    static double sparkle(double meanCount, int lateralCell, int elevationCell, int ribbon, double twinkleClock) {
+        if (!(meanCount > 0.0)) {
+            return 1.0;
+        }
+        int cellSeed = hash(lateralCell ^ hash(elevationCell ^ hash(ribbon)));
+        double time = twinkleClock + uniform(cellSeed);
+        double frame = Math.floor(time);
+        int frameNumber = (int) frame;
+        double cap = sparkleCap(meanCount);
+        double before = Math.min(crystalsDrawn(meanCount, hash(cellSeed + frameNumber * GOLDEN_RATIO_STEP))
+                / meanCount, cap);
+        double after = Math.min(crystalsDrawn(meanCount, hash(cellSeed + (frameNumber + 1) * GOLDEN_RATIO_STEP))
+                / meanCount, cap);
+        double blend = Math.max(0.0, Math.min(1.0, 2.0 * (time - frame) - 0.5));
+        return before + (after - before) * blend * blend * (3.0 - 2.0 * blend);
+    }
+
+    /**
+     * A count of crystals for their mean count, from the Poisson distribution up to LARGEST_COUNTED_MEAN and from a
+     * normal distribution above.
+     */
+    private static double crystalsDrawn(double meanCount, int seed) {
+        double chance = uniform(seed);
+        if (meanCount > LARGEST_COUNTED_MEAN) {
+            double angle = 2.0 * Math.PI * uniform(hash(seed));
+            return Math.max(0.0, meanCount + Math.sqrt(meanCount)
+                    * Math.sqrt(-2.0 * Math.log(Math.max(chance, 1.0e-7))) * Math.cos(angle));
+        }
+        double term = Math.exp(-meanCount);
+        double cumulative = term;
+        int count = 0;
+        while (chance > cumulative && count < MOST_DRAWN) {
+            count++;
+            term *= meanCount / count;
+            cumulative += term;
+        }
+        return count;
+    }
+
+    /**
+     * The lowbias32 integer hash by Chris Wellons.
+     */
+    private static int hash(int value) {
+        int mixed = value;
+        mixed ^= mixed >>> 16;
+        mixed *= 0x7feb352d;
+        mixed ^= mixed >>> 15;
+        mixed *= 0x846ca68b;
+        mixed ^= mixed >>> 16;
+        return mixed;
+    }
+
+    /**
+     * A number from 0 up to 1 from the highest 24 bits of a hash.
+     */
+    private static double uniform(int hashed) {
+        return (hashed >>> 8) / 16777216.0;
     }
 
     /**
@@ -363,6 +514,50 @@ final class LightPillarOptics {
         }
         double spreads = Math.min(MOST_RIBBON_SPREADS, Math.sqrt(2.0 * Math.log(centerValue / visibleValue)));
         return spreads * widestLateralSpread;
+    }
+
+    /**
+     * Half the width of the ribbon of a pillar whose crystals glitter, given its mean value and its mean count of
+     * crystals per sky cell at the center, as ribbonHalfWidth without glitter where the count is 0. Across the pillar
+     * the count falls with the value, so each crystal shows about the same value, and beyond the half width a cell
+     * shows the visible value with less than RIBBON_GLINT_CHANCE.
+     */
+    static double ribbonHalfWidth(double centerValue, double meanCount, double visibleValue,
+            double widestLateralSpread) {
+        if (!(meanCount > 0.0)) {
+            return ribbonHalfWidth(centerValue, visibleValue, widestLateralSpread);
+        }
+        double leastCount = leastVisibleCount(centerValue / (meanCount * visibleValue));
+        if (!(meanCount > leastCount)) {
+            return 0.0;
+        }
+        double spreads = Math.min(MOST_RIBBON_SPREADS, Math.sqrt(2.0 * Math.log(meanCount / leastCount)));
+        return spreads * widestLateralSpread;
+    }
+
+    /**
+     * The mean count of crystals per sky cell below which the cell shows the visible value with less than
+     * RIBBON_GLINT_CHANCE, for the value of one crystal over the visible value. Where one or two crystals show it, the
+     * chance is about the count to that power over its factorial, and from three on the Wilson Hilferty approximation
+     * of the Poisson distribution gives it. sparkleCap and MOST_SPARKLE also keep cells with few crystals below the
+     * visible value.
+     */
+    static double leastVisibleCount(double crystalOverVisible) {
+        if (!(crystalOverVisible > 0.0)) {
+            return Double.POSITIVE_INFINITY;
+        }
+        double ratio = 1.0 / crystalOverVisible;
+        double needed = Math.max(1.0, Math.ceil(ratio));
+        double chanceCount;
+        if (needed <= 2.0) {
+            chanceCount = Math.pow(RIBBON_GLINT_CHANCE * needed, 1.0 / needed);
+        } else {
+            double root = Math.max(0.0, 1.0 - 1.0 / (9.0 * needed) - RIBBON_GLINT_SIGMAS / (3.0 * Math.sqrt(needed)));
+            chanceCount = needed * root * root * root;
+        }
+        double capRoot = 0.5 * (Math.sqrt(4.0 * ratio + 5.0) - 3.0);
+        double capCount = ratio > 1.0 ? capRoot * capRoot : 0.0;
+        return Math.max(chanceCount, Math.max(capCount, ratio / MOST_SPARKLE));
     }
 
     /**

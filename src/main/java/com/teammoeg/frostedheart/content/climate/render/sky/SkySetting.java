@@ -55,6 +55,12 @@ public enum SkySetting {
     PILLAR_NEAR_FADE("pillarNearFade", "Distance in blocks from the eye beyond which ice crystals fully show light "
             + "pillars. Nearer crystals fade out down to a quarter of it, since too few of them line up to show a "
             + "smooth pillar. 0 shows them all.", Rebuilds.NOTHING, 8.0, 0.0, 64.0),
+    PILLAR_CRYSTAL_SIZE("pillarCrystalSize", "Diameter in micrometers of the plate crystals that show light pillars. "
+            + "Each pixel of a pillar shows only the crystals that line up in it, so near pillars glitter and far ones "
+            + "look smooth. Larger crystals are fewer and glitter more. 0 draws smooth pillars.", Rebuilds.NOTHING,
+            65.0, 0.0, 1000.0),
+    PILLAR_TWINKLE_SECONDS("pillarTwinkleSeconds", "Seconds over which the glittering crystals of light pillars change "
+            + "while the eye stands still. Moving the eye changes them faster.", Rebuilds.NOTHING, 0.25, 0.02, 5.0),
     TEXEL_DEGREES("texelDegrees", "Size of the sky's square texels in degrees. They are fixed to the sky like the "
             + "sun's texture. 0 draws a smooth sky.", Rebuilds.HALOS, 0.5, 0.0, 5.0);
 

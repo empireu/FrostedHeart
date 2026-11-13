@@ -78,6 +78,11 @@ public final class LightPillarGameTests {
      * pillar of wobbling plates at 60 degrees. The plates stay within 0.2%.
      */
     private static final double PILLAR_TOLERANCE = 0.05;
+    /**
+     * Covers the crystal count of wobbling plates at the bottom of far pillars, which reaches 23% at 3 degrees. Plates
+     * stay within 1.2%.
+     */
+    private static final double WOBBLING_COUNT_TOLERANCE = 0.25;
     private static final int RAY_STEPS = 40000;
     private static final double RAY_WINDOWS = 60.0;
     /**
@@ -1201,6 +1206,180 @@ public final class LightPillarGameTests {
         helper.succeed();
     }
 
+    @GameTest(template = "phase0a_empty", timeoutTicks = 1200)
+    public static void lightPillarCrystalCountMatchesTheRayIntegral(GameTestHelper helper) {
+        List<IceCrystalData.Crystal> plates = plates();
+        double[] worstByKind = new double[plates.size()];
+        String[] worstWhereByKind = new String[plates.size()];
+        for (int kind = 0; kind < plates.size(); kind++) {
+            IceCrystalData.Crystal crystal = plates.get(kind);
+            double tiltSigma = Math.toRadians(crystal.tiltDegrees());
+            double worst = -1.0;
+            String worstWhere = "nowhere";
+            for (double[] light : PILLAR_LIGHTS) {
+                double horizontalDistance = light[0];
+                for (int height = 1; height < light.length; height++) {
+                    double lightHeight = light[height];
+                    for (double elevationDegrees : PILLAR_ELEVATIONS_DEGREES) {
+                        double elevation = Math.toRadians(elevationDegrees);
+                        double crystalHeight = LightPillarOptics.mirrorHeight(elevation, horizontalDistance,
+                                lightHeight);
+                        if (crystalHeight <= Math.max(0.0, lightHeight) + 0.05) {
+                            continue;
+                        }
+                        double spread = LightPillarOptics.lateralSpread(elevation, horizontalDistance, lightHeight,
+                                tiltSigma);
+                        for (double spreads : SCENE_LATERAL_SPREADS) {
+                            double lateralAngle = spreads * spread;
+                            double whole = rayCrystalCount(elevation, lateralAngle, horizontalDistance, lightHeight,
+                                    tiltSigma, NO_SCENE, 0.0, LightPillarHorizons.OPEN, LightPillarHorizons.OPEN,
+                                    LightPillarHorizons.OPEN);
+                            for (int caseNumber = 0; caseNumber <= 7; caseNumber++) {
+                                double[] fadeCase = caseNumber == 0
+                                        ? new double[]{0.0, LightPillarHorizons.OPEN, LightPillarHorizons.OPEN,
+                                        LightPillarHorizons.OPEN}
+                                        : rayIntegralCase(caseNumber, elevation, tiltSigma);
+                                double expected = rayCrystalCount(elevation, lateralAngle, horizontalDistance,
+                                        lightHeight, tiltSigma, NO_SCENE, fadeCase[0], fadeCase[1], fadeCase[2],
+                                        fadeCase[3]);
+                                double actual = LightPillarOptics.dustCrystalCount(elevation, lateralAngle,
+                                        horizontalDistance, lightHeight, tiltSigma, 0.0, 1.0e9, NO_SCENE, fadeCase[0],
+                                        fadeCase[1], fadeCase[2], fadeCase[3]);
+                                double difference = Math.abs(actual - expected) / whole;
+                                if (!(difference <= worst)) {
+                                    worst = difference;
+                                    worstWhere = String.format(Locale.ROOT,
+                                            "case %d, %s, light %.0f away and %.0f high, elevation %.0f degrees, "
+                                                    + "%.0f spreads off the center, %.4g against %.4g of %.4g",
+                                            caseNumber, crystal.name(), horizontalDistance, lightHeight,
+                                            elevationDegrees, spreads, actual, expected, whole);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            worstByKind[kind] = worst;
+            worstWhereByKind[kind] = worstWhere;
+            LOGGER.info("Light pillar crystal counts of " + crystal.name() + " differ from the ray integral by at most "
+                    + worst + " of the whole count, at " + worstWhere);
+        }
+        for (int kind = 0; kind < plates.size(); kind++) {
+            // The tilts of wobbling plates span 40 degrees, over which the spread of the reflection changes too much
+            // for the 8 point rule at low elevations. The count only sets how strongly a pillar glitters:
+            double tolerance = plates.get(kind).tiltDegrees() > 1.0 ? WOBBLING_COUNT_TOLERANCE : PILLAR_TOLERANCE;
+            helper.assertTrue(worstByKind[kind] <= tolerance, "Light pillar crystal counts differ from the ray "
+                    + "integral by " + worstByKind[kind] + " of the whole count, at " + worstWhereByKind[kind]);
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 400)
+    public static void lightPillarSparkleKeepsTheMeanValue(GameTestHelper helper) {
+        helper.assertTrue(LightPillarOptics.sparkle(0.0, 3, 4, 5, 6.5) == 1.0,
+                "A cell without a crystal count does not show its mean value");
+        for (double meanCount : new double[]{0.001, 1.0 / 64.0, 0.05, 0.2, 1.0, 4.0, 15.0, 17.0, 100.0, 1.0e4}) {
+            double cap = LightPillarOptics.sparkleCap(meanCount);
+            double sum = 0.0;
+            int samples = 0;
+            for (int lateralCell = -100; lateralCell < 100; lateralCell++) {
+                for (int elevationCell = 0; elevationCell < 100; elevationCell++) {
+                    // Two periods apart, the counts a sample blends are drawn anew:
+                    for (int period = 0; period < 10; period++) {
+                        double factor = LightPillarOptics.sparkle(meanCount, lateralCell, elevationCell, 7,
+                                2.0 * period + 0.5);
+                        helper.assertTrue(factor >= 0.0 && factor <= cap * (1.0 + 1.0e-12), "A cell with a mean "
+                                + "count of " + meanCount
+                                + " shows " + factor + " of its mean value, outside 0 to " + cap);
+                        sum += factor;
+                        samples++;
+                    }
+                }
+            }
+            double mean = sum / samples;
+            double expected = Math.min(1.0, LightPillarOptics.MOST_SPARKLE * (1.0 - Math.exp(-meanCount)));
+            // With few crystals, a sample is 0 or the value of one glint, whose variance sets the standard error:
+            double glintValue = Math.min(1.0 / meanCount, LightPillarOptics.MOST_SPARKLE);
+            double tolerance = meanCount >= 1.0 ? 0.01 : 4.0 * Math.sqrt(glintValue * expected / samples) + 0.012;
+            helper.assertTrue(Math.abs(mean - expected) <= tolerance, "Cells with a mean count of " + meanCount
+                    + " show " + mean + " of their mean value on average instead of " + expected + " within "
+                    + tolerance);
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 1200)
+    public static void lightPillarRibbonsHoldTheGlints(GameTestHelper helper) {
+        double refractiveIndex = IceHaloFormulas.refractiveIndex(1);
+        double visible = LightPillarOptics.VISIBLE_VALUE;
+        double pixelAngle = pixelAngle(1080);
+        double lateralBlur = LightPillarOptics.lateralBlur(pixelAngle);
+        double open = LightPillarHorizons.OPEN;
+        double worstMiddle = 0.0;
+        double worst = 0.0;
+        String worstWhere = "nowhere";
+        for (double micrometers : new double[]{50.0, 100.0, 200.0}) {
+            double countScale = LightPillarOptics.crystalCountScale(pixelAngle, micrometers);
+            for (IceCrystalData.Crystal crystal : plates()) {
+                double tiltSigma = Math.toRadians(crystal.tiltDegrees());
+                double share = IceCrystalData.get().shareOf(crystal);
+                for (double[] light : RIBBON_LIGHTS) {
+                    for (double strength : RIBBON_STRENGTHS) {
+                        double scale = LightPillarOptics.BRIGHTNESS * strength * share * RIBBON_EXTINCTION;
+                        double counts = countScale * share * RIBBON_EXTINCTION;
+                        double[][] corners = ribbonEdge(light[0], light[1], light[2], tiltSigma, refractiveIndex,
+                                lateralBlur, pixelAngle, scale, counts, 0.0, open, open, open);
+                        if (corners == null) {
+                            continue;
+                        }
+                        for (int segment = 0; segment < RIBBON_SEGMENTS; segment++) {
+                            double[] below = corners[segment];
+                            double[] above = corners[segment + 1];
+                            for (int step = 0; step <= EDGE_STEPS; step++) {
+                                double fraction = (double) step / EDGE_STEPS;
+                                double x = below[0] + (above[0] - below[0]) * fraction;
+                                double y = below[1] + (above[1] - below[1]) * fraction;
+                                double z = below[2] + (above[2] - below[2]) * fraction;
+                                double length = Math.sqrt(x * x + y * y + z * z);
+                                double elevation = Math.asin(y / length);
+                                double lateralAngle = Math.asin(z / length);
+                                double mean = scale * LightPillarOptics.dustRadiance(elevation, lateralAngle,
+                                        light[0], light[1], tiltSigma, refractiveIndex, lateralBlur, light[2],
+                                        RIBBON_EXTINCTION, NO_SCENE, 0.0, open, open, open);
+                                double meanCount = counts * LightPillarOptics.dustCrystalCount(elevation,
+                                        lateralAngle, light[0], light[1], tiltSigma, lateralBlur, light[2], NO_SCENE,
+                                        0.0, open, open, open);
+                                double chance = visibleGlintChance(mean, meanCount, visible);
+                                if (segment >= 1 && segment < RIBBON_SEGMENTS - 2) {
+                                    worstMiddle = Math.max(worstMiddle, chance);
+                                }
+                                if (chance > worst) {
+                                    worst = chance;
+                                    worstWhere = String.format(Locale.ROOT,
+                                            "%.0f micrometers, %s of strength %.2f, light %.0f away and %.2f high, "
+                                                    + "dust bottom %.2f, elevation %.2f, %.3f degrees off the center, "
+                                                    + "%.3g crystals, mean %.3g times the visible value",
+                                            micrometers, crystal.name(), strength, light[0], light[1], light[2],
+                                            Math.toDegrees(elevation), Math.toDegrees(lateralAngle), meanCount,
+                                            mean / visible);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        LOGGER.info("On the edges of glittering light pillar ribbons a pixel shows the visible value with a chance of "
+                + "at most " + worstMiddle + " away from the ends of the ribbon and " + worst + " anywhere, at "
+                + worstWhere);
+        // The top rows come close to the zenith and the bottom row to the light, where the half rows sample coarsely:
+        helper.assertTrue(worstMiddle <= 0.01, "Away from the ends of glittering light pillar ribbons a pixel on "
+                + "their edges shows the visible value with a chance of " + worstMiddle);
+        helper.assertTrue(worst <= 0.05, "On the edges of glittering light pillar ribbons a pixel shows the visible "
+                + "value with a chance of " + worst + ", at " + worstWhere);
+        helper.succeed();
+    }
+
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void lightPillarOccludersSortBlocks(GameTestHelper helper) {
         LightPillarOccluders occluders = new LightPillarOccluders();
@@ -1940,6 +2119,17 @@ public final class LightPillarGameTests {
     private static double[][] ribbonEdge(double horizontalDistance, double lightHeight, double dustBottomHeight,
             double tiltSigma, double refractiveIndex, double lateralBlur, double marginAngle, double valueScale,
             double nearFade, double horizon, double ceiling, double top) {
+        return ribbonEdge(horizontalDistance, lightHeight, dustBottomHeight, tiltSigma, refractiveIndex, lateralBlur,
+                marginAngle, valueScale, 0.0, nearFade, horizon, ceiling, top);
+    }
+
+    /**
+     * The corners on one side of a pillar's ribbon as above, for crystals that glitter with the scale from
+     * dustCrystalCount to the mean count of crystals per sky cell, or 0 where they do not.
+     */
+    private static double[][] ribbonEdge(double horizontalDistance, double lightHeight, double dustBottomHeight,
+            double tiltSigma, double refractiveIndex, double lateralBlur, double marginAngle, double valueScale,
+            double countScale, double nearFade, double horizon, double ceiling, double top) {
         double lowest = LightPillarOptics.lowestRibbonElevation(horizontalDistance, lightHeight, tiltSigma, horizon);
         double highest = LightPillarOptics.HIGHEST_RIBBON_ELEVATION;
         if (!(highest > lowest)) {
@@ -1952,7 +2142,8 @@ public final class LightPillarGameTests {
             double rowElevation = ribbonRowElevation(0.5 * halfRow, firstRow);
             double evaluated = Math.max(lowestEvaluated, Math.min(rowElevation, highest));
             halfWidths[halfRow] = ribbonHalfWidthAt(evaluated, horizontalDistance, lightHeight, dustBottomHeight,
-                    tiltSigma, refractiveIndex, lateralBlur, marginAngle, valueScale, nearFade, horizon, ceiling, top);
+                    tiltSigma, refractiveIndex, lateralBlur, marginAngle, valueScale, countScale, nearFade, horizon,
+                    ceiling, top);
         }
         double reappearance = top + 2.0 * tiltSigma;
         double[][] corners = new double[RIBBON_SEGMENTS + 1][];
@@ -1967,8 +2158,8 @@ public final class LightPillarGameTests {
                     && reappearance < ribbonRowElevation(0.5 * lastHalfRow, firstRow)) {
                 double evaluated = Math.max(lowestEvaluated, Math.min(reappearance, highest));
                 halfWidth = Math.max(halfWidth, ribbonHalfWidthAt(evaluated, horizontalDistance, lightHeight,
-                        dustBottomHeight, tiltSigma, refractiveIndex, lateralBlur, marginAngle, valueScale, nearFade,
-                        horizon, ceiling, top));
+                        dustBottomHeight, tiltSigma, refractiveIndex, lateralBlur, marginAngle, valueScale, countScale,
+                        nearFade, horizon, ceiling, top));
             }
             double elevation = ribbonRowElevation(row, firstRow);
             corners[row] = new double[]{Math.cos(elevation), Math.sin(elevation), Math.tan(halfWidth)};
@@ -1981,17 +2172,58 @@ public final class LightPillarGameTests {
      */
     private static double ribbonHalfWidthAt(double evaluated, double horizontalDistance, double lightHeight,
             double dustBottomHeight, double tiltSigma, double refractiveIndex, double lateralBlur, double marginAngle,
-            double valueScale, double nearFade, double horizon, double ceiling, double top) {
+            double valueScale, double countScale, double nearFade, double horizon, double ceiling, double top) {
+        double visible = LightPillarOptics.VISIBLE_VALUE;
         double center = valueScale * LightPillarOptics.dustRadiance(evaluated, 0.0, horizontalDistance, lightHeight,
                 tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight, RIBBON_EXTINCTION, NO_SCENE, nearFade,
                 horizon, ceiling, top);
-        if (!(center > LightPillarOptics.VISIBLE_VALUE)) {
+        double meanCount = countScale * LightPillarOptics.dustCrystalCount(evaluated, 0.0, horizontalDistance,
+                lightHeight, tiltSigma, lateralBlur, dustBottomHeight, NO_SCENE, nearFade, horizon, ceiling, top);
+        if (meanCount > 0.0) {
+            if (!(meanCount > LightPillarOptics.leastVisibleCount(center / (meanCount * visible)))) {
+                return 0.0;
+            }
+        } else if (!(center > visible)) {
             return 0.0;
         }
-        double halfWidth = LightPillarOptics.ribbonHalfWidth(center, LightPillarOptics.VISIBLE_VALUE,
+        double halfWidth = LightPillarOptics.ribbonHalfWidth(center, meanCount, visible,
                 LightPillarOptics.widestLateralSpread(evaluated, horizontalDistance, lightHeight, tiltSigma,
                         lateralBlur, nearFade, horizon, ceiling, top));
         return Math.min(halfWidth + marginAngle, WIDEST_RIBBON_ANGLE);
+    }
+
+    /**
+     * The chance per twinkle period that a sky cell shows at least the visible value, for its mean value and its mean
+     * count of crystals, as LightPillarOptics.sparkle draws the counts.
+     */
+    private static double visibleGlintChance(double mean, double meanCount, double visible) {
+        if (!(meanCount > 0.0) || !(mean > 0.0)
+                || LightPillarOptics.sparkleCap(meanCount) * mean < visible) {
+            return 0.0;
+        }
+        double neededCount = visible * meanCount / mean;
+        if (meanCount > 16.0) {
+            return 0.5 * complementaryErrorFunction((neededCount - meanCount) / Math.sqrt(2.0 * meanCount));
+        }
+        int needed = Math.max(1, (int) Math.ceil(neededCount));
+        double term = Math.exp(-meanCount);
+        double below = 0.0;
+        for (int count = 0; count < needed; count++) {
+            below += term;
+            term *= meanCount / (count + 1);
+        }
+        return Math.max(0.0, 1.0 - below);
+    }
+
+    /**
+     * The complementary error function to about 1e-7, from Numerical Recipes.
+     */
+    private static double complementaryErrorFunction(double value) {
+        double scaled = 1.0 / (1.0 + 0.5 * Math.abs(value));
+        double result = scaled * Math.exp(-value * value - 1.26551223 + scaled * (1.00002368 + scaled * (0.37409196
+                + scaled * (0.09678418 + scaled * (-0.18628806 + scaled * (0.27886807 + scaled * (-1.13520398
+                + scaled * (1.48851587 + scaled * (-0.82215223 + scaled * 0.17087277)))))))));
+        return value >= 0.0 ? result : 2.0 - result;
     }
 
     private static double ribbonRowElevation(double row, double firstRow) {
@@ -2066,6 +2298,25 @@ public final class LightPillarGameTests {
     private static double rayIntegral(double elevation, double lateralAngle, double horizontalDistance,
             double lightHeight, double tiltSigma, double refractiveIndex, double sceneDistance, double nearFade,
             double horizon, double ceiling, double top) {
+        return raySum(false, elevation, lateralAngle, horizontalDistance, lightHeight, tiltSigma, refractiveIndex,
+                sceneDistance, nearFade, horizon, ceiling, top);
+    }
+
+    /**
+     * The crystals that mirror the light toward the direction, per unit face area per volume and unit
+     * crystalCountScale, counted along the view ray as rayIntegral sums their light. Each counts while its face lies
+     * within the spread of its reflection by diffraction, which grows with one over the squared cosine of incidence.
+     */
+    private static double rayCrystalCount(double elevation, double lateralAngle, double horizontalDistance,
+            double lightHeight, double tiltSigma, double sceneDistance, double nearFade, double horizon, double ceiling,
+            double top) {
+        return raySum(true, elevation, lateralAngle, horizontalDistance, lightHeight, tiltSigma, 1.0, sceneDistance,
+                nearFade, horizon, ceiling, top);
+    }
+
+    private static double raySum(boolean countsCrystals, double elevation, double lateralAngle,
+            double horizontalDistance, double lightHeight, double tiltSigma, double refractiveIndex,
+            double sceneDistance, double nearFade, double horizon, double ceiling, double top) {
         double azimuth = Math.asin(Math.sin(lateralAngle) / Math.cos(elevation));
         double directionX = Math.cos(elevation) * Math.cos(azimuth);
         double directionY = Math.cos(elevation) * Math.sin(azimuth);
@@ -2103,9 +2354,15 @@ public final class LightPillarGameTests {
             double tilt = Math.acos(Math.min(1.0, Math.abs(halfZ) / halfLength));
             double cosineOfIncidence = Math.abs(toLightX * halfX + toLightY * halfY + toLightZ * halfZ)
                     / (lightDistance * halfLength);
-            total += 0.25 * IceMirror.slabReflectance(cosineOfIncidence, refractiveIndex)
-                    * IceMirror.tiltDensity(tilt, tiltSigma) / (lightDistance * lightDistance) * step
-                    * rayNearWeight(distance, nearFade);
+            if (countsCrystals) {
+                double spreadCosine = Math.max(cosineOfIncidence, 0.02);
+                total += IceMirror.tiltDensity(tilt, tiltSigma) * distance * distance
+                        / (spreadCosine * spreadCosine) * step * rayNearWeight(distance, nearFade);
+            } else {
+                total += 0.25 * IceMirror.slabReflectance(cosineOfIncidence, refractiveIndex)
+                        * IceMirror.tiltDensity(tilt, tiltSigma) / (lightDistance * lightDistance) * step
+                        * rayNearWeight(distance, nearFade);
+            }
         }
         return total;
     }

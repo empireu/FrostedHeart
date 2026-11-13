@@ -60,8 +60,9 @@ import java.util.Locale;
  * buffer, and light_pillars.glsl spreads the ribbons over the pillar on the screen and computes the light on them.
  * The fragment stage reads the depth of the main target and counts only the crystals in front of the scene. Each light
  * carries its horizon, ceiling, and top toward the eye from LightPillarHorizons, and crystals whose light those blocks
- * stop are left out. Crystals near the eye fade out by SkySetting.PILLAR_NEAR_FADE. Pillars add to the frame with a
- * screen blend. They
+ * stop are left out. Crystals near the eye fade out by SkySetting.PILLAR_NEAR_FADE. Each pixel-sized cell of the sky
+ * draws the count of crystals that glitter in it from the mean count, which the plates' size sets, and the counts
+ * change over the twinkle clock. Pillars add to the frame with a screen blend. They
  * fade out with the brightness of the fog color, so by day, and with the rain level, so in snow. Render thread only.
  */
 @OnlyIn(Dist.CLIENT)
@@ -81,6 +82,14 @@ public final class LightPillarRenderer {
      * The scene depth goes to texture unit 0 while the pillars draw.
      */
     private static final int SCENE_DEPTH_UNIT = 0;
+    /**
+     * Blocks the eye moves per twinkle period, since the crystals that line up change as the eye moves.
+     */
+    private static final double TWINKLE_DISTANCE = 0.25;
+    /**
+     * The twinkle clock wraps here, which keeps it precise in single precision.
+     */
+    private static final double TWINKLE_CLOCK_WRAP = 65536.0;
     private static final FloatBuffer lightBuffer = BufferUtils.createFloatBuffer(4 * SLOTS);
     private static final FloatBuffer overhangBuffer = BufferUtils.createFloatBuffer(2 * SLOTS);
     private static final FloatBuffer colorBuffer = BufferUtils.createFloatBuffer(4 * SLOTS);
@@ -115,6 +124,13 @@ public final class LightPillarRenderer {
     private static int marginAngleUniform;
     private static int inverseViewProjectionUniform;
     private static int screenSizeUniform;
+    private static int crystalCountScaleUniform;
+    private static int twinkleClockUniform;
+    private static double twinkleClock;
+    private static long lastTwinkleNanos;
+    private static double lastTwinkleX;
+    private static double lastTwinkleY;
+    private static double lastTwinkleZ;
     /**
      * A framebuffer that the pillars draw through, holding the main target's color only while they draw. Without the
      * main target's depth attached, the fragment stage can read that depth.
@@ -167,6 +183,7 @@ public final class LightPillarRenderer {
         if (pillars == 0) {
             return;
         }
+        advanceTwinkle(eyeX, eyeY, eyeZ);
         timer.begin();
         try {
             draw(projection, extinctionPerBlock, dustBottomY - eyeY);
@@ -190,6 +207,28 @@ public final class LightPillarRenderer {
         } else {
             eyeOffset.zero();
         }
+    }
+
+    /**
+     * Advances the twinkle clock by the time since the last drawn frame over the twinkle period and by the distance
+     * the eye moved over TWINKLE_DISTANCE, by at most one period a frame. It stands still while the game is paused and
+     * stays at 0 while the screenshot harness takes shots.
+     */
+    private static void advanceTwinkle(double eyeX, double eyeY, double eyeZ) {
+        long now = System.nanoTime();
+        if (CalculatedSkyScreenshots.isRunning()) {
+            twinkleClock = 0.0;
+        } else if (lastTwinkleNanos != 0L && !Minecraft.getInstance().isPaused()) {
+            double seconds = (now - lastTwinkleNanos) * 1.0e-9;
+            double moved = Math.sqrt((eyeX - lastTwinkleX) * (eyeX - lastTwinkleX)
+                    + (eyeY - lastTwinkleY) * (eyeY - lastTwinkleY) + (eyeZ - lastTwinkleZ) * (eyeZ - lastTwinkleZ));
+            double periods = seconds / SkySetting.PILLAR_TWINKLE_SECONDS.get() + moved / TWINKLE_DISTANCE;
+            twinkleClock = (twinkleClock + Math.min(Math.max(periods, 0.0), 1.0)) % TWINKLE_CLOCK_WRAP;
+        }
+        lastTwinkleNanos = now;
+        lastTwinkleX = eyeX;
+        lastTwinkleY = eyeY;
+        lastTwinkleZ = eyeZ;
     }
 
     /**
@@ -288,6 +327,9 @@ public final class LightPillarRenderer {
             inverseViewProjection.get(matrixBuffer);
             GL20.glUniformMatrix4fv(inverseViewProjectionUniform, false, matrixBuffer);
             GL20.glUniform2f(screenSizeUniform, mainTarget.width, mainTarget.height);
+            GL20.glUniform1f(crystalCountScaleUniform, (float) LightPillarOptics.crystalCountScale(pixelAngle,
+                    SkySetting.PILLAR_CRYSTAL_SIZE.get()));
+            GL20.glUniform1f(twinkleClockUniform, (float) twinkleClock);
             RenderSystem.enableBlend();
             RenderSystem.blendEquation(GL14.GL_FUNC_ADD);
             RenderSystem.blendFuncSeparate(GL11.GL_ONE_MINUS_DST_COLOR, GL11.GL_ONE, GL11.GL_ZERO, GL11.GL_ONE);
@@ -385,6 +427,8 @@ public final class LightPillarRenderer {
         marginAngleUniform = GL20.glGetUniformLocation(programId, "marginAngle");
         inverseViewProjectionUniform = GL20.glGetUniformLocation(programId, "inverseViewProjection");
         screenSizeUniform = GL20.glGetUniformLocation(programId, "screenSize");
+        crystalCountScaleUniform = GL20.glGetUniformLocation(programId, "crystalCountScale");
+        twinkleClockUniform = GL20.glGetUniformLocation(programId, "twinkleClock");
     }
 
     /**

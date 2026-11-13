@@ -130,6 +130,13 @@ public final class CalculatedSkyScreenshots {
     private CalculatedSkyScreenshots() {
     }
 
+    /**
+     * Whether a run is taking shots.
+     */
+    public static boolean isRunning() {
+        return activeRun != null;
+    }
+
     private enum Weather {
         WORLD("world", 0.0F, 0.0F),
         CLEAR("clear", 0.0F, 0.0F),
