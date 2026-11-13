@@ -148,6 +148,8 @@ public final class CalculatedSkyClientCommand {
             return 0;
         }
         send(context, LightPillarSources.describe(level));
+        send(context, LightPillarWorldChanges.describe());
+        send(context, LightPillarWorldChanges.describeBlocks());
         send(context, LightPillarRenderer.describe());
         for (String line : LightPillarSources.describePillars(
                 Minecraft.getInstance().gameRenderer.getMainCamera().getPosition())) {

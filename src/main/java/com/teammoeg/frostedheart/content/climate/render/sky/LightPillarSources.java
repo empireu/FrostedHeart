@@ -127,6 +127,7 @@ public final class LightPillarSources {
             reset();
             scannedLevel = level;
         }
+        LightPillarWorldChanges.tick(level, level != null && !failed && CalculatedSkyRenderer.isAllowed(level));
         if (level == null || failed) {
             return;
         }
