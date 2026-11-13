@@ -185,11 +185,13 @@ final class LightPillarOptics {
      * volume at the bottom of the dust. Each reflection takes the face area at its crystals from dustDensity and is
      * dimmed along its way from the light and to the eye by the extinction per block at the bottom of the dust.
      * The lateral blur in radians widens the pillar on the sky without changing its light. Only crystals nearer to the
-     * eye than the scene distance count, which is infinite where no scene stands. light_pillars.glsl computes the same.
+     * eye than the scene distance count, which is infinite where no scene stands, and only crystals whose light leaves
+     * the light rising more steeply than the horizon, in radians, which is LightPillarHorizons.OPEN where nothing stands
+     * around the light. light_pillars.glsl computes the same.
      */
     static double dustRadiance(double elevation, double lateralAngle, double horizontalDistance, double lightHeight,
             double tiltSigma, double refractiveIndex, double lateralBlur, double dustBottomHeight, double extinction,
-            double sceneDistance) {
+            double sceneDistance, double horizon) {
         double lightElevation = Math.atan2(lightHeight, horizontalDistance);
         double sineOfOffset = Math.sin(elevation - lightElevation);
         if (!(sineOfOffset > 0.0)) {
@@ -204,7 +206,7 @@ final class LightPillarOptics {
         double nearTilt = elevation - 0.5 * Math.atan2(lightToRay,
                 lightDistance * Math.cos(elevation - lightElevation) - sceneDistance);
         double lowestTilt = Math.max(lowestTilt(elevation, tiltSigma), nearTilt);
-        double highestTilt = highestTilt(elevation, lightElevation, tiltSigma);
+        double highestTilt = highestTilt(elevation, lightElevation, tiltSigma, horizon);
         if (!(highestTilt > lowestTilt)) {
             return 0.0;
         }
@@ -233,14 +235,15 @@ final class LightPillarOptics {
 
     /**
      * The largest standard deviation across the pillar at the elevation, in radians on the sky, among the reflections
-     * that dustRadiance sums. The pillar falls off sideways at least as fast as a Gaussian of this width.
+     * that dustRadiance sums without a scene for the horizon. The pillar falls off sideways at least as fast as a
+     * Gaussian of this width.
      */
     static double widestLateralSpread(double elevation, double horizontalDistance, double lightHeight,
-            double tiltSigma, double lateralBlur) {
+            double tiltSigma, double lateralBlur, double horizon) {
         double lightElevation = Math.atan2(lightHeight, horizontalDistance);
         double sineOfOffset = Math.sin(elevation - lightElevation);
         double lowestTilt = lowestTilt(elevation, tiltSigma);
-        double highestTilt = highestTilt(elevation, lightElevation, tiltSigma);
+        double highestTilt = highestTilt(elevation, lightElevation, tiltSigma, horizon);
         if (!(sineOfOffset > 0.0) || !(highestTilt > lowestTilt)) {
             return 0.0;
         }
@@ -260,11 +263,14 @@ final class LightPillarOptics {
 
     /**
      * The lowest elevation where the pillar can show. It is the light itself, or for a light below the eye, where
-     * crystals above the eye mirror it with the most tilted faces that dustRadiance counts.
+     * crystals above the eye mirror it with the most tilted faces that dustRadiance counts, or where those faces
+     * mirror light that leaves the light at the horizon, whichever is highest.
      */
-    static double lowestRibbonElevation(double horizontalDistance, double lightHeight, double tiltSigma) {
+    static double lowestRibbonElevation(double horizontalDistance, double lightHeight, double tiltSigma,
+            double horizon) {
         double lightElevation = Math.atan2(lightHeight, horizontalDistance);
-        return Math.max(lightElevation, -lightElevation - 2.0 * TILT_RANGE_SIGMAS * tiltSigma);
+        return Math.max(Math.max(lightElevation, -lightElevation - 2.0 * TILT_RANGE_SIGMAS * tiltSigma),
+                horizon - 2.0 * TILT_RANGE_SIGMAS * tiltSigma);
     }
 
     /**
@@ -293,6 +299,14 @@ final class LightPillarOptics {
 
     private static double highestTilt(double elevation, double lightElevation, double tiltSigma) {
         return Math.min(TILT_RANGE_SIGMAS * tiltSigma, 0.5 * (elevation + lightElevation));
+    }
+
+    /**
+     * The highest tilt also cut where the light leaves the light at the horizon, since it leaves rising at the
+     * elevation minus twice the tilt.
+     */
+    private static double highestTilt(double elevation, double lightElevation, double tiltSigma, double horizon) {
+        return Math.min(highestTilt(elevation, lightElevation, tiltSigma), 0.5 * (elevation - horizon));
     }
 
     private static double gaussian(double value, double variance) {

@@ -31,7 +31,6 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.logging.LogUtils;
 import com.teammoeg.frostedheart.FHMain;
 import com.teammoeg.frostedheart.bootstrap.client.FHShaders;
-import net.minecraft.client.CloudStatus;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.world.phys.Vec3;
@@ -59,8 +58,9 @@ import java.util.Locale;
  * Draws the light pillars of the lights that LightPillarSources chose, after the weather, in frames where the
  * calculated sky was drawn and there is diamond dust. Each pillar has one ribbon per plate kind on a static vertex
  * buffer, and light_pillars.glsl spreads the ribbons over the pillar on the screen and computes the light on them.
- * The fragment stage reads the depth of the main target, counts only the crystals in front of the scene, and leaves
- * out pillar light on scene points between the eye and the light. Pillars add to the frame with a screen blend. They
+ * The fragment stage reads the depth of the main target and counts only the crystals in front of the scene. Each light
+ * carries its horizon toward the eye from LightPillarHorizons, and crystals whose light would have to leave the light
+ * below it are left out. Pillars add to the frame with a screen blend. They
  * fade out with the brightness of the fog color, so by day, and with the rain level, so in snow. Render thread only.
  */
 @OnlyIn(Dist.CLIENT)
@@ -80,10 +80,6 @@ public final class LightPillarRenderer {
      * The scene depth goes to texture unit 0 while the pillars draw.
      */
     private static final int SCENE_DEPTH_UNIT = 0;
-    /**
-     * A height relative to the eye above every scene point, for frames without clouds.
-     */
-    private static final float NO_CLOUDS = 1.0e30F;
     private static final FloatBuffer lightBuffer = BufferUtils.createFloatBuffer(4 * SLOTS);
     private static final FloatBuffer colorBuffer = BufferUtils.createFloatBuffer(4 * SLOTS);
     private static final FloatBuffer matrixBuffer = BufferUtils.createFloatBuffer(16);
@@ -115,7 +111,6 @@ public final class LightPillarRenderer {
     private static int marginAngleUniform;
     private static int inverseViewProjectionUniform;
     private static int screenSizeUniform;
-    private static int cloudBottomHeightUniform;
     /**
      * A framebuffer that the pillars draw through, holding the main target's color only while they draw. Without the
      * main target's depth attached, the fragment stage can read that depth.
@@ -170,7 +165,7 @@ public final class LightPillarRenderer {
         }
         timer.begin();
         try {
-            draw(projection, extinctionPerBlock, dustBottomY - eyeY, cloudBottomHeight(level, eyeY));
+            draw(projection, extinctionPerBlock, dustBottomY - eyeY);
         } finally {
             timer.end();
         }
@@ -194,18 +189,6 @@ public final class LightPillarRenderer {
     }
 
     /**
-     * The height relative to the eye from which scene points are clouds, which vanilla draws into the main target's
-     * depth in Fast and Fancy graphics. Their bottom is a third of a block above the dimension's cloud height.
-     */
-    private static float cloudBottomHeight(ClientLevel level, double eyeY) {
-        float cloudHeight = level.effects().getCloudHeight();
-        if (Minecraft.getInstance().options.getCloudsType() == CloudStatus.OFF || Float.isNaN(cloudHeight)) {
-            return NO_CLOUDS;
-        }
-        return (float) (cloudHeight - eyeY);
-    }
-
-    /**
      * Fades pillars out as the fog color brightens, as 1 - Y to the fourth power with Y its luminance as displayed.
      */
     private static float daylightOpacity() {
@@ -217,8 +200,8 @@ public final class LightPillarRenderer {
     }
 
     /**
-     * Writes the light positions relative to the eye and the colors of every slot into the uniform buffers, with the
-     * colors of slots that are faded out at 0, and returns how many slots show.
+     * Writes the light positions relative to the eye with their horizons toward the eye, and the colors of every slot
+     * into the uniform buffers, with the colors of slots that are faded out at 0, and returns how many slots show.
      */
     private static int fillPillars(double eyeX, double eyeY, double eyeZ, float partialTick, float opacity) {
         float brightness = (float) (LightPillarOptics.BRIGHTNESS * SkySetting.PILLAR_BRIGHTNESS.get());
@@ -226,6 +209,7 @@ public final class LightPillarRenderer {
             return 0;
         }
         LightPillarSelection selection = LightPillarSources.selection();
+        LightPillarHorizons horizons = LightPillarSources.horizons();
         lightBuffer.clear();
         colorBuffer.clear();
         int pillars = 0;
@@ -233,7 +217,7 @@ public final class LightPillarRenderer {
             float fade = selection.fade(slot, partialTick);
             if (fade > 0.0F) {
                 lightBuffer.put((float) (selection.x(slot) - eyeX)).put((float) (selection.y(slot) - eyeY))
-                        .put((float) (selection.z(slot) - eyeZ)).put(0.0F);
+                        .put((float) (selection.z(slot) - eyeZ)).put(horizons.horizon(slot, eyeX, eyeZ));
                 colorBuffer.put(selection.red(slot) * brightness).put(selection.green(slot) * brightness)
                         .put(selection.blue(slot) * brightness).put(fade * opacity);
                 pillars++;
@@ -253,8 +237,7 @@ public final class LightPillarRenderer {
      * and either way the framebuffer bound before is bound again after. No depth test runs, since the fragment stage
      * hides the pillars behind the scene itself.
      */
-    private static void draw(Matrix4f projection, double extinctionPerBlock, double dustBottomHeight,
-            float cloudBottomHeight) {
+    private static void draw(Matrix4f projection, double extinctionPerBlock, double dustBottomHeight) {
         Minecraft minecraft = Minecraft.getInstance();
         ShaderProgram shaderProgram = program();
         VertexBuffer ribbonBuffer = ribbons();
@@ -294,7 +277,6 @@ public final class LightPillarRenderer {
             inverseViewProjection.get(matrixBuffer);
             GL20.glUniformMatrix4fv(inverseViewProjectionUniform, false, matrixBuffer);
             GL20.glUniform2f(screenSizeUniform, mainTarget.width, mainTarget.height);
-            GL20.glUniform1f(cloudBottomHeightUniform, cloudBottomHeight);
             RenderSystem.enableBlend();
             RenderSystem.blendEquation(GL14.GL_FUNC_ADD);
             RenderSystem.blendFuncSeparate(GL11.GL_ONE_MINUS_DST_COLOR, GL11.GL_ONE, GL11.GL_ZERO, GL11.GL_ONE);
@@ -390,7 +372,6 @@ public final class LightPillarRenderer {
         marginAngleUniform = GL20.glGetUniformLocation(programId, "marginAngle");
         inverseViewProjectionUniform = GL20.glGetUniformLocation(programId, "inverseViewProjection");
         screenSizeUniform = GL20.glGetUniformLocation(programId, "screenSize");
-        cloudBottomHeightUniform = GL20.glGetUniformLocation(programId, "cloudBottomHeight");
     }
 
     /**

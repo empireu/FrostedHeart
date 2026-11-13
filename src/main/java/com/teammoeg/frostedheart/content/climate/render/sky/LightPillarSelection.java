@@ -29,7 +29,8 @@ import java.util.Arrays;
  * Chooses the clusters whose pillars look brightest and holds them in a fixed number of slots for drawing.
  * A slot fades in when its cluster is chosen and out when it no longer is, so the choice can change without pillars
  * popping. A slot stays bound to its cluster's key until it has faded out, and a newly chosen cluster waits for a free
- * slot. Fades step once per client tick. Heights and distances are in blocks.
+ * slot. A slot that takes a new key holds its fade at 0 until setReady marks it ready, which LightPillarHorizons does
+ * once its horizons are built. Fades step once per client tick. Heights and distances are in blocks.
  */
 public final class LightPillarSelection {
     public static final int SLOT_COUNT = 48;
@@ -62,6 +63,7 @@ public final class LightPillarSelection {
     private final double[] slotX = new double[SLOT_COUNT];
     private final double[] slotY = new double[SLOT_COUNT];
     private final double[] slotZ = new double[SLOT_COUNT];
+    private final double[] slotTop = new double[SLOT_COUNT];
     private final float[] slotRed = new float[SLOT_COUNT];
     private final float[] slotGreen = new float[SLOT_COUNT];
     private final float[] slotBlue = new float[SLOT_COUNT];
@@ -69,6 +71,7 @@ public final class LightPillarSelection {
     private final int[] slotFadeTicks = new int[SLOT_COUNT];
     private final int[] slotPreviousFadeTicks = new int[SLOT_COUNT];
     private final boolean[] slotChosen = new boolean[SLOT_COUNT];
+    private final boolean[] slotReady = new boolean[SLOT_COUNT];
 
     public LightPillarSelection() {
         clear();
@@ -151,6 +154,7 @@ public final class LightPillarSelection {
         Arrays.fill(slotFadeTicks, 0);
         Arrays.fill(slotPreviousFadeTicks, 0);
         Arrays.fill(slotChosen, false);
+        Arrays.fill(slotReady, false);
     }
 
     private void pushOntoHeap(double clusterScore, int cluster) {
@@ -211,6 +215,7 @@ public final class LightPillarSelection {
             for (int slot = 0; slot < SLOT_COUNT; slot++) {
                 if (slotKeys[slot] == NO_KEY) {
                     slotKeys[slot] = clusters.key(heapClusters[chosen]);
+                    slotReady[slot] = false;
                     fillSlot(slot, clusters, chosen);
                     break;
                 }
@@ -219,7 +224,9 @@ public final class LightPillarSelection {
         for (int slot = 0; slot < SLOT_COUNT; slot++) {
             slotPreviousFadeTicks[slot] = slotFadeTicks[slot];
             if (slotChosen[slot]) {
-                slotFadeTicks[slot] = Math.min(FADE_TICKS, slotFadeTicks[slot] + 1);
+                if (slotReady[slot]) {
+                    slotFadeTicks[slot] = Math.min(FADE_TICKS, slotFadeTicks[slot] + 1);
+                }
             } else if (slotKeys[slot] != NO_KEY) {
                 slotFadeTicks[slot] = Math.max(0, slotFadeTicks[slot] - 1);
                 if (slotFadeTicks[slot] == 0) {
@@ -234,6 +241,7 @@ public final class LightPillarSelection {
         slotX[slot] = clusters.x(cluster);
         slotY[slot] = clusters.y(cluster);
         slotZ[slot] = clusters.z(cluster);
+        slotTop[slot] = clusters.top(cluster);
         slotRed[slot] = clusters.red(cluster);
         slotGreen[slot] = clusters.green(cluster);
         slotBlue[slot] = clusters.blue(cluster);
@@ -270,6 +278,17 @@ public final class LightPillarSelection {
     }
 
     /**
+     * Marks whether the slot may fade in while it is chosen. A slot that takes a new key is not ready.
+     */
+    public void setReady(int slot, boolean ready) {
+        slotReady[slot] = ready;
+    }
+
+    public boolean isReady(int slot) {
+        return slotReady[slot];
+    }
+
+    /**
      * The slot's fade between the last two steps, from 0 to 1. A slot freed at the last step still fades during it.
      */
     public float fade(int slot, float partialTick) {
@@ -287,6 +306,13 @@ public final class LightPillarSelection {
 
     public double z(int slot) {
         return slotZ[slot];
+    }
+
+    /**
+     * The height of the highest top of the lights of the slot's cluster.
+     */
+    public double top(int slot) {
+        return slotTop[slot];
     }
 
     public float red(int slot) {

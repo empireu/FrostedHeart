@@ -31,8 +31,8 @@ import java.util.Arrays;
 /**
  * The lights that can show pillars, merged into one cluster per cell of 4 by 4 by 4 blocks, kept per chunk section.
  * The lights of a section are added between beginSection and endSection, which replaces every cluster the section had.
- * A cluster holds the summed strength of its lights per channel and their center weighted by their summed strength.
- * Its key is the packed position of its cell. Removing a cluster moves the last one into its index, so indices are only
+ * A cluster holds the summed strength of its lights per channel, their center weighted by their summed strength, and
+ * the height of the highest top of its lights. Its key is the packed position of its cell. Removing a cluster moves the last one into its index, so indices are only
  * valid until the next change.
  */
 public final class LightPillarClusters {
@@ -56,6 +56,7 @@ public final class LightPillarClusters {
     private final double[] cellY = new double[CELLS_PER_SECTION];
     private final double[] cellZ = new double[CELLS_PER_SECTION];
     private final double[] cellWeight = new double[CELLS_PER_SECTION];
+    private final double[] cellTop = new double[CELLS_PER_SECTION];
     private final float[] cellRed = new float[CELLS_PER_SECTION];
     private final float[] cellGreen = new float[CELLS_PER_SECTION];
     private final float[] cellBlue = new float[CELLS_PER_SECTION];
@@ -72,6 +73,7 @@ public final class LightPillarClusters {
     private double[] x = new double[INITIAL_CLUSTERS];
     private double[] y = new double[INITIAL_CLUSTERS];
     private double[] z = new double[INITIAL_CLUSTERS];
+    private double[] top = new double[INITIAL_CLUSTERS];
     private float[] red = new float[INITIAL_CLUSTERS];
     private float[] green = new float[INITIAL_CLUSTERS];
     private float[] blue = new float[INITIAL_CLUSTERS];
@@ -79,6 +81,7 @@ public final class LightPillarClusters {
 
     public LightPillarClusters() {
         clusterIndices.defaultReturnValue(NO_INDEX);
+        resetCells();
     }
 
     /**
@@ -122,9 +125,10 @@ public final class LightPillarClusters {
     }
 
     /**
-     * Adds a light at the block, which must lie in the section begun last, with its strength per channel.
+     * Adds a light at the block, which must lie in the section begun last, with the height of its top, from which its
+     * light leaves, and its strength per channel.
      */
-    public void addLight(int blockX, int blockY, int blockZ, float red, float green, float blue) {
+    public void addLight(int blockX, int blockY, int blockZ, double lightTop, float red, float green, float blue) {
         int cell = ((blockX & (SECTION_SIZE - 1)) / CELL_SIZE)
                 + CELLS_PER_EDGE * (((blockY & (SECTION_SIZE - 1)) / CELL_SIZE)
                 + CELLS_PER_EDGE * ((blockZ & (SECTION_SIZE - 1)) / CELL_SIZE));
@@ -133,6 +137,7 @@ public final class LightPillarClusters {
         cellY[cell] += weight * (blockY + 0.5);
         cellZ[cell] += weight * (blockZ + 0.5);
         cellWeight[cell] += weight;
+        cellTop[cell] = Math.max(cellTop[cell], lightTop);
         cellRed[cell] += red;
         cellGreen[cell] += green;
         cellBlue[cell] += blue;
@@ -150,7 +155,7 @@ public final class LightPillarClusters {
                 continue;
             }
             add(cellKey(sectionX, sectionY, sectionZ, cell), cellX[cell] / weight, cellY[cell] / weight,
-                    cellZ[cell] / weight, cellRed[cell], cellGreen[cell], cellBlue[cell]);
+                    cellZ[cell] / weight, cellTop[cell], cellRed[cell], cellGreen[cell], cellBlue[cell]);
             usedCells |= 1L << cell;
         }
         if (usedCells != 0L) {
@@ -196,7 +201,7 @@ public final class LightPillarClusters {
                 sectionZ * CELLS_PER_EDGE + cell / (CELLS_PER_EDGE * CELLS_PER_EDGE));
     }
 
-    private void add(long key, double clusterX, double clusterY, double clusterZ, float clusterRed,
+    private void add(long key, double clusterX, double clusterY, double clusterZ, double clusterTop, float clusterRed,
             float clusterGreen, float clusterBlue) {
         if (size == keys.length) {
             int capacity = 2 * size;
@@ -204,6 +209,7 @@ public final class LightPillarClusters {
             x = Arrays.copyOf(x, capacity);
             y = Arrays.copyOf(y, capacity);
             z = Arrays.copyOf(z, capacity);
+            top = Arrays.copyOf(top, capacity);
             red = Arrays.copyOf(red, capacity);
             green = Arrays.copyOf(green, capacity);
             blue = Arrays.copyOf(blue, capacity);
@@ -212,6 +218,7 @@ public final class LightPillarClusters {
         x[size] = clusterX;
         y[size] = clusterY;
         z[size] = clusterZ;
+        top[size] = clusterTop;
         red[size] = clusterRed;
         green[size] = clusterGreen;
         blue[size] = clusterBlue;
@@ -232,6 +239,7 @@ public final class LightPillarClusters {
         x[index] = x[size];
         y[index] = y[size];
         z[index] = z[size];
+        top[index] = top[size];
         red[index] = red[size];
         green[index] = green[size];
         blue[index] = blue[size];
@@ -243,6 +251,7 @@ public final class LightPillarClusters {
         Arrays.fill(cellY, 0.0);
         Arrays.fill(cellZ, 0.0);
         Arrays.fill(cellWeight, 0.0);
+        Arrays.fill(cellTop, Double.NEGATIVE_INFINITY);
         Arrays.fill(cellRed, 0.0F);
         Arrays.fill(cellGreen, 0.0F);
         Arrays.fill(cellBlue, 0.0F);
@@ -276,6 +285,13 @@ public final class LightPillarClusters {
 
     public double z(int cluster) {
         return z[cluster];
+    }
+
+    /**
+     * The height of the highest top of the cluster's lights.
+     */
+    public double top(int cluster) {
+        return top[cluster];
     }
 
     public float red(int cluster) {

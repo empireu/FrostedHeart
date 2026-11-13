@@ -20,16 +20,25 @@
 package com.teammoeg.frostedheart.content.climate.render.sky;
 
 import com.mojang.logging.LogUtils;
+import com.teammoeg.frostedheart.bootstrap.common.FHBlocks;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CampfireBlock;
+import net.minecraft.world.level.block.FenceBlock;
 import net.minecraft.world.level.block.FireBlock;
+import net.minecraft.world.level.block.LanternBlock;
+import net.minecraft.world.level.block.LeavesBlock;
 import net.minecraft.world.level.block.LiquidBlock;
+import net.minecraft.world.level.block.SlabBlock;
+import net.minecraft.world.level.block.SnowLayerBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
@@ -42,7 +51,8 @@ import java.util.Locale;
 /**
  * Checks the reflection off plate crystals and the light pillar they show against an integral along the view ray, the
  * pillar in the diamond dust that the shader draws with its ribbons and brightness, how world changes queue the
- * sections whose lights are found again, and how the lights that show pillars are merged, colored, chosen, and faded.
+ * sections whose lights are found again, and how the lights that show pillars are merged, colored, chosen, faded,
+ * and shadowed by the blocks around them.
  */
 @GameTestHolder("frostedheart_calculated_sky")
 @PrefixGameTestTemplate(false)
@@ -110,6 +120,10 @@ public final class LightPillarGameTests {
      * A chunk radius that reaches the row of lights of the selection tests, which is about 58 chunks along x.
      */
     private static final int WIDE_CHUNK_RADIUS = 1000;
+    /**
+     * The floor height of the horizon scenes, above the terrain that covers the templates of the GameTest world.
+     */
+    private static final int HIGH_FLOOR_Y = 300;
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void iceMirrorReflectsLikeASlab(GameTestHelper helper) {
@@ -208,7 +222,7 @@ public final class LightPillarGameTests {
                         for (double spreads : PILLAR_LATERAL_SPREADS) {
                             double lateralAngle = spreads * spread;
                             double expected = rayIntegral(elevation, lateralAngle, horizontalDistance, lightHeight,
-                                    tiltSigma, refractiveIndex, NO_SCENE);
+                                    tiltSigma, refractiveIndex, NO_SCENE, LightPillarHorizons.OPEN);
                             double actual = LightPillarOptics.radiance(elevation, lateralAngle, horizontalDistance,
                                     lightHeight, tiltSigma, refractiveIndex);
                             double difference = Math.abs(actual / expected - 1.0);
@@ -260,14 +274,15 @@ public final class LightPillarGameTests {
                         for (double spreads : SCENE_LATERAL_SPREADS) {
                             double lateralAngle = spreads * spread;
                             double whole = rayIntegral(elevation, lateralAngle, horizontalDistance, lightHeight,
-                                    tiltSigma, refractiveIndex, NO_SCENE);
+                                    tiltSigma, refractiveIndex, NO_SCENE, LightPillarHorizons.OPEN);
                             for (double share : SCENE_DISTANCE_SHARES) {
                                 double sceneDistance = share * mirrorDistance;
                                 double expected = rayIntegral(elevation, lateralAngle, horizontalDistance,
-                                        lightHeight, tiltSigma, refractiveIndex, sceneDistance);
+                                        lightHeight, tiltSigma, refractiveIndex, sceneDistance,
+                                        LightPillarHorizons.OPEN);
                                 double actual = LightPillarOptics.dustRadiance(elevation, lateralAngle,
                                         horizontalDistance, lightHeight, tiltSigma, refractiveIndex, 0.0, 1.0e9, 0.0,
-                                        sceneDistance);
+                                        sceneDistance, LightPillarHorizons.OPEN);
                                 double difference = Math.abs(actual - expected) / whole;
                                 if (!(difference <= worst)) {
                                     worst = difference;
@@ -361,13 +376,15 @@ public final class LightPillarGameTests {
                             double uniform = LightPillarOptics.radiance(elevation, lateralAngle, horizontalDistance,
                                     lightHeight, tiltSigma, refractiveIndex);
                             double inDust = LightPillarOptics.dustRadiance(elevation, lateralAngle,
-                                    horizontalDistance, lightHeight, tiltSigma, refractiveIndex, 0.0, 1.0e9, 0.0, NO_SCENE);
+                                    horizontalDistance, lightHeight, tiltSigma, refractiveIndex, 0.0, 1.0e9, 0.0,
+                                    NO_SCENE, LightPillarHorizons.OPEN);
                             helper.assertTrue(Math.abs(inDust - uniform) <= 1.0e-9 * uniform,
                                     "The pillar in dust of the same density everywhere is " + inDust + " instead of "
                                             + uniform + " for " + crystal.name() + ", light " + horizontalDistance
                                             + " away and " + lightHeight + " high, elevation " + elevationDegrees);
                             double dimmed = LightPillarOptics.dustRadiance(elevation, lateralAngle,
-                                    horizontalDistance, lightHeight, tiltSigma, refractiveIndex, 0.0, -1.62, 0.001, NO_SCENE);
+                                    horizontalDistance, lightHeight, tiltSigma, refractiveIndex, 0.0, -1.62, 0.001,
+                                    NO_SCENE, LightPillarHorizons.OPEN);
                             helper.assertTrue(dimmed <= uniform, "Thinning dust and extinction brighten the pillar");
                         }
                     }
@@ -405,7 +422,7 @@ public final class LightPillarGameTests {
                 for (double elevationDegrees : new double[]{5.0, 10.0, 20.0, 40.0, 70.0}) {
                     double elevation = Math.toRadians(elevationDegrees);
                     double width = LightPillarOptics.widestLateralSpread(elevation, horizontalDistance, lightHeight,
-                            tiltSigma, lateralBlur);
+                            tiltSigma, lateralBlur, LightPillarHorizons.OPEN);
                     if (width > 0.0) {
                         double sharp = lateralIntegral(elevation, horizontalDistance, lightHeight, tiltSigma,
                                 refractiveIndex, 0.0, dustBottomHeight, 10.0 * width);
@@ -418,21 +435,22 @@ public final class LightPillarGameTests {
                 for (double strength : RIBBON_STRENGTHS) {
                     double scale = LightPillarOptics.BRIGHTNESS * strength * share * RIBBON_EXTINCTION;
                     double lowest = LightPillarOptics.lowestRibbonElevation(horizontalDistance, lightHeight,
-                            tiltSigma);
+                            tiltSigma, LightPillarHorizons.OPEN);
                     for (double elevationDegrees = -45.0; elevationDegrees < 89.5; elevationDegrees += 0.5) {
                         double elevation = Math.toRadians(elevationDegrees);
                         double center = scale * LightPillarOptics.dustRadiance(elevation, 0.0, horizontalDistance,
                                 lightHeight, tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight,
-                                RIBBON_EXTINCTION, NO_SCENE);
+                                RIBBON_EXTINCTION, NO_SCENE, LightPillarHorizons.OPEN);
                         double halfWidth = elevation < lowest || elevation > LightPillarOptics.HIGHEST_RIBBON_ELEVATION
                                 ? 0.0 : LightPillarOptics.ribbonHalfWidth(center, visible,
                                 LightPillarOptics.widestLateralSpread(elevation, horizontalDistance, lightHeight,
-                                        tiltSigma, lateralBlur));
+                                        tiltSigma, lateralBlur, LightPillarHorizons.OPEN));
                         for (double lateralDegrees = Math.toDegrees(halfWidth) + 0.01; lateralDegrees < 60.0;
                                 lateralDegrees += 0.05) {
                             double value = scale * LightPillarOptics.dustRadiance(elevation,
                                     Math.toRadians(lateralDegrees), horizontalDistance, lightHeight, tiltSigma,
-                                    refractiveIndex, lateralBlur, dustBottomHeight, RIBBON_EXTINCTION, NO_SCENE);
+                                    refractiveIndex, lateralBlur, dustBottomHeight, RIBBON_EXTINCTION, NO_SCENE,
+                                    LightPillarHorizons.OPEN);
                             if (value > worstOutside) {
                                 worstOutside = value;
                                 worstOutsideWhere = String.format(Locale.ROOT,
@@ -475,7 +493,7 @@ public final class LightPillarGameTests {
                     for (double strength : RIBBON_STRENGTHS) {
                         double scale = LightPillarOptics.BRIGHTNESS * strength * share * RIBBON_EXTINCTION;
                         double[][] corners = ribbonEdge(light[0], light[1], light[2], tiltSigma, refractiveIndex,
-                                lateralBlur, pixelAngle, scale);
+                                lateralBlur, pixelAngle, scale, LightPillarHorizons.OPEN);
                         if (corners == null) {
                             continue;
                         }
@@ -492,7 +510,7 @@ public final class LightPillarGameTests {
                                 double lateralAngle = Math.asin(z / length);
                                 double value = scale * LightPillarOptics.dustRadiance(elevation, lateralAngle,
                                         light[0], light[1], tiltSigma, refractiveIndex, lateralBlur, light[2],
-                                        RIBBON_EXTINCTION, NO_SCENE);
+                                        RIBBON_EXTINCTION, NO_SCENE, LightPillarHorizons.OPEN);
                                 if (value > worst) {
                                     worst = value;
                                     worstWhere = String.format(Locale.ROOT,
@@ -523,7 +541,7 @@ public final class LightPillarGameTests {
         for (IceCrystalData.Crystal crystal : plates()) {
             radiance += IceCrystalData.get().shareOf(crystal) * 0.001 * LightPillarOptics.dustRadiance(
                     Math.toRadians(10.0), 0.0, 32.0, -1.12, Math.toRadians(crystal.tiltDegrees()), refractiveIndex,
-                    lateralBlur, -1.62, 0.001, NO_SCENE);
+                    lateralBlur, -1.62, 0.001, NO_SCENE, LightPillarHorizons.OPEN);
         }
         double value = LightPillarOptics.BRIGHTNESS * LightPillarEmitters.strength(14) * radiance;
         double shown = 1.0 - Math.exp(-value);
@@ -536,9 +554,9 @@ public final class LightPillarGameTests {
     public static void lightClustersMergeLightsPerCell(GameTestHelper helper) {
         LightPillarClusters clusters = new LightPillarClusters();
         clusters.beginSection(2, 4, -1);
-        clusters.addLight(33, 65, -15, 1.0F, 0.5F, 0.25F);
-        clusters.addLight(35, 66, -13, 0.5F, 0.25F, 0.125F);
-        clusters.addLight(40, 65, -15, 0.0F, 0.0F, 1.0F);
+        clusters.addLight(33, 65, -15, 65.625, 1.0F, 0.5F, 0.25F);
+        clusters.addLight(35, 66, -13, 67.0, 0.5F, 0.25F, 0.125F);
+        clusters.addLight(40, 65, -15, 65.5, 0.0F, 0.0F, 1.0F);
         clusters.endSection();
         helper.assertTrue(clusters.count() == 2, "The finished section has " + clusters.count() + " clusters, not 2");
         int merged = clusterWithKey(clusters, BlockPos.asLong(8, 16, -4));
@@ -560,9 +578,13 @@ public final class LightPillarGameTests {
                         + clusters.blue(merged) + " instead of 1.5 0.75 0.375");
         helper.assertTrue(clusters.x(single) == 40.5 && clusters.y(single) == 65.5 && clusters.z(single) == -14.5,
                 "A single light's cluster is not centered on its block");
+        helper.assertTrue(clusters.top(merged) == 67.0,
+                "The merged cluster's top is " + clusters.top(merged) + " instead of 67.0");
+        helper.assertTrue(clusters.top(single) == 65.5,
+                "The single cluster's top is " + clusters.top(single) + " instead of 65.5");
 
         clusters.beginSection(3, 4, -1);
-        clusters.addLight(56, 70, -10, 1.0F, 1.0F, 1.0F);
+        clusters.addLight(56, 70, -10, 71.0, 1.0F, 1.0F, 1.0F);
         clusters.endSection();
         long otherKey = BlockPos.asLong(14, 17, -3);
         helper.assertTrue(clusters.count() == 3 && clusters.sectionCount() == 2,
@@ -571,7 +593,7 @@ public final class LightPillarGameTests {
         helper.assertTrue(clusterWithKey(clusters, otherKey) >= 0,
                 "The second section has no cluster with the key " + BlockPos.of(otherKey).toShortString());
         clusters.beginSection(2, 4, -1);
-        clusters.addLight(33, 65, -15, 1.0F, 1.0F, 1.0F);
+        clusters.addLight(33, 65, -15, 66.0, 1.0F, 1.0F, 1.0F);
         clusters.endSection();
         helper.assertTrue(clusterWithKey(clusters, BlockPos.asLong(10, 16, -4)) < 0,
                 "The old cluster of the cell " + BlockPos.of(BlockPos.asLong(10, 16, -4)).toShortString()
@@ -605,11 +627,11 @@ public final class LightPillarGameTests {
         LightPillarClusters column = new LightPillarClusters();
         for (int sectionY = -4; sectionY <= 3; sectionY++) {
             column.beginSection(5, sectionY, 7);
-            column.addLight(5 * 16 + 8, sectionY * 16 + 8, 7 * 16 + 8, 1.0F, 1.0F, 1.0F);
+            column.addLight(5 * 16 + 8, sectionY * 16 + 8, 7 * 16 + 8, sectionY * 16 + 9.0, 1.0F, 1.0F, 1.0F);
             column.endSection();
         }
         column.beginSection(6, 0, 7);
-        column.addLight(6 * 16 + 8, 8, 7 * 16 + 8, 1.0F, 1.0F, 1.0F);
+        column.addLight(6 * 16 + 8, 8, 7 * 16 + 8, 9.0, 1.0F, 1.0F, 1.0F);
         column.endSection();
         helper.assertTrue(column.count() == 9 && column.sectionCount() == 9,
                 "The column and its neighbor give " + column.count() + " clusters in " + column.sectionCount()
@@ -634,7 +656,7 @@ public final class LightPillarGameTests {
         }
         for (int sectionY = -4; sectionY <= 3; sectionY++) {
             column.beginSection(5, sectionY, 7);
-            column.addLight(5 * 16 + 8, sectionY * 16 + 8, 7 * 16 + 8, 1.0F, 1.0F, 1.0F);
+            column.addLight(5 * 16 + 8, sectionY * 16 + 8, 7 * 16 + 8, sectionY * 16 + 9.0, 1.0F, 1.0F, 1.0F);
             column.endSection();
         }
         helper.assertTrue(column.count() == 9, "The filled column has " + column.count() + " clusters, not 9");
@@ -686,9 +708,17 @@ public final class LightPillarGameTests {
         }
         int nearestSlot = slotWithKey(selection, rowKey(0));
         float fadeStep = 1.0F / LightPillarSelection.FADE_TICKS;
+        helper.assertTrue(!selection.isReady(nearestSlot) && selection.fade(nearestSlot, 1.0F) == 0.0F,
+                "A new slot is ready or fades before its horizons are built");
+        for (int slot = 0; slot < LightPillarSelection.SLOT_COUNT; slot++) {
+            if (selection.isUsed(slot)) {
+                selection.setReady(slot, true);
+            }
+        }
+        stepSelection(selection, clusters, 1);
         helper.assertTrue(selection.fade(nearestSlot, 1.0F) == fadeStep && selection.fade(nearestSlot, 0.0F) == 0.0F
                         && Math.abs(selection.fade(nearestSlot, 0.5F) - 0.5F * fadeStep) < 1.0e-6F,
-                "A new slot does not start its fade from 0");
+                "A ready slot does not start its fade from 0");
         stepSelection(selection, clusters, LightPillarSelection.FADE_TICKS);
         helper.assertTrue(selection.fade(nearestSlot, 1.0F) == 1.0F, "A chosen slot does not fade in fully");
 
@@ -704,8 +734,13 @@ public final class LightPillarGameTests {
         helper.assertTrue(!selection.isUsed(nearestSlot) && slotWithKey(selection, nextKey) < 0,
                 "The slot of a light that went away is not free once it faded out");
         stepSelection(selection, withoutNearest, 1);
-        helper.assertTrue(slotWithKey(selection, nextKey) == nearestSlot && selection.fade(nearestSlot, 1.0F) == fadeStep,
-                "The waiting light did not take the freed slot");
+        helper.assertTrue(slotWithKey(selection, nextKey) == nearestSlot && !selection.isReady(nearestSlot)
+                        && selection.fade(nearestSlot, 1.0F) == 0.0F,
+                "The waiting light did not take the freed slot unready and at fade 0");
+        selection.setReady(nearestSlot, true);
+        stepSelection(selection, withoutNearest, 1);
+        helper.assertTrue(selection.fade(nearestSlot, 1.0F) == fadeStep,
+                "The freed slot does not fade in once it is ready");
 
         for (int step = 0; step < stepsToFreeASlot; step++) {
             selection.chooseNone();
@@ -923,10 +958,10 @@ public final class LightPillarGameTests {
         long farKey = BlockPos.asLong(12, 0, 0);
         LightPillarClusters clusters = new LightPillarClusters();
         clusters.beginSection(0, 0, 0);
-        clusters.addLight(1, 1, 1, 1.0F, 1.0F, 1.0F);
+        clusters.addLight(1, 1, 1, 2.0, 1.0F, 1.0F, 1.0F);
         clusters.endSection();
         clusters.beginSection(3, 0, 0);
-        clusters.addLight(3 * 16 + 1, 1, 1, 1.0F, 1.0F, 1.0F);
+        clusters.addLight(3 * 16 + 1, 1, 1, 2.0, 1.0F, 1.0F, 1.0F);
         clusters.endSection();
         helper.assertTrue(clusterWithKey(clusters, nearKey) >= 0 && clusterWithKey(clusters, farKey) >= 0,
                 "The clusters do not have the keys of their cells");
@@ -948,6 +983,479 @@ public final class LightPillarGameTests {
                         + selection.usedCount() + " slots instead of 2 and 2");
         helper.assertTrue(slotWithKey(selection, nearKey) >= 0 && slotWithKey(selection, farKey) >= 0,
                 "Within 3 chunks not both clusters are chosen");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 600)
+    public static void lightPillarHorizonCutMatchesTheRayIntegral(GameTestHelper helper) {
+        double refractiveIndex = IceHaloFormulas.refractiveIndex(1);
+        double worst = -1.0;
+        String worstWhere = "nowhere";
+        double worstLoss = -1.0;
+        String worstLossWhere = "nowhere";
+        for (IceCrystalData.Crystal crystal : plates()) {
+            double tiltSigma = Math.toRadians(crystal.tiltDegrees());
+            for (double[] light : PILLAR_LIGHTS) {
+                double horizontalDistance = light[0];
+                for (int height = 1; height < light.length; height++) {
+                    double lightHeight = light[height];
+                    for (double elevationDegrees : PILLAR_ELEVATIONS_DEGREES) {
+                        double elevation = Math.toRadians(elevationDegrees);
+                        double crystalHeight = LightPillarOptics.mirrorHeight(elevation, horizontalDistance,
+                                lightHeight);
+                        if (crystalHeight <= Math.max(0.0, lightHeight) + 0.05) {
+                            continue;
+                        }
+                        double spread = LightPillarOptics.lateralSpread(elevation, horizontalDistance, lightHeight,
+                                tiltSigma);
+                        for (double spreads : SCENE_LATERAL_SPREADS) {
+                            double lateralAngle = spreads * spread;
+                            double whole = rayIntegral(elevation, lateralAngle, horizontalDistance, lightHeight,
+                                    tiltSigma, refractiveIndex, NO_SCENE, LightPillarHorizons.OPEN);
+                            double previous = Double.NaN;
+                            for (int horizonStep = -2; horizonStep <= 2; horizonStep++) {
+                                double horizon = elevation - 2.0 * horizonStep * tiltSigma;
+                                double expected = rayIntegral(elevation, lateralAngle, horizontalDistance,
+                                        lightHeight, tiltSigma, refractiveIndex, NO_SCENE, horizon);
+                                double actual = LightPillarOptics.dustRadiance(elevation, lateralAngle,
+                                        horizontalDistance, lightHeight, tiltSigma, refractiveIndex, 0.0, 1.0e9,
+                                        0.0, NO_SCENE, horizon);
+                                double difference = Math.abs(actual - expected) / whole;
+                                if (!(difference <= worst)) {
+                                    worst = difference;
+                                    worstWhere = String.format(Locale.ROOT,
+                                            "%s, light %.0f away and %.0f high, elevation %.0f degrees, %.0f spreads "
+                                                    + "off the center, horizon %.4f, %.4g against %.4g of %.4g",
+                                            crystal.name(), horizontalDistance, lightHeight, elevationDegrees, spreads,
+                                            horizon, actual, expected, whole);
+                                }
+                                // A higher horizon cuts more tilts, so the light may only grow as the horizon falls
+                                // from one horizon step to the next higher one:
+                                if (!Double.isNaN(previous) && actual < previous - 1.0e-12 * whole) {
+                                    double loss = (previous - actual) / whole;
+                                    if (!(loss <= worstLoss)) {
+                                        worstLoss = loss;
+                                        worstLossWhere = String.format(Locale.ROOT,
+                                                "%s, light %.0f away and %.0f high, elevation %.0f degrees, %.0f "
+                                                        + "spreads off the center, horizon %.4f, %.4g against %.4g",
+                                                crystal.name(), horizontalDistance, lightHeight, elevationDegrees,
+                                                spreads, horizon, actual, previous);
+                                    }
+                                }
+                                previous = actual;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        LOGGER.info("Light pillar behind a horizon differs from the ray integral by at most " + worst
+                + " of the whole pillar, at " + worstWhere);
+        helper.assertTrue(worst <= PILLAR_TOLERANCE,
+                "Light pillar behind a horizon differs from the ray integral by " + worst + " of the whole pillar, at "
+                        + worstWhere);
+        helper.assertTrue(worstLoss <= 0.0, "The pillar loses light as the horizon falls from one horizon step to "
+                + "the next higher one, by " + worstLoss + " of the whole pillar, at " + worstLossWhere);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarOccludersSortBlocks(GameTestHelper helper) {
+        LightPillarOccluders occluders = new LightPillarOccluders();
+        BlockGetter level = EmptyBlockGetter.INSTANCE;
+        BlockPos position = BlockPos.ZERO;
+        BlockState[] passing = {Blocks.AIR.defaultBlockState(), Blocks.GLASS.defaultBlockState(),
+                Blocks.WHITE_STAINED_GLASS.defaultBlockState(), Blocks.GLASS_PANE.defaultBlockState(),
+                Blocks.ICE.defaultBlockState(), Blocks.FROSTED_ICE.defaultBlockState(),
+                FHBlocks.THIN_ICE_BLOCK.get().defaultBlockState(), Blocks.TORCH.defaultBlockState(),
+                Blocks.DANDELION.defaultBlockState(), Blocks.WATER.defaultBlockState(),
+                Blocks.LAVA.defaultBlockState(), Blocks.COBWEB.defaultBlockState(),
+                Blocks.SCAFFOLDING.defaultBlockState()};
+        for (BlockState state : passing) {
+            helper.assertTrue(LightPillarOccluders.passesLight(state),
+                    "The occluders stop the light of " + state + " which should pass it");
+        }
+        BlockState[] stopping = {Blocks.STONE.defaultBlockState(), Blocks.OAK_LEAVES.defaultBlockState(),
+                Blocks.PACKED_ICE.defaultBlockState(), Blocks.BLUE_ICE.defaultBlockState(),
+                Blocks.POWDER_SNOW.defaultBlockState(), Blocks.OAK_FENCE.defaultBlockState(),
+                Blocks.OAK_SLAB.defaultBlockState()};
+        for (BlockState state : stopping) {
+            helper.assertTrue(!LightPillarOccluders.passesLight(state),
+                    "The occluders pass the light of " + state + " which should stop it");
+        }
+        for (int layers = 1; layers <= SnowLayerBlock.MAX_HEIGHT; layers++) {
+            helper.assertTrue(!LightPillarOccluders.passesLight(
+                            Blocks.SNOW.defaultBlockState().setValue(SnowLayerBlock.LAYERS, layers)),
+                    "The occluders pass the light of snow with " + layers + " layers which should stop it");
+        }
+        assertStoppedHeight(helper, occluders, level, position, Blocks.GLASS.defaultBlockState(),
+                LightPillarOccluders.PASSES);
+        assertStoppedHeight(helper, occluders, level, position, Blocks.WATER.defaultBlockState(),
+                LightPillarOccluders.PASSES);
+        assertStoppedHeight(helper, occluders, level, position, Blocks.STONE.defaultBlockState(), 1.0);
+        assertStoppedHeight(helper, occluders, level, position,
+                Blocks.OAK_SLAB.defaultBlockState().setValue(SlabBlock.TYPE, SlabType.BOTTOM), 0.5);
+        assertStoppedHeight(helper, occluders, level, position,
+                Blocks.SNOW.defaultBlockState().setValue(SnowLayerBlock.LAYERS, 4), 0.5);
+        assertStoppedHeight(helper, occluders, level, position, Blocks.OAK_FENCE.defaultBlockState(), 1.0);
+        assertStoppedHeight(helper, occluders, level, position, Blocks.POWDER_SNOW.defaultBlockState(), 1.0);
+        assertStopsTheSame(helper, occluders, Blocks.STONE.defaultBlockState(), Blocks.DIRT.defaultBlockState(), true);
+        assertStopsTheSame(helper, occluders, Blocks.AIR.defaultBlockState(), Blocks.GLASS.defaultBlockState(), true);
+        assertStopsTheSame(helper, occluders, Blocks.OAK_FENCE.defaultBlockState(),
+                Blocks.OAK_FENCE.defaultBlockState().setValue(FenceBlock.EAST, true), true);
+        assertStopsTheSame(helper, occluders, Blocks.SNOW.defaultBlockState().setValue(SnowLayerBlock.LAYERS, 1),
+                Blocks.SNOW.defaultBlockState().setValue(SnowLayerBlock.LAYERS, 2), false);
+        assertStopsTheSame(helper, occluders, Blocks.STONE.defaultBlockState(), Blocks.AIR.defaultBlockState(), false);
+        assertStopsTheSame(helper, occluders, Blocks.POWDER_SNOW.defaultBlockState(),
+                Blocks.POWDER_SNOW.defaultBlockState(), false);
+        assertLightTop(helper, level, position, Blocks.TORCH.defaultBlockState(), 0.625);
+        assertLightTop(helper, level, position, Blocks.GLOWSTONE.defaultBlockState(), 1.0);
+        assertLightTop(helper, level, position,
+                Blocks.LANTERN.defaultBlockState().setValue(LanternBlock.HANGING, false), 0.5625);
+        assertLightTop(helper, level, position, Blocks.LAVA.defaultBlockState(), 8.0 / 9.0);
+        assertLightTop(helper, level, position, Blocks.LIGHT.defaultBlockState(), 0.5);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarHorizonsRiseOverWallsAroundALight(GameTestHelper helper) {
+        double overTheWall = Math.atan(1.375 / 0.5);
+        double overTheWallDiagonally = Math.atan(1.375 / (0.5 * Math.sqrt(2.0)));
+        double overTheSnow = Math.atan(0.875 / 0.5);
+        double overTheSnowDiagonally = Math.atan(0.875 / (0.5 * Math.sqrt(2.0)));
+        fillGrassFloor(helper);
+        BlockPos lightBlock = highAbove(helper, 10, 1, 10);
+        BlockState leaves = Blocks.OAK_LEAVES.defaultBlockState().setValue(LeavesBlock.PERSISTENT, true);
+        BlockState[] walls = {Blocks.STONE.defaultBlockState(), leaves};
+        for (int wallIndex = 0; wallIndex < walls.length; wallIndex++) {
+            placeRingAroundTheLight(helper, walls[wallIndex], walls[wallIndex], 1, 2);
+            HorizonSetup setup = buildSlotAndHorizons(helper, lightBlock, 0.625);
+            for (int bin : new int[]{0, 16, 32, 48}) {
+                assertBinRisesOver(helper, setup, bin, 5, overTheWall);
+            }
+            assertBinRisesOver(helper, setup, 8, 6, overTheWallDiagonally);
+            if (wallIndex == 0) {
+                assertHorizonToward(helper, setup, 4.0, 0.0, overTheWall, 1.0e-6);
+                assertHorizonToward(helper, setup, 4.0, -0.01, overTheWall, 0.005);
+            }
+        }
+        placeRingAroundTheLight(helper, Blocks.STONE.defaultBlockState(), Blocks.STONE.defaultBlockState(), 1, 1);
+        placeRingAroundTheLight(helper, Blocks.SNOW.defaultBlockState().setValue(SnowLayerBlock.LAYERS, 4),
+                Blocks.SNOW.defaultBlockState().setValue(SnowLayerBlock.LAYERS, 4), 2, 2);
+        HorizonSetup snowSetup = buildSlotAndHorizons(helper, lightBlock, 0.625);
+        assertBinRisesOver(helper, snowSetup, 0, 5, overTheSnow);
+        assertBinRisesOver(helper, snowSetup, 8, 6, overTheSnowDiagonally);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarHorizonsLetLightThroughGlassPlantsAndWater(GameTestHelper helper) {
+        double onOpenGround = Math.atan(-0.625 / 5.5);
+        fillGrassFloor(helper);
+        BlockPos lightBlock = highAbove(helper, 10, 1, 10);
+        placeRingAroundTheLight(helper, Blocks.GLASS.defaultBlockState(), Blocks.GLASS_PANE.defaultBlockState(), 1, 2);
+        HorizonSetup glass = buildSlotAndHorizons(helper, lightBlock, 0.625);
+        assertSample(helper, glass, 0, 15, onOpenGround);
+        assertSamplesBetweenOpenAndZero(helper, glass);
+        placeRingAroundTheLight(helper, Blocks.DANDELION.defaultBlockState(), Blocks.WATER.defaultBlockState(), 1, 1);
+        HorizonSetup plants = buildSlotAndHorizons(helper, lightBlock, 0.625);
+        assertSample(helper, plants, 0, 15, onOpenGround);
+        assertSamplesBetweenOpenAndZero(helper, plants);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarHorizonsSkipTheLightsOwnColumn(GameTestHelper helper) {
+        double belowOpenGround = Math.atan(-1.0 / 5.5);
+        fillGrassFloor(helper);
+        BlockPos standingBlock = highAbove(helper, 10, 1, 10);
+        helper.getLevel().setBlockAndUpdate(standingBlock, Blocks.GLOWSTONE.defaultBlockState());
+        HorizonSetup standing = buildSlotAndHorizons(helper, standingBlock, 1.0);
+        assertSample(helper, standing, 0, 15, belowOpenGround);
+        BlockPos buriedBlock = highAbove(helper, 10, 0, 10);
+        helper.getLevel().setBlockAndUpdate(buriedBlock, Blocks.GLOWSTONE.defaultBlockState());
+        HorizonSetup buried = buildSlotAndHorizons(helper, buriedBlock, 1.0);
+        for (int bin : new int[]{0, 8, 16, 32, 48}) {
+            assertSamplesNearZero(helper, buried, bin, 6);
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarHorizonsReachAFartherWall(GameTestHelper helper) {
+        double belowTheWallBase = Math.atan(-0.625 / 3.5);
+        double overTheWall = Math.atan(2.375 / 4.5);
+        double onOpenGround = Math.atan(-0.625 / 5.5);
+        double nearOnOpenGround = Math.atan(-0.625 / 1.5);
+        fillGrassFloor(helper);
+        BlockPos lightBlock = highAbove(helper, 10, 1, 10);
+        for (int y = 1; y <= 3; y++) {
+            for (int z = 5; z <= 15; z++) {
+                helper.getLevel().setBlockAndUpdate(highAbove(helper, 15, y, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        HorizonSetup setup = buildSlotAndHorizons(helper, lightBlock, 0.625);
+        assertSample(helper, setup, 0, 12, belowTheWallBase);
+        assertSample(helper, setup, 0, 13, overTheWall);
+        assertSample(helper, setup, 0, 14, overTheWall);
+        assertSample(helper, setup, 0, 15, overTheWall);
+        assertSample(helper, setup, 32, 15, onOpenGround);
+        assertHorizonToward(helper, setup, 5.5, 0.0, overTheWall, 1.0e-6);
+        assertHorizonToward(helper, setup, 2.0, 0.0, nearOnOpenGround, 1.0e-6);
+        double farStop = setup.columns().highestStop(1_000_000, 1_000_000, Double.NEGATIVE_INFINITY);
+        helper.assertTrue(farStop == LightPillarOccluders.PASSES, "A column outside the loaded chunks stops light at "
+                + farStop + " instead of PASSES");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarHorizonsMarkOnlyTheBinsAChangeReaches(GameTestHelper helper) {
+        int[] columnsRead = {0};
+        LightPillarHorizons.Columns columns = (blockX, blockZ, floorY) -> {
+            columnsRead[0]++;
+            return LightPillarOccluders.PASSES;
+        };
+        long acrossEast = LightPillarHorizons.binsAcross(0.5, 0.5, 2, 0, 1);
+        helper.assertTrue(acrossEast == 0xE00000000000000FL, "The bins across a column 2 blocks east are "
+                + describeBins(acrossEast) + " instead of 0xE00000000000000F (bins 61 to 3)");
+        long acrossWest = LightPillarHorizons.binsAcross(0.5, 0.5, -3, 0, 1);
+        helper.assertTrue(acrossWest == 0x7C0000000L, "The bins across a column 3 blocks west are "
+                + describeBins(acrossWest) + " instead of 0x7C0000000 (bins 30 to 34)");
+        long acrossAFarSquare = LightPillarHorizons.binsAcross(0.5, 0.5, 16, 0, 16);
+        helper.assertTrue(acrossAFarSquare == 0x1FFL, "The bins across a square 16 blocks east are "
+                + describeBins(acrossAFarSquare) + " instead of 0x1FF (bins 0 to 8)");
+        long acrossThePoint = LightPillarHorizons.binsAcross(0.5, 0.5, 0, 0, 1);
+        helper.assertTrue(acrossThePoint == -1L, "The bins across a square holding the light are "
+                + describeBins(acrossThePoint) + " instead of every bin");
+        long acrossTheEdge = LightPillarHorizons.binsAcross(1.0, 0.5, 1, 0, 1);
+        helper.assertTrue(acrossTheEdge == -1L, "The bins across a square holding the light on its edge are "
+                + describeBins(acrossTheEdge) + " instead of every bin");
+        double expectedReach = 16.0 * (Math.sqrt(72.0) + Math.sqrt(2.0));
+        helper.assertTrue(Math.abs(LightPillarHorizons.reachForChunkRadius(8) - expectedReach) <= 1.0e-9,
+                "The reach for 8 chunks is " + LightPillarHorizons.reachForChunkRadius(8) + " instead of "
+                        + expectedReach);
+
+        LightPillarClusters clusters = new LightPillarClusters();
+        clusters.beginSection(0, 3, 0);
+        clusters.addLight(0, 63, 0, 64.0, 1.0F, 1.0F, 1.0F);
+        clusters.endSection();
+        LightPillarSelection selection = new LightPillarSelection();
+        selection.choose(clusters, 3.5, 64.6, 0.5, 1000.0, WIDE_CHUNK_RADIUS);
+        int slot = usedSlot(helper, selection);
+        LightPillarHorizons horizons = new LightPillarHorizons();
+
+        horizons.update(selection, columns, 10.0, 0);
+        helper.assertTrue(horizons.dirtyBins(slot) == -1L, "A new slot waits to build "
+                + describeBins(horizons.dirtyBins(slot)) + " instead of every bin");
+        helper.assertTrue(!horizons.isBuilt(slot) && !selection.isReady(slot),
+                "A new slot is built or ready before any bin was built");
+        helper.assertTrue(columnsRead[0] == 0, "The columns were read " + columnsRead[0]
+                + " times before any bin was built");
+
+        horizons.update(selection, columns, 10.0, 1_000_000);
+        helper.assertTrue(horizons.dirtyBins(slot) == 0L && horizons.isBuilt(slot) && selection.isReady(slot),
+                "A full build leaves the slot dirty " + describeBins(horizons.dirtyBins(slot)) + ", unbuilt, or not "
+                        + "ready");
+        helper.assertTrue(columnsRead[0] > 0, "A full build reads no columns");
+        assertAllSamplesOpen(helper, horizons, slot);
+
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        BlockState dirt = Blocks.DIRT.defaultBlockState();
+        BlockState air = Blocks.AIR.defaultBlockState();
+
+        horizons.onBlockChanged(2, 0, stone, dirt);
+        horizons.update(selection, columns, 10.0, 0);
+        helper.assertTrue(horizons.dirtyBins(slot) == 0L, "A change that stops light up to the same height marks "
+                + describeBins(horizons.dirtyBins(slot)) + " instead of nothing");
+        horizons.update(selection, columns, 10.0, 1_000_000);
+
+        horizons.onBlockChanged(2, 0, stone, air);
+        horizons.update(selection, columns, 10.0, 0);
+        helper.assertTrue(horizons.dirtyBins(slot) == 0xE00000000000000FL, "A change 2 blocks east marks "
+                + describeBins(horizons.dirtyBins(slot)) + " instead of 0xE00000000000000F");
+        horizons.update(selection, columns, 10.0, 1_000_000);
+
+        horizons.onBlockChanged(0, 0, stone, air);
+        horizons.update(selection, columns, 10.0, 0);
+        helper.assertTrue(horizons.dirtyBins(slot) == 0L, "A change in the light's own column marks "
+                + describeBins(horizons.dirtyBins(slot)) + " instead of nothing");
+        horizons.update(selection, columns, 10.0, 1_000_000);
+
+        horizons.onBlockChanged(20, 0, stone, air);
+        horizons.update(selection, columns, 10.0, 0);
+        helper.assertTrue(horizons.dirtyBins(slot) == 0L, "A change beyond the reach marks "
+                + describeBins(horizons.dirtyBins(slot)) + " instead of nothing");
+        horizons.update(selection, columns, 10.0, 1_000_000);
+
+        horizons.onChunkChanged(0, 0);
+        horizons.update(selection, columns, 10.0, 0);
+        helper.assertTrue(horizons.dirtyBins(slot) == -1L, "A change of the light's chunk marks "
+                + describeBins(horizons.dirtyBins(slot)) + " instead of every bin");
+        horizons.update(selection, columns, 10.0, 1_000_000);
+
+        horizons.onChunkChanged(5, 0);
+        horizons.update(selection, columns, 10.0, 0);
+        helper.assertTrue(horizons.dirtyBins(slot) == 0L, "A change of a chunk beyond the reach marks "
+                + describeBins(horizons.dirtyBins(slot)) + " instead of nothing");
+        horizons.update(selection, columns, 10.0, 1_000_000);
+
+        horizons.update(selection, columns, 40.0, 0);
+        helper.assertTrue(horizons.dirtyBins(slot) == -1L, "A larger reach marks "
+                + describeBins(horizons.dirtyBins(slot)) + " instead of every bin");
+        helper.assertTrue(horizons.reach(slot) == 40.0, "The reach of the slot is " + horizons.reach(slot)
+                + " instead of 40.0");
+        helper.assertTrue(selection.isReady(slot), "A larger reach unsets ready on a built slot");
+        horizons.update(selection, columns, 40.0, 1_000_000);
+
+        horizons.onChunkChanged(1, 0);
+        horizons.update(selection, columns, 40.0, 0);
+        helper.assertTrue(horizons.dirtyBins(slot) == 0x1FFL, "A change of the neighboring chunk marks "
+                + describeBins(horizons.dirtyBins(slot)) + " instead of 0x1FF");
+        horizons.update(selection, columns, 40.0, 1_000_000);
+
+        clusters.beginSection(0, 3, 0);
+        clusters.addLight(0, 63, 0, 64.0, 1.0F, 1.0F, 1.0F);
+        clusters.addLight(1, 63, 0, 64.0, 1.0F, 1.0F, 1.0F);
+        clusters.endSection();
+        selection.choose(clusters, 3.5, 64.6, 0.5, 1000.0, WIDE_CHUNK_RADIUS);
+        horizons.update(selection, columns, 40.0, 0);
+        helper.assertTrue(horizons.dirtyBins(slot) == -1L, "A light that moves marks "
+                + describeBins(horizons.dirtyBins(slot)) + " instead of every bin");
+        helper.assertTrue(selection.isReady(slot), "A light that moves unsets ready on a built slot of the same key");
+
+        int steps = 0;
+        while (selection.isUsed(slot) && steps <= LightPillarSelection.FADE_TICKS) {
+            selection.chooseNone();
+            steps++;
+        }
+        helper.assertTrue(!selection.isUsed(slot), "The slot does not fade out while choosing nothing");
+        horizons.update(selection, columns, 40.0, 1_000_000);
+        helper.assertTrue(!horizons.isTracked(slot), "The horizons still track a slot that faded out");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarHorizonsWrapBetweenTheLastAndTheFirstBin(GameTestHelper helper) {
+        double reach = 40.0;
+        LightPillarHorizons.Columns columns = (blockX, blockZ, floorY) -> {
+            if (blockZ <= -2) {
+                return 70.0;
+            }
+            if (blockZ >= 2) {
+                return 66.0;
+            }
+            return LightPillarOccluders.PASSES;
+        };
+        LightPillarClusters clusters = new LightPillarClusters();
+        clusters.beginSection(0, 3, 0);
+        clusters.addLight(0, 63, 0, 64.0, 1.0F, 1.0F, 1.0F);
+        clusters.endSection();
+        LightPillarSelection selection = new LightPillarSelection();
+        selection.choose(clusters, 3.5, 64.6, 0.5, 1000.0, WIDE_CHUNK_RADIUS);
+        int slot = usedSlot(helper, selection);
+        double originX = selection.x(slot);
+        double originZ = selection.z(slot);
+        LightPillarHorizons horizons = new LightPillarHorizons();
+        horizons.update(selection, columns, reach, 1_000_000);
+        helper.assertTrue(horizons.isBuilt(slot), "The slot is not built after a full update");
+        int lastSample = LightPillarHorizons.SAMPLES - 1;
+        double lastBin = horizons.sample(slot, LightPillarHorizons.BINS - 1, lastSample);
+        double firstBin = horizons.sample(slot, 0, lastSample);
+        double secondBin = horizons.sample(slot, 1, lastSample);
+        helper.assertTrue(lastBin != firstBin && secondBin != firstBin && lastBin != secondBin,
+                "The last samples of bins 63, 0, and 1 are " + lastBin + ", " + firstBin + ", and " + secondBin
+                        + " instead of three different horizons");
+        double angle = LightPillarHorizons.BIN_ANGLE / 4.0;
+        double belowTheFirstBin = horizonAtReach(horizons, slot, originX, originZ, reach, -angle);
+        double expectedBelow = 0.25 * lastBin + 0.75 * firstBin;
+        helper.assertTrue(Math.abs(belowTheFirstBin - expectedBelow) <= 1.0e-5, "A quarter bin below bin 0 the "
+                + "horizon is " + belowTheFirstBin + " instead of " + expectedBelow + " from bins 63 and 0");
+        double aboveTheFirstBin = horizonAtReach(horizons, slot, originX, originZ, reach, angle);
+        double expectedAbove = 0.75 * firstBin + 0.25 * secondBin;
+        helper.assertTrue(Math.abs(aboveTheFirstBin - expectedAbove) <= 1.0e-5, "A quarter bin above bin 0 the "
+                + "horizon is " + aboveTheFirstBin + " instead of " + expectedAbove + " from bins 0 and 1");
+
+        int steps = 0;
+        while (selection.isUsed(slot) && steps <= LightPillarSelection.FADE_TICKS) {
+            selection.chooseNone();
+            steps++;
+        }
+        horizons.update(selection, columns, reach, 1_000_000);
+        helper.assertTrue(!horizons.isTracked(slot), "The horizons still track a slot that was freed");
+        double afterFreeing = horizonAtReach(horizons, slot, originX, originZ, reach, -angle);
+        helper.assertTrue(afterFreeing == belowTheFirstBin, "The horizon of a freed slot is " + afterFreeing
+                + " instead of its last " + belowTheFirstBin + ", which the slot still shows while it fades out");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 200)
+    public static void lightPillarRibbonEdgesHoldTheVisibleLightAboveAHorizon(GameTestHelper helper) {
+        double refractiveIndex = IceHaloFormulas.refractiveIndex(1);
+        double visible = LightPillarOptics.VISIBLE_VALUE;
+        double pixelAngle = pixelAngle(1080);
+        double lateralBlur = LightPillarOptics.lateralBlur(pixelAngle);
+        double worst = 0.0;
+        String worstWhere = "nowhere";
+        double bestRise = 0.0;
+        String bestRiseWhere = "nowhere";
+        for (double horizon : new double[]{0.1, 0.5, 1.0}) {
+            for (IceCrystalData.Crystal crystal : plates()) {
+                double tiltSigma = Math.toRadians(crystal.tiltDegrees());
+                double share = IceCrystalData.get().shareOf(crystal);
+                for (double[] light : RIBBON_LIGHTS) {
+                    for (double strength : RIBBON_STRENGTHS) {
+                        double scale = LightPillarOptics.BRIGHTNESS * strength * share * RIBBON_EXTINCTION;
+                        double[][] corners = ribbonEdge(light[0], light[1], light[2], tiltSigma, refractiveIndex,
+                                lateralBlur, pixelAngle, scale, horizon);
+                        if (corners == null) {
+                            continue;
+                        }
+                        double lowestOpen = LightPillarOptics.lowestRibbonElevation(light[0], light[1], tiltSigma,
+                                LightPillarHorizons.OPEN);
+                        double rise = corners[0][1] - Math.sin(lowestOpen - pixelAngle);
+                        if (rise > bestRise) {
+                            bestRise = rise;
+                            bestRiseWhere = String.format(Locale.ROOT,
+                                    "%s, light %.0f away and %.2f high, dust bottom %.2f, horizon %.2f, the lowest "
+                                            + "row %.4f against %.4f",
+                                    crystal.name(), light[0], light[1], light[2], horizon, corners[0][1],
+                                    Math.sin(lowestOpen - pixelAngle));
+                        }
+                        for (int segment = 0; segment < RIBBON_SEGMENTS; segment++) {
+                            double[] below = corners[segment];
+                            double[] above = corners[segment + 1];
+                            for (int step = 0; step <= EDGE_STEPS; step++) {
+                                double fraction = (double) step / EDGE_STEPS;
+                                double x = below[0] + (above[0] - below[0]) * fraction;
+                                double y = below[1] + (above[1] - below[1]) * fraction;
+                                double z = below[2] + (above[2] - below[2]) * fraction;
+                                double length = Math.sqrt(x * x + y * y + z * z);
+                                double elevation = Math.asin(y / length);
+                                double lateralAngle = Math.asin(z / length);
+                                double value = scale * LightPillarOptics.dustRadiance(elevation, lateralAngle,
+                                        light[0], light[1], tiltSigma, refractiveIndex, lateralBlur, light[2],
+                                        RIBBON_EXTINCTION, NO_SCENE, horizon);
+                                if (value > worst) {
+                                    worst = value;
+                                    worstWhere = String.format(Locale.ROOT,
+                                            "%s of strength %.2f, light %.0f away and %.2f high, dust bottom %.2f, "
+                                                    + "horizon %.2f, elevation %.2f, %.3f degrees off the center",
+                                            crystal.name(), strength, light[0], light[1], light[2], horizon,
+                                            Math.toDegrees(elevation), Math.toDegrees(lateralAngle));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        LOGGER.info("Above a horizon the edges of light pillar ribbons show at most " + worst / visible
+                + " times the visible value, at " + worstWhere);
+        helper.assertTrue(worst <= 1.01 * visible, "Above a horizon a pillar shows " + worst / visible
+                + " times the visible value on the edge of its ribbon, at " + worstWhere);
+        LOGGER.info("A horizon raises the lowest row of a ribbon by at most " + bestRise + ", at " + bestRiseWhere);
+        helper.assertTrue(bestRise > 0.0, "No horizon raises the lowest row of a ribbon; the largest change is "
+                + bestRise + ", at " + bestRiseWhere);
         helper.succeed();
     }
 
@@ -1031,7 +1539,7 @@ public final class LightPillarGameTests {
                 continue;
             }
             clusters.beginSection(light, 0, 0);
-            clusters.addLight(16 * light + 8, 0, 0, 1.0F, 1.0F, 1.0F);
+            clusters.addLight(16 * light + 8, 0, 0, 1.0, 1.0F, 1.0F, 1.0F);
             clusters.endSection();
         }
     }
@@ -1057,7 +1565,8 @@ public final class LightPillarGameTests {
         for (int index = 0; index < steps; index++) {
             double lateralAngle = -end + (index + 0.5) * step;
             total += LightPillarOptics.dustRadiance(elevation, lateralAngle, horizontalDistance, lightHeight,
-                    tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight, RIBBON_EXTINCTION, NO_SCENE) * step;
+                    tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight, RIBBON_EXTINCTION, NO_SCENE,
+                    LightPillarHorizons.OPEN) * step;
         }
         return total;
     }
@@ -1068,33 +1577,35 @@ public final class LightPillarGameTests {
      * collapsed.
      */
     private static double[][] ribbonEdge(double horizontalDistance, double lightHeight, double dustBottomHeight,
-            double tiltSigma, double refractiveIndex, double lateralBlur, double marginAngle, double valueScale) {
-        double lowest = LightPillarOptics.lowestRibbonElevation(horizontalDistance, lightHeight, tiltSigma);
+            double tiltSigma, double refractiveIndex, double lateralBlur, double marginAngle, double valueScale,
+            double horizon) {
+        double lowest = LightPillarOptics.lowestRibbonElevation(horizontalDistance, lightHeight, tiltSigma, horizon);
         double highest = LightPillarOptics.HIGHEST_RIBBON_ELEVATION;
         if (!(highest > lowest)) {
             return null;
         }
         double firstRow = lowest - marginAngle;
         double lowestEvaluated = Math.min(lowest + 1.0e-3, highest);
-        double[] halfWidths = new double[RIBBON_SEGMENTS + 1];
-        for (int row = 0; row <= RIBBON_SEGMENTS; row++) {
-            double evaluated = Math.max(lowestEvaluated, Math.min(ribbonRowElevation(row, firstRow), highest));
+        double[] halfWidths = new double[2 * RIBBON_SEGMENTS + 1];
+        for (int halfRow = 0; halfRow <= 2 * RIBBON_SEGMENTS; halfRow++) {
+            double rowElevation = ribbonRowElevation(0.5 * halfRow, firstRow);
+            double evaluated = Math.max(lowestEvaluated, Math.min(rowElevation, highest));
             double center = valueScale * LightPillarOptics.dustRadiance(evaluated, 0.0, horizontalDistance,
-                    lightHeight, tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight, RIBBON_EXTINCTION, NO_SCENE);
+                    lightHeight, tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight, RIBBON_EXTINCTION,
+                    NO_SCENE, horizon);
             double halfWidth = LightPillarOptics.ribbonHalfWidth(center, LightPillarOptics.VISIBLE_VALUE,
                     LightPillarOptics.widestLateralSpread(evaluated, horizontalDistance, lightHeight, tiltSigma,
-                            lateralBlur));
-            halfWidths[row] = center > LightPillarOptics.VISIBLE_VALUE
+                            lateralBlur, horizon));
+            halfWidths[halfRow] = center > LightPillarOptics.VISIBLE_VALUE
                     ? Math.min(halfWidth + marginAngle, WIDEST_RIBBON_ANGLE) : 0.0;
         }
         double[][] corners = new double[RIBBON_SEGMENTS + 1][];
         for (int row = 0; row <= RIBBON_SEGMENTS; row++) {
-            double halfWidth = halfWidths[row];
-            if (row > 0) {
-                halfWidth = Math.max(halfWidth, halfWidths[row - 1]);
-            }
-            if (row < RIBBON_SEGMENTS) {
-                halfWidth = Math.max(halfWidth, halfWidths[row + 1]);
+            int firstHalfRow = Math.max(2 * row - 2, 0);
+            int lastHalfRow = Math.min(2 * row + 2, 2 * RIBBON_SEGMENTS);
+            double halfWidth = 0.0;
+            for (int halfRow = firstHalfRow; halfRow <= lastHalfRow; halfRow++) {
+                halfWidth = Math.max(halfWidth, halfWidths[halfRow]);
             }
             double elevation = ribbonRowElevation(row, firstRow);
             corners[row] = new double[]{Math.cos(elevation), Math.sin(elevation), Math.tan(halfWidth)};
@@ -1102,8 +1613,8 @@ public final class LightPillarGameTests {
         return corners;
     }
 
-    private static double ribbonRowElevation(int row, double firstRow) {
-        double rowFraction = (double) row / RIBBON_SEGMENTS;
+    private static double ribbonRowElevation(double row, double firstRow) {
+        double rowFraction = row / RIBBON_SEGMENTS;
         return firstRow + (LightPillarOptics.HIGHEST_RIBBON_ELEVATION - firstRow) * rowFraction * rowFraction;
     }
 
@@ -1127,10 +1638,11 @@ public final class LightPillarGameTests {
 
     /**
      * The radiance of the pillar summed along the view ray from the eye up to the scene distance, with the reflection
-     * of every crystal worked out in three dimensions. The light is on the x axis and z points up.
+     * of every crystal worked out in three dimensions. The light is on the x axis and z points up. Steps whose light
+     * leaves the light less steeply than the horizon are left out, as the horizons around the light cut them.
      */
     private static double rayIntegral(double elevation, double lateralAngle, double horizontalDistance,
-            double lightHeight, double tiltSigma, double refractiveIndex, double sceneDistance) {
+            double lightHeight, double tiltSigma, double refractiveIndex, double sceneDistance, double horizon) {
         double azimuth = Math.asin(Math.sin(lateralAngle) / Math.cos(elevation));
         double directionX = Math.cos(elevation) * Math.cos(azimuth);
         double directionY = Math.cos(elevation) * Math.sin(azimuth);
@@ -1152,6 +1664,10 @@ public final class LightPillarGameTests {
             double toLightX = horizontalDistance - distance * directionX;
             double toLightY = -distance * directionY;
             double toLightZ = lightHeight - distance * directionZ;
+            // The light leaves the light toward the crystal rising at this angle over the horizontal:
+            if (!(Math.atan2(-toLightZ, Math.hypot(toLightX, toLightY)) > horizon)) {
+                continue;
+            }
             double lightDistance = Math.sqrt(toLightX * toLightX + toLightY * toLightY + toLightZ * toLightZ);
             double halfX = toLightX / lightDistance - directionX;
             double halfY = toLightY / lightDistance - directionY;
@@ -1167,5 +1683,194 @@ public final class LightPillarGameTests {
                     * IceMirror.tiltDensity(tilt, tiltSigma) / (lightDistance * lightDistance) * step;
         }
         return total;
+    }
+
+    /**
+     * The block at the template's relative x and z, the given height above HIGH_FLOOR_Y.
+     */
+    private static BlockPos highAbove(GameTestHelper helper, int x, int y, int z) {
+        BlockPos column = helper.absolutePos(new BlockPos(x, 0, z));
+        return new BlockPos(column.getX(), HIGH_FLOOR_Y + y, column.getZ());
+    }
+
+    /**
+     * Fills a grass floor at HIGH_FLOOR_Y over the template's footprint, so the floor's top lies 1 above HIGH_FLOOR_Y.
+     */
+    private static void fillGrassFloor(GameTestHelper helper) {
+        for (int x = 0; x < 20; x++) {
+            for (int z = 0; z < 20; z++) {
+                helper.getLevel().setBlockAndUpdate(highAbove(helper, x, 0, z), Blocks.GRASS_BLOCK.defaultBlockState());
+            }
+        }
+    }
+
+    /**
+     * Sets the states into the 8 columns around the light's column at relative (10, 10), the first state along the
+     * axes and the second one along the diagonals, at each height above HIGH_FLOOR_Y from the lowest to the highest.
+     */
+    private static void placeRingAroundTheLight(GameTestHelper helper, BlockState axisState, BlockState diagonalState,
+            int lowestY, int highestY) {
+        for (int x = 9; x <= 11; x++) {
+            for (int z = 9; z <= 11; z++) {
+                if (x == 10 && z == 10) {
+                    continue;
+                }
+                BlockState state = x == 10 || z == 10 ? axisState : diagonalState;
+                for (int y = lowestY; y <= highestY; y++) {
+                    helper.getLevel().setBlockAndUpdate(highAbove(helper, x, y, z), state);
+                }
+            }
+        }
+    }
+
+    /**
+     * Chooses the light at the block as the only cluster of a new selection and builds every bin of its slot from the
+     * level out to the reach of the block tests. The top of the light lies the given offset above the block.
+     */
+    private static HorizonSetup buildSlotAndHorizons(GameTestHelper helper, BlockPos lightBlock, double topOffset) {
+        LightPillarClusters clusters = new LightPillarClusters();
+        clusters.beginSection(SectionPos.blockToSectionCoord(lightBlock.getX()),
+                SectionPos.blockToSectionCoord(lightBlock.getY()),
+                SectionPos.blockToSectionCoord(lightBlock.getZ()));
+        clusters.addLight(lightBlock.getX(), lightBlock.getY(), lightBlock.getZ(), lightBlock.getY() + topOffset,
+                1.0F, 1.0F, 1.0F);
+        clusters.endSection();
+        LightPillarSelection selection = new LightPillarSelection();
+        selection.choose(clusters, lightBlock.getX() + 3.5, lightBlock.getY() + 1.6, lightBlock.getZ() + 0.5, 1000.0,
+                WIDE_CHUNK_RADIUS);
+        int slot = usedSlot(helper, selection);
+        LightPillarHorizons horizons = new LightPillarHorizons();
+        LightPillarHorizons.LevelColumns columns = new LightPillarHorizons.LevelColumns(horizons.occluders());
+        columns.setLevel(helper.getLevel());
+        horizons.update(selection, columns, 6.0, 1_000_000);
+        helper.assertTrue(horizons.isBuilt(slot) && selection.isReady(slot), "The horizons of the light at "
+                + lightBlock.toShortString() + " are not built and ready");
+        return new HorizonSetup(selection, horizons, columns, slot, lightBlock);
+    }
+
+    /**
+     * The slot, horizons, and columns of one light standing in the template, with every bin of its slot built.
+     */
+    private record HorizonSetup(LightPillarSelection selection, LightPillarHorizons horizons,
+            LightPillarHorizons.LevelColumns columns, int slot, BlockPos lightBlock) {
+    }
+
+    /**
+     * The one used slot of a selection that chose a single cluster.
+     */
+    private static int usedSlot(GameTestHelper helper, LightPillarSelection selection) {
+        int used = -1;
+        for (int slot = 0; slot < LightPillarSelection.SLOT_COUNT; slot++) {
+            if (selection.isUsed(slot)) {
+                helper.assertTrue(used < 0, "The selection uses more than one slot");
+                used = slot;
+            }
+        }
+        helper.assertTrue(used >= 0, "The selection uses no slot");
+        return used;
+    }
+
+    private static void assertStoppedHeight(GameTestHelper helper, LightPillarOccluders occluders, BlockGetter level,
+            BlockPos position, BlockState state, double expected) {
+        double actual = occluders.stoppedHeight(state, level, position);
+        if (expected == LightPillarOccluders.PASSES) {
+            helper.assertTrue(actual == LightPillarOccluders.PASSES, "The stopped height of " + state + " is "
+                    + actual + " instead of PASSES");
+            return;
+        }
+        helper.assertTrue(Math.abs(actual - expected) <= 1.0e-6, "The stopped height of " + state + " is " + actual
+                + " instead of " + expected);
+    }
+
+    private static void assertStopsTheSame(GameTestHelper helper, LightPillarOccluders occluders, BlockState oldState,
+            BlockState newState, boolean expected) {
+        boolean actual = occluders.stopsTheSame(oldState, newState);
+        helper.assertTrue(actual == expected, "A change from " + oldState + " to " + newState + " stops the light "
+                + (actual ? "the same" : "differently") + " instead of "
+                + (expected ? "the same" : "differently"));
+    }
+
+    private static void assertLightTop(GameTestHelper helper, BlockGetter level, BlockPos position, BlockState state,
+            double expected) {
+        double actual = LightPillarOccluders.lightTop(state, level, position);
+        helper.assertTrue(Math.abs(actual - expected) <= 1.0e-6, "The light top of " + state + " is " + actual
+                + " instead of " + expected);
+    }
+
+    /**
+     * Checks that the samples of the bin below the first sample are open and the samples from the first sample on
+     * hold the angle.
+     */
+    private static void assertBinRisesOver(GameTestHelper helper, HorizonSetup setup, int bin, int firstSample,
+            double angle) {
+        for (int sample = 1; sample < firstSample; sample++) {
+            float actual = setup.horizons().sample(setup.slot(), bin, sample);
+            helper.assertTrue(actual == LightPillarHorizons.OPEN, "Sample " + sample + " of bin " + bin + " is "
+                    + actual + " instead of OPEN (" + LightPillarHorizons.OPEN + ")");
+        }
+        for (int sample = firstSample; sample < LightPillarHorizons.SAMPLES; sample++) {
+            assertSample(helper, setup, bin, sample, angle);
+        }
+    }
+
+    private static void assertSample(GameTestHelper helper, HorizonSetup setup, int bin, int sample, double expected) {
+        float actual = setup.horizons().sample(setup.slot(), bin, sample);
+        helper.assertTrue(Math.abs(actual - expected) <= 1.0e-6, "Sample " + sample + " of bin " + bin + " is "
+                + actual + " instead of " + expected);
+    }
+
+    private static void assertSamplesNearZero(GameTestHelper helper, HorizonSetup setup, int bin, int firstSample) {
+        for (int sample = firstSample; sample < LightPillarHorizons.SAMPLES; sample++) {
+            float actual = setup.horizons().sample(setup.slot(), bin, sample);
+            helper.assertTrue(Math.abs(actual) <= 1.0e-9, "Sample " + sample + " of bin " + bin + " is " + actual
+                    + " instead of 0");
+        }
+    }
+
+    private static void assertSamplesBetweenOpenAndZero(GameTestHelper helper, HorizonSetup setup) {
+        for (int bin : new int[]{0, 8, 16, 32, 48}) {
+            for (int sample = 6; sample < LightPillarHorizons.SAMPLES; sample++) {
+                float actual = setup.horizons().sample(setup.slot(), bin, sample);
+                helper.assertTrue(actual > LightPillarHorizons.OPEN && actual < 0.0F, "Sample " + sample
+                        + " of bin " + bin + " is " + actual + " instead of strictly between OPEN ("
+                        + LightPillarHorizons.OPEN + ") and 0");
+            }
+        }
+    }
+
+    private static void assertAllSamplesOpen(GameTestHelper helper, LightPillarHorizons horizons, int slot) {
+        for (int bin = 0; bin < LightPillarHorizons.BINS; bin++) {
+            for (int sample = 0; sample < LightPillarHorizons.SAMPLES; sample++) {
+                float actual = horizons.sample(slot, bin, sample);
+                helper.assertTrue(actual == LightPillarHorizons.OPEN, "Sample " + sample + " of bin " + bin + " is "
+                        + actual + " instead of OPEN");
+            }
+        }
+    }
+
+    /**
+     * Checks the horizon of the slot toward the point at the distance from the light's center along the angle from
+     * the +x axis toward the z axis.
+     */
+    private static void assertHorizonToward(GameTestHelper helper, HorizonSetup setup, double distance, double angle,
+            double expected, double tolerance) {
+        double pointX = setup.lightBlock().getX() + 0.5 + distance * Math.cos(angle);
+        double pointZ = setup.lightBlock().getZ() + 0.5 + distance * Math.sin(angle);
+        double actual = setup.horizons().horizon(setup.slot(), pointX, pointZ);
+        helper.assertTrue(Math.abs(actual - expected) <= tolerance, "The horizon " + distance + " blocks from the "
+                + "light at " + angle + " radians is " + actual + " instead of " + expected);
+    }
+
+    /**
+     * The horizon of the slot toward the point at the reach from the light's center along the angle from the +x axis
+     * toward the z axis, which is the last samples of the two nearest bins.
+     */
+    private static double horizonAtReach(LightPillarHorizons horizons, int slot, double originX, double originZ,
+            double reach, double angle) {
+        return horizons.horizon(slot, originX + reach * Math.cos(angle), originZ + reach * Math.sin(angle));
+    }
+
+    private static String describeBins(long bins) {
+        return "0x" + Long.toHexString(bins);
     }
 }

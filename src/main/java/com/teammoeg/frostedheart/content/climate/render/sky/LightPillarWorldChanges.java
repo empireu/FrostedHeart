@@ -44,7 +44,7 @@ import java.util.Locale;
 
 /**
  * Passes the changes in the client world that light pillars depend on, as hooks report them, to a
- * LightPillarWorkQueue, so nothing has to poll the world. Block changes come from ClientLevel.setBlocksDirty, sky light
+ * LightPillarWorkQueue and to the LightPillarHorizons, so nothing has to poll the world. Block changes come from ClientLevel.setBlocksDirty, sky light
  * computed on the client from ClientChunkCache.onLightUpdate, sky light received from the server from
  * ClientPacketListener.readSectionList, and chunk columns from the Forge chunk events. The hooks only queue, and the
  * client tick takes the work. The queue follows the level of the latest hook call, and it queues sections only while
@@ -98,6 +98,7 @@ public final class LightPillarWorldChanges {
         if (queue.onBlockChanged(pos.asLong(), oldState, newState)) {
             currentSecond.sectionsQueuedByBlocks++;
         }
+        LightPillarSources.horizons().onBlockChanged(pos.getX(), pos.getZ(), oldState, newState);
     }
 
     /**
@@ -145,10 +146,12 @@ public final class LightPillarWorldChanges {
             return;
         }
         followLevel(level);
-        queue.onColumnLoaded(event.getChunk().getPos().toLong());
+        ChunkPos chunk = event.getChunk().getPos();
+        queue.onColumnLoaded(chunk.toLong());
         if (queue.isTracking()) {
             currentSecond.columnsLoaded++;
         }
+        LightPillarSources.horizons().onChunkChanged(chunk.x, chunk.z);
     }
 
     @SubscribeEvent
@@ -157,10 +160,12 @@ public final class LightPillarWorldChanges {
             return;
         }
         followLevel(level);
-        queue.onColumnUnloaded(event.getChunk().getPos().toLong());
+        ChunkPos chunk = event.getChunk().getPos();
+        queue.onColumnUnloaded(chunk.toLong());
         if (queue.isTracking()) {
             currentSecond.columnsUnloaded++;
         }
+        LightPillarSources.horizons().onChunkChanged(chunk.x, chunk.z);
     }
 
     /**
