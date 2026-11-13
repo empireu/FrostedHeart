@@ -52,6 +52,9 @@ public enum SkySetting {
             + "pillars in diamond dust. The render distance limits it.", Rebuilds.NOTHING, 8.0, 2.0, 16.0),
     PILLAR_BRIGHTNESS("pillarBrightness", "Brightness of light pillars, as a factor on their calibrated brightness.",
             Rebuilds.NOTHING, 1.0, 0.0, 10.0),
+    PILLAR_NEAR_FADE("pillarNearFade", "Distance in blocks from the eye beyond which ice crystals fully show light "
+            + "pillars. Nearer crystals fade out down to a quarter of it, since too few of them line up to show a "
+            + "smooth pillar. 0 shows them all.", Rebuilds.NOTHING, 8.0, 0.0, 64.0),
     TEXEL_DEGREES("texelDegrees", "Size of the sky's square texels in degrees. They are fixed to the sky like the "
             + "sun's texture. 0 draws a smooth sky.", Rebuilds.HALOS, 0.5, 0.0, 5.0);
 

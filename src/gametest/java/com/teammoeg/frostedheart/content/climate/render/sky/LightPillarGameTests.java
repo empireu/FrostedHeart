@@ -108,6 +108,15 @@ public final class LightPillarGameTests {
     private static final double WIDEST_RIBBON_ANGLE = 1.4;
     private static final int EDGE_STEPS = 40;
     /**
+     * The near fade and the horizon, ceiling, and top of the cases of the ribbon edge test with overhangs.
+     */
+    private static final double[][] RIBBON_CASES = {
+            {0.0, LightPillarHorizons.OPEN, 0.3, 0.6},
+            {0.0, 0.1, 0.4, LightPillarHorizons.CLOSED},
+            {8.0, LightPillarHorizons.OPEN, LightPillarHorizons.OPEN, LightPillarHorizons.OPEN},
+            {8.0, LightPillarHorizons.OPEN, 0.5, LightPillarHorizons.CLOSED}
+    };
+    /**
      * The scene distance of directions where no scene stands.
      */
     private static final double NO_SCENE = Double.POSITIVE_INFINITY;
@@ -400,6 +409,79 @@ public final class LightPillarGameTests {
                 "The optical depth of a level path below the dust bottom is " + level);
         double downward = LightPillarOptics.dustOpticalDepth(-2.0 + scaleHeight, -2.0, scaleHeight, 0.001, -2.0);
         helper.assertTrue(Math.abs(downward - upward) <= 1.0e-12, "The optical depth depends on the direction");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 200)
+    public static void lightPillarNearWeightFadesFromAQuarter(GameTestHelper helper) {
+        for (double distance : new double[]{0.0, 1.0, 2.0}) {
+            double weight = LightPillarOptics.nearWeight(distance, 8.0);
+            helper.assertTrue(weight == 0.0, "The near weight at " + distance + " blocks is " + weight
+                    + " instead of 0");
+        }
+        for (double distance : new double[]{8.0, 9.0, 100.0}) {
+            double weight = LightPillarOptics.nearWeight(distance, 8.0);
+            helper.assertTrue(weight == 1.0, "The near weight at " + distance + " blocks is " + weight
+                    + " instead of 1");
+        }
+        assertNearWeight(helper, 5.0, 8.0, 0.5);
+        assertNearWeight(helper, 3.5, 8.0, 0.15625);
+        double previous = 0.0;
+        for (int step = 0; step <= 200; step++) {
+            double distance = 0.05 * step;
+            double weight = LightPillarOptics.nearWeight(distance, 8.0);
+            helper.assertTrue(weight >= previous, "The near weight falls from " + previous + " to " + weight + " at "
+                    + distance + " blocks");
+            previous = weight;
+        }
+        for (double distance : new double[]{0.0, 0.5, 100.0}) {
+            double weight = LightPillarOptics.nearWeight(distance, 0.0);
+            helper.assertTrue(weight == 1.0, "Without a near fade the near weight at " + distance + " blocks is "
+                    + weight + " instead of 1");
+        }
+
+        double refractiveIndex = IceHaloFormulas.refractiveIndex(1);
+        IceCrystalData.Crystal plates = plateWithTilt(helper, 0.7);
+        IceCrystalData.Crystal wobblingPlates = plateWithTilt(helper, 5.0);
+        for (double elevationDegrees : new double[]{16.0, 20.0, 24.0, 28.0}) {
+            double elevation = Math.toRadians(elevationDegrees);
+            double fadedPlates = nearRadiance(plates, elevation, 3.0, -1.12, refractiveIndex, 8.0);
+            helper.assertTrue(fadedPlates == 0.0, "The plates of a light 3 blocks away and 1.12 below the eye show "
+                    + fadedPlates + " at " + elevationDegrees + " degrees with a near fade of 8 blocks instead of 0");
+            double fadedWobbling = nearRadiance(wobblingPlates, elevation, 3.0, -1.12, refractiveIndex, 8.0);
+            double wholeWobbling = nearRadiance(wobblingPlates, elevation, 3.0, -1.12, refractiveIndex, 0.0);
+            helper.assertTrue(fadedWobbling <= 0.01 * wholeWobbling, "The wobbling plates of a light 3 blocks away "
+                    + "and 1.12 below the eye show " + fadedWobbling + " at " + elevationDegrees + " degrees with a "
+                    + "near fade of 8 blocks instead of at most " + 0.01 * wholeWobbling);
+        }
+        double unfadedPlates = nearRadiance(plates, Math.toRadians(24.0), 3.0, -1.12, refractiveIndex, 0.0);
+        helper.assertTrue(unfadedPlates > 0.0, "The plates of a light 3 blocks away and 1.12 below the eye show "
+                + unfadedPlates + " at 24 degrees without a near fade instead of more than 0");
+        // Wobbling plates reach crystals near the eye with their most tilted faces, so only plates stay the same:
+        for (double elevationDegrees : new double[]{15.0, 20.0, 30.0, 45.0, 60.0}) {
+            double elevation = Math.toRadians(elevationDegrees);
+            double faded = nearRadiance(plates, elevation, 300.0, -20.0, refractiveIndex, 8.0);
+            double whole = nearRadiance(plates, elevation, 300.0, -20.0, refractiveIndex, 0.0);
+            helper.assertTrue(faded == whole, "The plates of a light 300 blocks away and 20 below the eye show "
+                    + faded + " at " + elevationDegrees + " degrees with a near fade of 8 blocks instead of the "
+                    + whole + " they show without one");
+        }
+        // The Gauss rule over the shorter tilt range of the near fade can come out up to about 1e-5 higher:
+        for (IceCrystalData.Crystal crystal : plates()) {
+            for (double[] light : PILLAR_LIGHTS) {
+                for (int height = 1; height < light.length; height++) {
+                    for (double elevationDegrees : PILLAR_ELEVATIONS_DEGREES) {
+                        double elevation = Math.toRadians(elevationDegrees);
+                        double faded = nearRadiance(crystal, elevation, light[0], light[height], refractiveIndex, 8.0);
+                        double whole = nearRadiance(crystal, elevation, light[0], light[height], refractiveIndex, 0.0);
+                        helper.assertTrue(faded <= whole * (1.0 + 1.0e-4), "The " + crystal.name() + " of light " + light[0]
+                                + " away and " + light[height] + " high show " + faded + " at " + elevationDegrees
+                                + " degrees with a near fade of 8 blocks instead of at most the " + whole
+                                + " they show without one");
+                    }
+                }
+            }
+        }
         helper.succeed();
     }
 
@@ -1059,6 +1141,66 @@ public final class LightPillarGameTests {
         helper.succeed();
     }
 
+    @GameTest(template = "phase0a_empty", timeoutTicks = 1200)
+    public static void lightPillarNearFadeAndOverhangsMatchTheRayIntegral(GameTestHelper helper) {
+        double refractiveIndex = IceHaloFormulas.refractiveIndex(1);
+        double worst = -1.0;
+        String worstWhere = "nowhere";
+        for (IceCrystalData.Crystal crystal : plates()) {
+            double tiltSigma = Math.toRadians(crystal.tiltDegrees());
+            for (double[] light : PILLAR_LIGHTS) {
+                double horizontalDistance = light[0];
+                for (int height = 1; height < light.length; height++) {
+                    double lightHeight = light[height];
+                    for (double elevationDegrees : PILLAR_ELEVATIONS_DEGREES) {
+                        double elevation = Math.toRadians(elevationDegrees);
+                        double crystalHeight = LightPillarOptics.mirrorHeight(elevation, horizontalDistance,
+                                lightHeight);
+                        if (crystalHeight <= Math.max(0.0, lightHeight) + 0.05) {
+                            continue;
+                        }
+                        double spread = LightPillarOptics.lateralSpread(elevation, horizontalDistance, lightHeight,
+                                tiltSigma);
+                        for (double spreads : SCENE_LATERAL_SPREADS) {
+                            double lateralAngle = spreads * spread;
+                            double whole = rayIntegral(elevation, lateralAngle, horizontalDistance, lightHeight,
+                                    tiltSigma, refractiveIndex, NO_SCENE, 0.0, LightPillarHorizons.OPEN,
+                                    LightPillarHorizons.OPEN, LightPillarHorizons.OPEN);
+                            for (int caseNumber = 1; caseNumber <= 7; caseNumber++) {
+                                double[] fadeCase = rayIntegralCase(caseNumber, elevation, tiltSigma);
+                                double nearFade = fadeCase[0];
+                                double horizon = fadeCase[1];
+                                double ceiling = fadeCase[2];
+                                double top = fadeCase[3];
+                                double expected = rayIntegral(elevation, lateralAngle, horizontalDistance, lightHeight,
+                                        tiltSigma, refractiveIndex, NO_SCENE, nearFade, horizon, ceiling, top);
+                                double actual = LightPillarOptics.dustRadiance(elevation, lateralAngle,
+                                        horizontalDistance, lightHeight, tiltSigma, refractiveIndex, 0.0, 1.0e9,
+                                        0.0, NO_SCENE, nearFade, horizon, ceiling, top);
+                                double difference = Math.abs(actual - expected) / whole;
+                                if (!(difference <= worst)) {
+                                    worst = difference;
+                                    worstWhere = String.format(Locale.ROOT,
+                                            "case %d, %s, light %.0f away and %.0f high, elevation %.0f degrees, "
+                                                    + "%.0f spreads off the center, near fade %.0f, horizon %.4f, "
+                                                    + "ceiling %.4f, top %.4f, %.4g against %.4g of %.4g",
+                                            caseNumber, crystal.name(), horizontalDistance, lightHeight,
+                                            elevationDegrees, spreads, nearFade, horizon, ceiling, top, actual,
+                                            expected, whole);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        LOGGER.info("Light pillar behind a near fade and overhangs differs from the ray integral by at most " + worst
+                + " of the whole pillar, at " + worstWhere);
+        helper.assertTrue(worst <= PILLAR_TOLERANCE, "Light pillar behind a near fade and overhangs differs from the "
+                + "ray integral by " + worst + " of the whole pillar, at " + worstWhere);
+        helper.succeed();
+    }
+
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void lightPillarOccludersSortBlocks(GameTestHelper helper) {
         LightPillarOccluders occluders = new LightPillarOccluders();
@@ -1165,13 +1307,14 @@ public final class LightPillarGameTests {
     }
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
-    public static void lightPillarHorizonsSkipTheLightsOwnColumn(GameTestHelper helper) {
+    public static void lightPillarHorizonsLeaveOutTheLightsOwnBlock(GameTestHelper helper) {
         double belowOpenGround = Math.atan(-1.0 / 5.5);
         fillGrassFloor(helper);
         BlockPos standingBlock = highAbove(helper, 10, 1, 10);
         helper.getLevel().setBlockAndUpdate(standingBlock, Blocks.GLOWSTONE.defaultBlockState());
         HorizonSetup standing = buildSlotAndHorizons(helper, standingBlock, 1.0);
         assertSample(helper, standing, 0, 15, belowOpenGround);
+        helper.getLevel().setBlockAndUpdate(standingBlock, Blocks.AIR.defaultBlockState());
         BlockPos buriedBlock = highAbove(helper, 10, 0, 10);
         helper.getLevel().setBlockAndUpdate(buriedBlock, Blocks.GLOWSTONE.defaultBlockState());
         HorizonSetup buried = buildSlotAndHorizons(helper, buriedBlock, 1.0);
@@ -1202,19 +1345,165 @@ public final class LightPillarGameTests {
         assertSample(helper, setup, 32, 15, onOpenGround);
         assertHorizonToward(helper, setup, 5.5, 0.0, overTheWall, 1.0e-6);
         assertHorizonToward(helper, setup, 2.0, 0.0, nearOnOpenGround, 1.0e-6);
-        double farStop = setup.columns().highestStop(1_000_000, 1_000_000, Double.NEGATIVE_INFINITY);
-        helper.assertTrue(farStop == LightPillarOccluders.PASSES, "A column outside the loaded chunks stops light at "
-                + farStop + " instead of PASSES");
+        int farSurface = setup.columns().beginColumn(1_000_000, 1_000_000);
+        helper.assertTrue(farSurface == LightPillarHorizons.NO_BLOCKS, "A column outside the loaded chunks has its "
+                + "surface at " + farSurface + " instead of NO_BLOCKS");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarHorizonsLetLightPassBelowACanopy(GameTestHelper helper) {
+        double horizonNear = Math.atan(-0.625 / 0.5);
+        double horizonMid = Math.atan(-0.625 / 1.5);
+        double horizonFar = Math.atan(-0.625 / 2.5);
+        double horizonFarther = Math.atan(-0.625 / 3.5);
+        double horizonOnOpenGround = Math.atan(-0.625 / 5.5);
+        double ceilingNear = Math.atan(2.375 / 1.5);
+        double ceilingMid = Math.atan(2.375 / 2.5);
+        double ceilingFar = Math.atan(2.375 / 3.5);
+        double topOverTheCanopy = Math.atan(3.375 / 0.5);
+        fillGrassFloor(helper);
+        BlockPos lightBlock = highAbove(helper, 10, 1, 10);
+        BlockState leaves = Blocks.OAK_LEAVES.defaultBlockState().setValue(LeavesBlock.PERSISTENT, true);
+        for (int x = 11; x <= 13; x++) {
+            for (int z = 9; z <= 11; z++) {
+                helper.getLevel().setBlockAndUpdate(highAbove(helper, x, 4, z), leaves);
+            }
+        }
+        HorizonSetup setup = buildSlotAndHorizons(helper, lightBlock, 0.625);
+        for (int sample = 1; sample <= 4; sample++) {
+            assertSample(helper, setup, 0, sample, LightPillarHorizons.OPEN);
+            assertCeilingSample(helper, setup, 0, sample, LightPillarHorizons.OPEN);
+            assertTopSample(helper, setup, 0, sample, LightPillarHorizons.OPEN);
+        }
+        for (int sample = 5; sample <= 7; sample++) {
+            assertSample(helper, setup, 0, sample, horizonNear);
+            assertCeilingSample(helper, setup, 0, sample, ceilingNear);
+            assertTopSample(helper, setup, 0, sample, topOverTheCanopy);
+        }
+        for (int sample = 8; sample <= 9; sample++) {
+            assertSample(helper, setup, 0, sample, horizonMid);
+            assertCeilingSample(helper, setup, 0, sample, ceilingMid);
+            assertTopSample(helper, setup, 0, sample, topOverTheCanopy);
+        }
+        for (int sample = 10; sample <= 11; sample++) {
+            assertSample(helper, setup, 0, sample, horizonFar);
+            assertCeilingSample(helper, setup, 0, sample, ceilingFar);
+            assertTopSample(helper, setup, 0, sample, topOverTheCanopy);
+        }
+        assertSample(helper, setup, 0, 12, horizonFarther);
+        assertCeilingSample(helper, setup, 0, 12, ceilingFar);
+        assertTopSample(helper, setup, 0, 12, topOverTheCanopy);
+        assertSample(helper, setup, 0, 15, horizonOnOpenGround);
+        assertCeilingSample(helper, setup, 0, 15, ceilingFar);
+        assertTopSample(helper, setup, 0, 15, topOverTheCanopy);
+        for (int sample = 5; sample <= 15; sample++) {
+            assertCeilingAndTopMatchTheHorizon(helper, setup, 32, sample);
+        }
+        double pointX = lightBlock.getX() + 0.5 + 5.5;
+        double pointZ = lightBlock.getZ() + 0.5;
+        float ceiling = setup.horizons().ceiling(setup.slot(), pointX, pointZ);
+        helper.assertTrue(Math.abs(ceiling - ceilingFar) <= 1.0e-6, "The ceiling 5.5 blocks along +x from the light "
+                + "is " + ceiling + " instead of " + ceilingFar);
+        float top = setup.horizons().top(setup.slot(), pointX, pointZ);
+        helper.assertTrue(Math.abs(top - topOverTheCanopy) <= 1.0e-6, "The top 5.5 blocks along +x from the light is "
+                + top + " instead of " + topOverTheCanopy);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarHorizonsCountBlocksAboveTheLight(GameTestHelper helper) {
+        double overTheBlock = Math.atan(1.375 / 0.5);
+        double overTheBlockDiagonally = Math.atan(1.375 / (0.5 * Math.sqrt(2.0)));
+        double justOverTheTorch = Math.atan(0.375 / 0.5);
+        double underTheSlit = Math.atan(0.375 / 1.5);
+        double overTheSlit = Math.atan(1.375 / 0.5);
+        double underTheFloor = Math.atan(-0.625 / 0.5);
+        double onOpenGround = Math.atan(-0.625 / 5.5);
+        double closed = LightPillarHorizons.CLOSED;
+        fillGrassFloor(helper);
+        BlockPos lightBlock = highAbove(helper, 10, 1, 10);
+        BlockState leaves = Blocks.OAK_LEAVES.defaultBlockState().setValue(LeavesBlock.PERSISTENT, true);
+        BlockPos aboveTheTorch = highAbove(helper, 10, 3, 10);
+
+        helper.getLevel().setBlockAndUpdate(aboveTheTorch, Blocks.STONE.defaultBlockState());
+        HorizonSetup overTheLight = buildSlotAndHorizons(helper, lightBlock, 0.625);
+        for (int sample = 0; sample < LightPillarHorizons.SAMPLES; sample++) {
+            assertCeilingSample(helper, overTheLight, 0, sample, overTheBlock);
+            assertTopSample(helper, overTheLight, 0, sample, closed);
+            assertCeilingSample(helper, overTheLight, 8, sample, overTheBlockDiagonally);
+            assertTopSample(helper, overTheLight, 8, sample, closed);
+        }
+        assertSample(helper, overTheLight, 0, 0, LightPillarHorizons.OPEN);
+        assertSample(helper, overTheLight, 0, 15, onOpenGround);
+
+        helper.getLevel().setBlockAndUpdate(aboveTheTorch, Blocks.AIR.defaultBlockState());
+        BlockPos onTheTorch = highAbove(helper, 10, 2, 10);
+        helper.getLevel().setBlockAndUpdate(onTheTorch, Blocks.STONE.defaultBlockState());
+        HorizonSetup onTopOfTheLight = buildSlotAndHorizons(helper, lightBlock, 0.625);
+        assertCeilingSample(helper, onTopOfTheLight, 0, 15, justOverTheTorch);
+
+        helper.getLevel().setBlockAndUpdate(onTheTorch, Blocks.AIR.defaultBlockState());
+        for (int z = 9; z <= 11; z++) {
+            helper.getLevel().setBlockAndUpdate(highAbove(helper, 11, 2, z), leaves);
+        }
+        HorizonSetup slit = buildSlotAndHorizons(helper, lightBlock, 0.625);
+        for (int sample = 5; sample <= 7; sample++) {
+            assertSample(helper, slit, 0, sample, underTheFloor);
+            assertCeilingSample(helper, slit, 0, sample, underTheSlit);
+            assertTopSample(helper, slit, 0, sample, overTheSlit);
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarHorizonsJoinLowBlocksToTheGround(GameTestHelper helper) {
+        double overTheWall = Math.atan(1.375 / 1.5);
+        double underTheHighLeaves = Math.atan(4.375 / 4.5);
+        double overTheHighLeaves = Math.atan(5.375 / 3.5);
+        fillGrassFloor(helper);
+        BlockPos lightBlock = highAbove(helper, 10, 1, 10);
+        BlockState leaves = Blocks.OAK_LEAVES.defaultBlockState().setValue(LeavesBlock.PERSISTENT, true);
+        for (int y = 1; y <= 2; y++) {
+            for (int z = 8; z <= 12; z++) {
+                helper.getLevel().setBlockAndUpdate(highAbove(helper, 12, y, z), Blocks.STONE.defaultBlockState());
+            }
+        }
+        for (int z = 8; z <= 12; z++) {
+            helper.getLevel().setBlockAndUpdate(highAbove(helper, 14, 3, z), leaves);
+        }
+        HorizonSetup lowLeaves = buildSlotAndHorizons(helper, lightBlock, 0.625);
+        for (int sample = 8; sample <= 15; sample++) {
+            assertSample(helper, lowLeaves, 0, sample, overTheWall);
+            assertCeilingSample(helper, lowLeaves, 0, sample, overTheWall);
+            assertTopSample(helper, lowLeaves, 0, sample, overTheWall);
+        }
+
+        for (int z = 8; z <= 12; z++) {
+            helper.getLevel().setBlockAndUpdate(highAbove(helper, 14, 3, z), Blocks.AIR.defaultBlockState());
+            helper.getLevel().setBlockAndUpdate(highAbove(helper, 14, 6, z), leaves);
+        }
+        HorizonSetup highLeaves = buildSlotAndHorizons(helper, lightBlock, 0.625);
+        for (int sample = 8; sample <= 11; sample++) {
+            assertSample(helper, highLeaves, 0, sample, overTheWall);
+            assertCeilingSample(helper, highLeaves, 0, sample, overTheWall);
+            assertTopSample(helper, highLeaves, 0, sample, overTheWall);
+        }
+        for (int sample = 12; sample <= 15; sample++) {
+            assertSample(helper, highLeaves, 0, sample, overTheWall);
+            assertCeilingSample(helper, highLeaves, 0, sample, underTheHighLeaves);
+            assertTopSample(helper, highLeaves, 0, sample, overTheHighLeaves);
+        }
         helper.succeed();
     }
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void lightPillarHorizonsMarkOnlyTheBinsAChangeReaches(GameTestHelper helper) {
         int[] columnsRead = {0};
-        LightPillarHorizons.Columns columns = (blockX, blockZ, floorY) -> {
+        LightPillarHorizons.Columns columns = new SolidColumns((blockX, blockZ) -> {
             columnsRead[0]++;
-            return LightPillarOccluders.PASSES;
-        };
+            return LightPillarHorizons.NO_BLOCKS;
+        });
         long acrossEast = LightPillarHorizons.binsAcross(0.5, 0.5, 2, 0, 1);
         helper.assertTrue(acrossEast == 0xE00000000000000FL, "The bins across a column 2 blocks east are "
                 + describeBins(acrossEast) + " instead of 0xE00000000000000F (bins 61 to 3)");
@@ -1277,8 +1566,8 @@ public final class LightPillarGameTests {
 
         horizons.onBlockChanged(0, 0, stone, air);
         horizons.update(selection, columns, 10.0, 0);
-        helper.assertTrue(horizons.dirtyBins(slot) == 0L, "A change in the light's own column marks "
-                + describeBins(horizons.dirtyBins(slot)) + " instead of nothing");
+        helper.assertTrue(horizons.dirtyBins(slot) == -1L, "A change in the light's own column marks "
+                + describeBins(horizons.dirtyBins(slot)) + " instead of every bin");
         horizons.update(selection, columns, 10.0, 1_000_000);
 
         horizons.onBlockChanged(20, 0, stone, air);
@@ -1337,15 +1626,15 @@ public final class LightPillarGameTests {
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void lightPillarHorizonsWrapBetweenTheLastAndTheFirstBin(GameTestHelper helper) {
         double reach = 40.0;
-        LightPillarHorizons.Columns columns = (blockX, blockZ, floorY) -> {
+        LightPillarHorizons.Columns columns = new SolidColumns((blockX, blockZ) -> {
             if (blockZ <= -2) {
-                return 70.0;
+                return 70;
             }
             if (blockZ >= 2) {
-                return 66.0;
+                return 66;
             }
-            return LightPillarOccluders.PASSES;
-        };
+            return LightPillarHorizons.NO_BLOCKS;
+        });
         LightPillarClusters clusters = new LightPillarClusters();
         clusters.beginSection(0, 3, 0);
         clusters.addLight(0, 63, 0, 64.0, 1.0F, 1.0F, 1.0F);
@@ -1456,6 +1745,66 @@ public final class LightPillarGameTests {
         LOGGER.info("A horizon raises the lowest row of a ribbon by at most " + bestRise + ", at " + bestRiseWhere);
         helper.assertTrue(bestRise > 0.0, "No horizon raises the lowest row of a ribbon; the largest change is "
                 + bestRise + ", at " + bestRiseWhere);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 400)
+    public static void lightPillarRibbonEdgesHoldTheVisibleLightWithOverhangsAndNearFade(GameTestHelper helper) {
+        double refractiveIndex = IceHaloFormulas.refractiveIndex(1);
+        double visible = LightPillarOptics.VISIBLE_VALUE;
+        double pixelAngle = pixelAngle(1080);
+        double lateralBlur = LightPillarOptics.lateralBlur(pixelAngle);
+        double worst = 0.0;
+        String worstWhere = "nowhere";
+        for (int caseNumber = 1; caseNumber <= RIBBON_CASES.length; caseNumber++) {
+            double[] ribbonCase = RIBBON_CASES[caseNumber - 1];
+            double nearFade = ribbonCase[0];
+            double horizon = ribbonCase[1];
+            double ceiling = ribbonCase[2];
+            double top = ribbonCase[3];
+            for (IceCrystalData.Crystal crystal : plates()) {
+                double tiltSigma = Math.toRadians(crystal.tiltDegrees());
+                double share = IceCrystalData.get().shareOf(crystal);
+                for (double[] light : RIBBON_LIGHTS) {
+                    for (double strength : RIBBON_STRENGTHS) {
+                        double scale = LightPillarOptics.BRIGHTNESS * strength * share * RIBBON_EXTINCTION;
+                        double[][] corners = ribbonEdge(light[0], light[1], light[2], tiltSigma, refractiveIndex,
+                                lateralBlur, pixelAngle, scale, nearFade, horizon, ceiling, top);
+                        if (corners == null) {
+                            continue;
+                        }
+                        for (int segment = 0; segment < RIBBON_SEGMENTS; segment++) {
+                            double[] below = corners[segment];
+                            double[] above = corners[segment + 1];
+                            for (int step = 0; step <= EDGE_STEPS; step++) {
+                                double fraction = (double) step / EDGE_STEPS;
+                                double x = below[0] + (above[0] - below[0]) * fraction;
+                                double y = below[1] + (above[1] - below[1]) * fraction;
+                                double z = below[2] + (above[2] - below[2]) * fraction;
+                                double length = Math.sqrt(x * x + y * y + z * z);
+                                double elevation = Math.asin(y / length);
+                                double lateralAngle = Math.asin(z / length);
+                                double value = scale * LightPillarOptics.dustRadiance(elevation, lateralAngle,
+                                        light[0], light[1], tiltSigma, refractiveIndex, lateralBlur, light[2],
+                                        RIBBON_EXTINCTION, NO_SCENE, nearFade, horizon, ceiling, top);
+                                if (value > worst) {
+                                    worst = value;
+                                    worstWhere = String.format(Locale.ROOT,
+                                            "case %d, %s of strength %.2f, light %.0f away and %.2f high, dust bottom "
+                                                    + "%.2f, elevation %.2f, %.3f degrees off the center",
+                                            caseNumber, crystal.name(), strength, light[0], light[1], light[2],
+                                            Math.toDegrees(elevation), Math.toDegrees(lateralAngle));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        LOGGER.info("With overhangs and a near fade the edges of light pillar ribbons show at most " + worst / visible
+                + " times the visible value, at " + worstWhere);
+        helper.assertTrue(worst <= 1.01 * visible, "With overhangs and a near fade a pillar shows " + worst / visible
+                + " times the visible value on the edge of its ribbon, at " + worstWhere);
         helper.succeed();
     }
 
@@ -1579,6 +1928,18 @@ public final class LightPillarGameTests {
     private static double[][] ribbonEdge(double horizontalDistance, double lightHeight, double dustBottomHeight,
             double tiltSigma, double refractiveIndex, double lateralBlur, double marginAngle, double valueScale,
             double horizon) {
+        return ribbonEdge(horizontalDistance, lightHeight, dustBottomHeight, tiltSigma, refractiveIndex, lateralBlur,
+                marginAngle, valueScale, 0.0, horizon, horizon, horizon);
+    }
+
+    /**
+     * The corners on one side of a pillar's ribbon from the bottom row up, as the vertex stage of light_pillars.glsl
+     * places them at a distance of 1, with x level toward the light, y up, and z across, for the near fade and the
+     * angles the horizons around the light let through. It is null where the ribbon is collapsed.
+     */
+    private static double[][] ribbonEdge(double horizontalDistance, double lightHeight, double dustBottomHeight,
+            double tiltSigma, double refractiveIndex, double lateralBlur, double marginAngle, double valueScale,
+            double nearFade, double horizon, double ceiling, double top) {
         double lowest = LightPillarOptics.lowestRibbonElevation(horizontalDistance, lightHeight, tiltSigma, horizon);
         double highest = LightPillarOptics.HIGHEST_RIBBON_ELEVATION;
         if (!(highest > lowest)) {
@@ -1590,15 +1951,10 @@ public final class LightPillarGameTests {
         for (int halfRow = 0; halfRow <= 2 * RIBBON_SEGMENTS; halfRow++) {
             double rowElevation = ribbonRowElevation(0.5 * halfRow, firstRow);
             double evaluated = Math.max(lowestEvaluated, Math.min(rowElevation, highest));
-            double center = valueScale * LightPillarOptics.dustRadiance(evaluated, 0.0, horizontalDistance,
-                    lightHeight, tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight, RIBBON_EXTINCTION,
-                    NO_SCENE, horizon);
-            double halfWidth = LightPillarOptics.ribbonHalfWidth(center, LightPillarOptics.VISIBLE_VALUE,
-                    LightPillarOptics.widestLateralSpread(evaluated, horizontalDistance, lightHeight, tiltSigma,
-                            lateralBlur, horizon));
-            halfWidths[halfRow] = center > LightPillarOptics.VISIBLE_VALUE
-                    ? Math.min(halfWidth + marginAngle, WIDEST_RIBBON_ANGLE) : 0.0;
+            halfWidths[halfRow] = ribbonHalfWidthAt(evaluated, horizontalDistance, lightHeight, dustBottomHeight,
+                    tiltSigma, refractiveIndex, lateralBlur, marginAngle, valueScale, nearFade, horizon, ceiling, top);
         }
+        double reappearance = top + 2.0 * tiltSigma;
         double[][] corners = new double[RIBBON_SEGMENTS + 1][];
         for (int row = 0; row <= RIBBON_SEGMENTS; row++) {
             int firstHalfRow = Math.max(2 * row - 2, 0);
@@ -1607,10 +1963,35 @@ public final class LightPillarGameTests {
             for (int halfRow = firstHalfRow; halfRow <= lastHalfRow; halfRow++) {
                 halfWidth = Math.max(halfWidth, halfWidths[halfRow]);
             }
+            if (ceiling < top && reappearance > ribbonRowElevation(0.5 * firstHalfRow, firstRow)
+                    && reappearance < ribbonRowElevation(0.5 * lastHalfRow, firstRow)) {
+                double evaluated = Math.max(lowestEvaluated, Math.min(reappearance, highest));
+                halfWidth = Math.max(halfWidth, ribbonHalfWidthAt(evaluated, horizontalDistance, lightHeight,
+                        dustBottomHeight, tiltSigma, refractiveIndex, lateralBlur, marginAngle, valueScale, nearFade,
+                        horizon, ceiling, top));
+            }
             double elevation = ribbonRowElevation(row, firstRow);
             corners[row] = new double[]{Math.cos(elevation), Math.sin(elevation), Math.tan(halfWidth)};
         }
         return corners;
+    }
+
+    /**
+     * The half width of a ribbon row with the margin, as halfWidthAt in light_pillars.glsl gives it.
+     */
+    private static double ribbonHalfWidthAt(double evaluated, double horizontalDistance, double lightHeight,
+            double dustBottomHeight, double tiltSigma, double refractiveIndex, double lateralBlur, double marginAngle,
+            double valueScale, double nearFade, double horizon, double ceiling, double top) {
+        double center = valueScale * LightPillarOptics.dustRadiance(evaluated, 0.0, horizontalDistance, lightHeight,
+                tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight, RIBBON_EXTINCTION, NO_SCENE, nearFade,
+                horizon, ceiling, top);
+        if (!(center > LightPillarOptics.VISIBLE_VALUE)) {
+            return 0.0;
+        }
+        double halfWidth = LightPillarOptics.ribbonHalfWidth(center, LightPillarOptics.VISIBLE_VALUE,
+                LightPillarOptics.widestLateralSpread(evaluated, horizontalDistance, lightHeight, tiltSigma,
+                        lateralBlur, nearFade, horizon, ceiling, top));
+        return Math.min(halfWidth + marginAngle, WIDEST_RIBBON_ANGLE);
     }
 
     private static double ribbonRowElevation(double row, double firstRow) {
@@ -1637,12 +2018,54 @@ public final class LightPillarGameTests {
     }
 
     /**
+     * The plate kind whose tilt has the standard deviation in degrees.
+     */
+    private static IceCrystalData.Crystal plateWithTilt(GameTestHelper helper, double tiltDegrees) {
+        for (IceCrystalData.Crystal crystal : plates()) {
+            if (crystal.tiltDegrees() == tiltDegrees) {
+                return crystal;
+            }
+        }
+        helper.fail("No plate kind has a tilt of " + tiltDegrees + " degrees");
+        return null;
+    }
+
+    /**
+     * The radiance of a plate kind toward the center of the pillar, for a light at the distance and height, in dust
+     * that is dense everywhere, without extinction, blur, or blocks around the light, for the near fade.
+     */
+    private static double nearRadiance(IceCrystalData.Crystal crystal, double elevation, double horizontalDistance,
+            double lightHeight, double refractiveIndex, double nearFade) {
+        return LightPillarOptics.dustRadiance(elevation, 0.0, horizontalDistance, lightHeight,
+                Math.toRadians(crystal.tiltDegrees()), refractiveIndex, 0.0, 1.0e9, 0.0, NO_SCENE, nearFade,
+                LightPillarHorizons.OPEN, LightPillarHorizons.OPEN, LightPillarHorizons.OPEN);
+    }
+
+    private static void assertNearWeight(GameTestHelper helper, double distance, double nearFade, double expected) {
+        double actual = LightPillarOptics.nearWeight(distance, nearFade);
+        helper.assertTrue(Math.abs(actual - expected) <= 1.0e-12, "The near weight at " + distance + " blocks with a "
+                + "near fade of " + nearFade + " blocks is " + actual + " instead of " + expected);
+    }
+
+    /**
      * The radiance of the pillar summed along the view ray from the eye up to the scene distance, with the reflection
-     * of every crystal worked out in three dimensions. The light is on the x axis and z points up. Steps whose light
-     * leaves the light less steeply than the horizon are left out, as the horizons around the light cut them.
+     * of every crystal worked out in three dimensions. The light is on the x axis and z points up.
      */
     private static double rayIntegral(double elevation, double lateralAngle, double horizontalDistance,
             double lightHeight, double tiltSigma, double refractiveIndex, double sceneDistance, double horizon) {
+        return rayIntegral(elevation, lateralAngle, horizontalDistance, lightHeight, tiltSigma, refractiveIndex,
+                sceneDistance, 0.0, horizon, horizon, horizon);
+    }
+
+    /**
+     * The radiance of the pillar summed along the view ray from the eye up to the scene distance, with the reflection
+     * of every crystal worked out in three dimensions. The light is on the x axis and z points up. Steps whose light
+     * leaves the light outside the angles the horizons around the light let through are left out, and steps nearer to
+     * the eye than the near fade count less.
+     */
+    private static double rayIntegral(double elevation, double lateralAngle, double horizontalDistance,
+            double lightHeight, double tiltSigma, double refractiveIndex, double sceneDistance, double nearFade,
+            double horizon, double ceiling, double top) {
         double azimuth = Math.asin(Math.sin(lateralAngle) / Math.cos(elevation));
         double directionX = Math.cos(elevation) * Math.cos(azimuth);
         double directionY = Math.cos(elevation) * Math.sin(azimuth);
@@ -1665,7 +2088,8 @@ public final class LightPillarGameTests {
             double toLightY = -distance * directionY;
             double toLightZ = lightHeight - distance * directionZ;
             // The light leaves the light toward the crystal rising at this angle over the horizontal:
-            if (!(Math.atan2(-toLightZ, Math.hypot(toLightX, toLightY)) > horizon)) {
+            double rising = Math.atan2(-toLightZ, Math.hypot(toLightX, toLightY));
+            if (!((rising > horizon && rising < ceiling) || rising > top)) {
                 continue;
             }
             double lightDistance = Math.sqrt(toLightX * toLightX + toLightY * toLightY + toLightZ * toLightZ);
@@ -1680,9 +2104,47 @@ public final class LightPillarGameTests {
             double cosineOfIncidence = Math.abs(toLightX * halfX + toLightY * halfY + toLightZ * halfZ)
                     / (lightDistance * halfLength);
             total += 0.25 * IceMirror.slabReflectance(cosineOfIncidence, refractiveIndex)
-                    * IceMirror.tiltDensity(tilt, tiltSigma) / (lightDistance * lightDistance) * step;
+                    * IceMirror.tiltDensity(tilt, tiltSigma) / (lightDistance * lightDistance) * step
+                    * rayNearWeight(distance, nearFade);
         }
         return total;
+    }
+
+    /**
+     * The share that the crystals at the distance along the view ray count with for the near fade, worked out here
+     * rather than by LightPillarOptics.nearWeight.
+     */
+    private static double rayNearWeight(double distance, double nearFade) {
+        if (nearFade == 0.0) {
+            return 1.0;
+        }
+        double share = Math.max(0.0, Math.min(1.0, (distance - 0.25 * nearFade) / (0.75 * nearFade)));
+        return share * share * (3.0 - 2.0 * share);
+    }
+
+    /**
+     * The near fade and the horizon, ceiling, and top of one case of the ray integral test, for the case number
+     * counted from 1 and the elevation and tilt spread in radians.
+     */
+    private static double[] rayIntegralCase(int caseNumber, double elevation, double tiltSigma) {
+        double open = LightPillarHorizons.OPEN;
+        switch (caseNumber) {
+            case 1:
+                return new double[]{8.0, open, open, open};
+            case 2:
+                return new double[]{32.0, open, open, open};
+            case 3:
+                return new double[]{0.0, open, elevation - 2.0 * tiltSigma, elevation + 2.0 * tiltSigma};
+            case 4:
+                return new double[]{0.0, elevation - 6.0 * tiltSigma, elevation, elevation + 4.0 * tiltSigma};
+            case 5:
+                return new double[]{0.0, elevation - 4.0 * tiltSigma, elevation + 4.0 * tiltSigma,
+                        LightPillarHorizons.CLOSED};
+            case 6:
+                return new double[]{0.0, open, elevation + 2.0 * tiltSigma, LightPillarHorizons.CLOSED};
+            default:
+                return new double[]{8.0, open, elevation - 2.0 * tiltSigma, elevation + 2.0 * tiltSigma};
+        }
     }
 
     /**
@@ -1819,6 +2281,29 @@ public final class LightPillarGameTests {
                 + actual + " instead of " + expected);
     }
 
+    private static void assertCeilingSample(GameTestHelper helper, HorizonSetup setup, int bin, int sample,
+            double expected) {
+        float actual = setup.horizons().ceilingSample(setup.slot(), bin, sample);
+        helper.assertTrue(Math.abs(actual - expected) <= 1.0e-6, "The ceiling of sample " + sample + " of bin " + bin
+                + " is " + actual + " instead of " + expected);
+    }
+
+    private static void assertTopSample(GameTestHelper helper, HorizonSetup setup, int bin, int sample,
+            double expected) {
+        float actual = setup.horizons().topSample(setup.slot(), bin, sample);
+        helper.assertTrue(Math.abs(actual - expected) <= 1.0e-6, "The top of sample " + sample + " of bin " + bin
+                + " is " + actual + " instead of " + expected);
+    }
+
+    private static void assertCeilingAndTopMatchTheHorizon(GameTestHelper helper, HorizonSetup setup, int bin,
+            int sample) {
+        float horizon = setup.horizons().sample(setup.slot(), bin, sample);
+        float ceiling = setup.horizons().ceilingSample(setup.slot(), bin, sample);
+        float top = setup.horizons().topSample(setup.slot(), bin, sample);
+        helper.assertTrue(ceiling == horizon && top == horizon, "The ceiling " + ceiling + " and the top " + top
+                + " of sample " + sample + " of bin " + bin + " are not the horizon " + horizon);
+    }
+
     private static void assertSamplesNearZero(GameTestHelper helper, HorizonSetup setup, int bin, int firstSample) {
         for (int sample = firstSample; sample < LightPillarHorizons.SAMPLES; sample++) {
             float actual = setup.horizons().sample(setup.slot(), bin, sample);
@@ -1872,5 +2357,41 @@ public final class LightPillarGameTests {
 
     private static String describeBins(long bins) {
         return "0x" + Long.toHexString(bins);
+    }
+
+    /**
+     * The height up to which a column is solid, or LightPillarHorizons.NO_BLOCKS for a column that cannot be read.
+     */
+    private interface ColumnHeights {
+        int solidUpTo(int blockX, int blockZ);
+    }
+
+    /**
+     * Columns that stop light with whole blocks from SOLID_FROM up to a height per column.
+     */
+    private static final class SolidColumns implements LightPillarHorizons.Columns {
+        private static final int SOLID_FROM = -64;
+        private final ColumnHeights heights;
+        private int solidUpTo;
+
+        private SolidColumns(ColumnHeights heights) {
+            this.heights = heights;
+        }
+
+        @Override
+        public int beginColumn(int blockX, int blockZ) {
+            solidUpTo = heights.solidUpTo(blockX, blockZ);
+            return solidUpTo == LightPillarHorizons.NO_BLOCKS ? LightPillarHorizons.NO_BLOCKS : solidUpTo - 1;
+        }
+
+        @Override
+        public double stoppedHeight(int blockY) {
+            return blockY < solidUpTo ? 1.0 : LightPillarOccluders.PASSES;
+        }
+
+        @Override
+        public int lowestBlockY() {
+            return SOLID_FROM;
+        }
     }
 }

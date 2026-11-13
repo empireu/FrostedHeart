@@ -49,6 +49,11 @@ final class LightPillarOptics {
      */
     private static final double MOST_RIBBON_SPREADS = 8.0;
     /**
+     * Crystals nearer to the eye than this share of the near fade do not count, since too few of them line up behind
+     * each pixel to show as a band.
+     */
+    static final double NEAR_FADE_START_SHARE = 0.25;
+    /**
      * The smallest value before sRGB encoding that a pillar adds to the display and is still drawn, which encodes to
      * half a step of 255.
      */
@@ -181,17 +186,29 @@ final class LightPillarOptics {
     }
 
     /**
-     * The radiance of the pillar in the diamond dust, as radiance gives it but per unit face area of the plates per
-     * volume at the bottom of the dust. Each reflection takes the face area at its crystals from dustDensity and is
-     * dimmed along its way from the light and to the eye by the extinction per block at the bottom of the dust.
-     * The lateral blur in radians widens the pillar on the sky without changing its light. Only crystals nearer to the
-     * eye than the scene distance count, which is infinite where no scene stands, and only crystals whose light leaves
-     * the light rising more steeply than the horizon, in radians, which is LightPillarHorizons.OPEN where nothing stands
-     * around the light. light_pillars.glsl computes the same.
+     * The radiance of the pillar in the diamond dust, as dustRadiance gives it with every crystal counted near the eye
+     * and with no blocks above the ground around the light.
      */
     static double dustRadiance(double elevation, double lateralAngle, double horizontalDistance, double lightHeight,
             double tiltSigma, double refractiveIndex, double lateralBlur, double dustBottomHeight, double extinction,
             double sceneDistance, double horizon) {
+        return dustRadiance(elevation, lateralAngle, horizontalDistance, lightHeight, tiltSigma, refractiveIndex,
+                lateralBlur, dustBottomHeight, extinction, sceneDistance, 0.0, horizon, horizon, horizon);
+    }
+
+    /**
+     * The radiance of the pillar in the diamond dust, as radiance gives it but per unit face area of the plates per
+     * volume at the bottom of the dust. Each reflection takes the face area at its crystals from dustDensity and is
+     * dimmed along its way from the light and to the eye by the extinction per block at the bottom of the dust.
+     * The lateral blur in radians widens the pillar on the sky without changing its light. Only crystals nearer to the
+     * eye than the scene distance count, which is infinite where no scene stands. Crystals nearer to the eye than the
+     * near fade in blocks count less, from none at NEAR_FADE_START_SHARE of it, unless it is 0. Only crystals whose light
+     * leaves the light rising between the horizon and the ceiling or above the top of LightPillarHorizons count, in
+     * radians. light_pillars.glsl computes the same.
+     */
+    static double dustRadiance(double elevation, double lateralAngle, double horizontalDistance, double lightHeight,
+            double tiltSigma, double refractiveIndex, double lateralBlur, double dustBottomHeight, double extinction,
+            double sceneDistance, double nearFade, double horizon, double ceiling, double top) {
         double lightElevation = Math.atan2(lightHeight, horizontalDistance);
         double sineOfOffset = Math.sin(elevation - lightElevation);
         if (!(sineOfOffset > 0.0)) {
@@ -202,11 +219,27 @@ final class LightPillarOptics {
         if (!(lightToRay > 0.0)) {
             return 0.0;
         }
-        // The distance to the crystals falls as their tilt rises, and it is the scene distance at this tilt:
-        double nearTilt = elevation - 0.5 * Math.atan2(lightToRay,
-                lightDistance * Math.cos(elevation - lightElevation) - sceneDistance);
-        double lowestTilt = Math.max(lowestTilt(elevation, tiltSigma), nearTilt);
-        double highestTilt = highestTilt(elevation, lightElevation, tiltSigma, horizon);
+        double lowestTilt = Math.max(lowestTilt(elevation, tiltSigma),
+                tiltAtDistance(elevation, lightElevation, lightDistance, lightToRay, sceneDistance));
+        double highestTilt = highestTilt(elevation, lightElevation, tiltSigma, lightDistance, lightToRay, nearFade);
+        // The light leaves the light rising at the elevation minus twice the tilt:
+        double sum = tiltSum(lowestTilt, Math.min(highestTilt, 0.5 * (elevation - top)), elevation, lateralAngle,
+                lightHeight, lightElevation, lightDistance, lightToRay, tiltSigma, refractiveIndex, lateralBlur,
+                dustBottomHeight, extinction, nearFade)
+                + tiltSum(Math.max(lowestTilt, 0.5 * (elevation - ceiling)),
+                Math.min(highestTilt, 0.5 * (elevation - horizon)), elevation, lateralAngle, lightHeight,
+                lightElevation, lightDistance, lightToRay, tiltSigma, refractiveIndex, lateralBlur, dustBottomHeight,
+                extinction, nearFade);
+        return sum / (2.0 * lightToRay);
+    }
+
+    /**
+     * The reflections of dustRadiance for the tilts from the lowest to the highest tilt, summed with the 8 point Gauss
+     * Legendre rule.
+     */
+    private static double tiltSum(double lowestTilt, double highestTilt, double elevation, double lateralAngle,
+            double lightHeight, double lightElevation, double lightDistance, double lightToRay, double tiltSigma,
+            double refractiveIndex, double lateralBlur, double dustBottomHeight, double extinction, double nearFade) {
         if (!(highestTilt > lowestTilt)) {
             return 0.0;
         }
@@ -228,9 +261,31 @@ final class LightPillarOptics {
                     + dustOpticalDepth(crystalHeight, 0.0, eyeLeg, extinction, dustBottomHeight);
             sum += WEIGHTS[node] * IceMirror.slabReflectance(Math.sin(elevation - alongTilt), refractiveIndex)
                     * gaussian(alongTilt, tiltVariance) * gaussian(lateralAngle * acrossScale, acrossVariance)
-                    * dustDensity(crystalHeight, dustBottomHeight) * Math.exp(-opticalDepth);
+                    * dustDensity(crystalHeight, dustBottomHeight) * Math.exp(-opticalDepth)
+                    * nearWeight(eyeLeg, nearFade);
         }
-        return sum * halfRange / (2.0 * lightToRay);
+        return sum * halfRange;
+    }
+
+    /**
+     * The share that crystals at the distance from the eye count with for the near fade, from none at
+     * NEAR_FADE_START_SHARE of it up to all at the near fade, or all when the near fade is 0.
+     */
+    static double nearWeight(double eyeLeg, double nearFade) {
+        if (!(nearFade > 0.0)) {
+            return 1.0;
+        }
+        double start = NEAR_FADE_START_SHARE * nearFade;
+        double share = Math.max(0.0, Math.min(1.0, (eyeLeg - start) / (nearFade - start)));
+        return share * share * (3.0 - 2.0 * share);
+    }
+
+    /**
+     * The tilt of the crystals on the view ray at the distance from the eye. The distance falls as the tilt rises.
+     */
+    private static double tiltAtDistance(double elevation, double lightElevation, double lightDistance,
+            double lightToRay, double distance) {
+        return elevation - 0.5 * Math.atan2(lightToRay, lightDistance * Math.cos(elevation - lightElevation) - distance);
     }
 
     /**
@@ -240,11 +295,36 @@ final class LightPillarOptics {
      */
     static double widestLateralSpread(double elevation, double horizontalDistance, double lightHeight,
             double tiltSigma, double lateralBlur, double horizon) {
+        return widestLateralSpread(elevation, horizontalDistance, lightHeight, tiltSigma, lateralBlur, 0.0, horizon,
+                horizon, horizon);
+    }
+
+    /**
+     * The largest standard deviation across the pillar at the elevation, in radians on the sky, among the reflections
+     * that dustRadiance sums without a scene for the near fade, the horizon, the ceiling, and the top.
+     */
+    static double widestLateralSpread(double elevation, double horizontalDistance, double lightHeight,
+            double tiltSigma, double lateralBlur, double nearFade, double horizon, double ceiling, double top) {
         double lightElevation = Math.atan2(lightHeight, horizontalDistance);
         double sineOfOffset = Math.sin(elevation - lightElevation);
+        if (!(sineOfOffset > 0.0)) {
+            return 0.0;
+        }
+        double lightDistance = Math.hypot(horizontalDistance, lightHeight);
+        double lightToRay = lightDistance * sineOfOffset;
         double lowestTilt = lowestTilt(elevation, tiltSigma);
-        double highestTilt = highestTilt(elevation, lightElevation, tiltSigma, horizon);
-        if (!(sineOfOffset > 0.0) || !(highestTilt > lowestTilt)) {
+        double highestTilt = highestTilt(elevation, lightElevation, tiltSigma, lightDistance, lightToRay, nearFade);
+        return Math.max(
+                spreadOver(lowestTilt, Math.min(highestTilt, 0.5 * (elevation - top)), elevation, lightElevation,
+                        sineOfOffset, tiltSigma, lateralBlur),
+                spreadOver(Math.max(lowestTilt, 0.5 * (elevation - ceiling)),
+                        Math.min(highestTilt, 0.5 * (elevation - horizon)), elevation, lightElevation, sineOfOffset,
+                        tiltSigma, lateralBlur));
+    }
+
+    private static double spreadOver(double lowestTilt, double highestTilt, double elevation, double lightElevation,
+            double sineOfOffset, double tiltSigma, double lateralBlur) {
+        if (!(highestTilt > lowestTilt)) {
             return 0.0;
         }
         double middleTilt = 0.5 * (highestTilt + lowestTilt);
@@ -302,11 +382,16 @@ final class LightPillarOptics {
     }
 
     /**
-     * The highest tilt also cut where the light leaves the light at the horizon, since it leaves rising at the
-     * elevation minus twice the tilt.
+     * The highest tilt also cut where the crystals come nearer to the eye than the start of the near fade.
      */
-    private static double highestTilt(double elevation, double lightElevation, double tiltSigma, double horizon) {
-        return Math.min(highestTilt(elevation, lightElevation, tiltSigma), 0.5 * (elevation - horizon));
+    private static double highestTilt(double elevation, double lightElevation, double tiltSigma, double lightDistance,
+            double lightToRay, double nearFade) {
+        double highest = highestTilt(elevation, lightElevation, tiltSigma);
+        if (!(nearFade > 0.0)) {
+            return highest;
+        }
+        return Math.min(highest, tiltAtDistance(elevation, lightElevation, lightDistance, lightToRay,
+                NEAR_FADE_START_SHARE * nearFade));
     }
 
     private static double gaussian(double value, double variance) {

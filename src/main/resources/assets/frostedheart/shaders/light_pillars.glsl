@@ -5,6 +5,8 @@
 uniform mat4 viewProjection;
 // Light positions relative to the eye, then the horizon around the light toward the eye in radians:
 uniform vec4 lights[48];
+// The ceiling and the top around the light toward the eye in radians, as LightPillarHorizons has them:
+uniform vec2 overhangs[48];
 // Colors times strength and brightness, then the opacity:
 uniform vec4 colors[48];
 uniform vec2 tiltSigmas;
@@ -17,6 +19,8 @@ uniform float lateralBlur;
 uniform float marginAngle;
 uniform float visibleValue;
 uniform float highestElevation;
+// Crystals nearer to the eye than this many blocks count less, and none count nearer than a quarter of it, unless it is 0:
+uniform float nearFade;
 
 const float PI = 3.14159265358979;
 // A scene distance beyond every crystal, for directions where no scene stands:
@@ -30,6 +34,7 @@ const float TILT_RANGE_SIGMAS = 4.0;
 const float SMALLEST_RISE = 0.01;
 const float SMALLEST_SINE_AT_CRYSTAL = 1.0e-6;
 const float MOST_RIBBON_SPREADS = 8.0;
+const float NEAR_FADE_START_SHARE = 0.25;
 
 float slabReflectance(float sineOfGrazingAngle) {
     float cosineOfIncidence = clamp(sineOfGrazingAngle, 0.0, 1.0);
@@ -64,21 +69,19 @@ float gaussian(float value, float variance) {
     return exp(-value * value / (2.0 * variance)) / sqrt(2.0 * PI * variance);
 }
 
-// Returns the radiance per unit intensity and unit face area per volume at the dust bottom from the crystals nearer than the scene distance whose light leaves the light above the horizon, and writes the widest spread across the pillar:
-float pillarRadiance(float elevation, float lateralAngle, float horizontalDistance, float lightHeight, float tiltSigma,
-        float sceneDistance, float horizon, out float widestSpread) {
-    widestSpread = 0.0;
-    float lightElevation = atan(lightHeight, horizontalDistance);
-    float sineOfOffset = sin(elevation - lightElevation);
-    float lightDistance = length(vec2(horizontalDistance, lightHeight));
-    float lightToRay = lightDistance * sineOfOffset;
-    // The distance to the crystals falls as their tilt rises, and it is the scene distance at this tilt:
-    float nearTilt = elevation - 0.5 * atan(lightToRay, lightDistance * cos(elevation - lightElevation) - sceneDistance);
-    float lowestTilt = max(-TILT_RANGE_SIGMAS * tiltSigma, nearTilt);
-    // The light leaves the light rising at the elevation minus twice the tilt, and it is the horizon at this tilt:
-    float highestTilt = min(min(TILT_RANGE_SIGMAS * tiltSigma, 0.5 * (elevation + lightElevation)),
-            0.5 * (elevation - horizon));
-    if (!(sineOfOffset > 0.0) || !(highestTilt > lowestTilt)) {
+float nearWeight(float eyeLeg) {
+    return nearFade > 0.0 ? smoothstep(NEAR_FADE_START_SHARE * nearFade, nearFade, eyeLeg) : 1.0;
+}
+
+// The tilt of the crystals on the view ray at the distance from the eye. The distance falls as the tilt rises:
+float tiltAtDistance(float elevation, float lightElevation, float lightDistance, float lightToRay, float distance) {
+    return elevation - 0.5 * atan(lightToRay, lightDistance * cos(elevation - lightElevation) - distance);
+}
+
+// Returns the reflections for the tilts from the lowest to the highest, and widens the widest spread across the pillar to theirs:
+float tiltSum(float lowestTilt, float highestTilt, float elevation, float lateralAngle, float lightHeight,
+        float lightElevation, float lightDistance, float lightToRay, float tiltSigma, inout float widestSpread) {
+    if (!(highestTilt > lowestTilt)) {
         return 0.0;
     }
     float middleTilt = 0.5 * (highestTilt + lowestTilt);
@@ -100,9 +103,36 @@ float pillarRadiance(float elevation, float lateralAngle, float horizontalDistan
                 + dustOpticalDepth(crystalHeight, 0.0, eyeLeg);
         sum += WEIGHTS[node] * slabReflectance(sin(elevation - alongTilt)) * gaussian(alongTilt, tiltVariance)
                 * gaussian(lateralAngle * acrossScale, acrossVariance) * dustDensity(crystalHeight)
-                * exp(-opticalDepth);
+                * exp(-opticalDepth) * nearWeight(eyeLeg);
     }
-    return sum * halfRange / (2.0 * lightToRay);
+    return sum * halfRange;
+}
+
+// Returns the radiance per unit intensity and unit face area per volume at the dust bottom from the crystals nearer than the scene distance whose light gets past the blocks around the light, and writes the widest spread across the pillar.
+// The horizons are the horizon, the ceiling, and the top of LightPillarHorizons:
+float pillarRadiance(float elevation, float lateralAngle, float horizontalDistance, float lightHeight, float tiltSigma,
+        float sceneDistance, vec3 horizons, out float widestSpread) {
+    widestSpread = 0.0;
+    float lightElevation = atan(lightHeight, horizontalDistance);
+    float sineOfOffset = sin(elevation - lightElevation);
+    if (!(sineOfOffset > 0.0)) {
+        return 0.0;
+    }
+    float lightDistance = length(vec2(horizontalDistance, lightHeight));
+    float lightToRay = lightDistance * sineOfOffset;
+    float lowestTilt = max(-TILT_RANGE_SIGMAS * tiltSigma,
+            tiltAtDistance(elevation, lightElevation, lightDistance, lightToRay, sceneDistance));
+    float highestTilt = min(TILT_RANGE_SIGMAS * tiltSigma, 0.5 * (elevation + lightElevation));
+    if (nearFade > 0.0) {
+        highestTilt = min(highestTilt, tiltAtDistance(elevation, lightElevation, lightDistance, lightToRay,
+                NEAR_FADE_START_SHARE * nearFade));
+    }
+    // The light leaves the light rising at the elevation minus twice the tilt:
+    float sum = tiltSum(lowestTilt, min(highestTilt, 0.5 * (elevation - horizons.z)), elevation, lateralAngle,
+            lightHeight, lightElevation, lightDistance, lightToRay, tiltSigma, widestSpread)
+            + tiltSum(max(lowestTilt, 0.5 * (elevation - horizons.y)), min(highestTilt, 0.5 * (elevation - horizons.x)),
+            elevation, lateralAngle, lightHeight, lightElevation, lightDistance, lightToRay, tiltSigma, widestSpread);
+    return sum / (2.0 * lightToRay);
 }
 
 #ifdef VERTEX_SHADER
@@ -114,7 +144,7 @@ flat out vec3 pillarColor;
 flat out float pillarOpacity;
 flat out float pillarTiltSigma;
 flat out float pillarShare;
-flat out float pillarHorizon;
+flat out vec3 pillarHorizons;
 
 const float SEGMENTS = 16.0;
 // Ribbons only cover the pillar on the screen, so they all stand at this distance from the eye:
@@ -129,11 +159,11 @@ float rowElevation(float row, float firstRow) {
 }
 
 // Returns the angle off the center beyond which the pillar stays below the visible value, plus the margin:
-float halfWidthAt(float elevation, float horizontalDistance, float lightHeight, float tiltSigma, float horizon,
+float halfWidthAt(float elevation, float horizontalDistance, float lightHeight, float tiltSigma, vec3 horizons,
         float valueScale) {
     float widestSpread;
     float center = valueScale * pillarRadiance(elevation, 0.0, horizontalDistance, lightHeight, tiltSigma,
-            NO_SCENE_DISTANCE, horizon, widestSpread);
+            NO_SCENE_DISTANCE, horizons, widestSpread);
     if (!(center > visibleValue)) {
         return 0.0;
     }
@@ -146,7 +176,7 @@ void main() {
     int slot = ribbon / 2;
     int kind = ribbon - 2 * slot;
     vec3 light = lights[slot].xyz;
-    float horizon = lights[slot].w;
+    vec3 horizons = vec3(lights[slot].w, overhangs[slot]);
     vec4 color = colors[slot];
     float tiltSigma = tiltSigmas[kind];
     float share = shares[kind];
@@ -155,7 +185,7 @@ void main() {
     pillarOpacity = color.a;
     pillarTiltSigma = tiltSigma;
     pillarShare = share;
-    pillarHorizon = horizon;
+    pillarHorizons = horizons;
     relativePosition = vec3(0.0);
     gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
 
@@ -167,7 +197,7 @@ void main() {
     float lightElevation = atan(light.y, horizontalDistance);
     // Below the horizon minus the most tilted faces, no crystal gets light past the blocks around the light:
     float lowest = max(max(lightElevation, -lightElevation - 2.0 * TILT_RANGE_SIGMAS * tiltSigma),
-            horizon - 2.0 * TILT_RANGE_SIGMAS * tiltSigma);
+            horizons.x - 2.0 * TILT_RANGE_SIGMAS * tiltSigma);
     if (!(highestElevation > lowest)) {
         return;
     }
@@ -179,8 +209,15 @@ void main() {
     float halfWidth = 0.0;
     for (float row = max(Position.y - 1.0, 0.0); row <= min(Position.y + 1.0, SEGMENTS); row += 0.5) {
         float rowEvaluated = clamp(rowElevation(row, firstRow), lowestEvaluated, highestElevation);
-        halfWidth = max(halfWidth, halfWidthAt(rowEvaluated, horizontalDistance, light.y, tiltSigma, horizon,
+        halfWidth = max(halfWidth, halfWidthAt(rowEvaluated, horizontalDistance, light.y, tiltSigma, horizons,
                 valueScale));
+    }
+    // The pillar can show again above the top in a band narrower than a half row:
+    float reappearance = horizons.z + 2.0 * tiltSigma;
+    if (horizons.y < horizons.z && reappearance > rowElevation(max(Position.y - 1.0, 0.0), firstRow)
+            && reappearance < rowElevation(min(Position.y + 1.0, SEGMENTS), firstRow)) {
+        halfWidth = max(halfWidth, halfWidthAt(clamp(reappearance, lowestEvaluated, highestElevation),
+                horizontalDistance, light.y, tiltSigma, horizons, valueScale));
     }
 
     vec2 toward = light.xz / horizontalDistance;
@@ -204,7 +241,7 @@ flat in vec3 pillarColor;
 flat in float pillarOpacity;
 flat in float pillarTiltSigma;
 flat in float pillarShare;
-flat in float pillarHorizon;
+flat in vec3 pillarHorizons;
 out vec4 fragColor;
 
 vec3 encodeSrgb(vec3 linear) {
@@ -229,7 +266,7 @@ void main() {
     float lateralAngle = asin(clamp(dot(direction.xz, vec2(-toward.y, toward.x)), -1.0, 1.0));
     float widestSpread;
     float radiance = pillarShare * extinction * pillarRadiance(elevation, lateralAngle, horizontalDistance,
-            pillarLight.y, pillarTiltSigma, sceneDistance, pillarHorizon, widestSpread);
+            pillarLight.y, pillarTiltSigma, sceneDistance, pillarHorizons, widestSpread);
     if (!(radiance > 0.0)) {
         discard;
     }
