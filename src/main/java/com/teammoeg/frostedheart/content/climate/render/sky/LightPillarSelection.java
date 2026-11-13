@@ -19,6 +19,10 @@
 
 package com.teammoeg.frostedheart.content.climate.render.sky;
 
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.SectionPos;
+import net.minecraft.util.Mth;
+
 import java.util.Arrays;
 
 /**
@@ -44,6 +48,10 @@ public final class LightPillarSelection {
     private static final double SCORE_ELEVATION_TANGENT = Math.tan(Math.toRadians(10.0));
     private static final double HIGHEST_SCORE_TANGENT = Math.tan(Math.toRadians(85.0));
     private static final long NO_KEY = Long.MIN_VALUE;
+    /**
+     * Shifts a cluster's cell coordinate to its chunk coordinate, since a chunk is 4 cells wide.
+     */
+    private static final int CELLS_PER_CHUNK_SHIFT = 2;
 
     private final double[] heapScores = new double[SLOT_COUNT];
     private final int[] heapClusters = new int[SLOT_COUNT];
@@ -86,11 +94,28 @@ public final class LightPillarSelection {
     }
 
     /**
-     * Chooses the best SLOT_COUNT clusters by score for the eye and steps every slot's fade.
+     * Whether a cluster with the key lies in a chunk within the radius in chunks around the eye's chunk. The chunks are
+     * those whose offsets x and z from the eye's chunk satisfy x * x + z * z <= radius * radius + radius.
      */
-    public void choose(LightPillarClusters clusters, double eyeX, double eyeY, double eyeZ, double dustBottomY) {
+    public static boolean isWithinChunkRadius(long clusterKey, int eyeChunkX, int eyeChunkZ, int chunkRadius) {
+        long offsetX = (BlockPos.getX(clusterKey) >> CELLS_PER_CHUNK_SHIFT) - eyeChunkX;
+        long offsetZ = (BlockPos.getZ(clusterKey) >> CELLS_PER_CHUNK_SHIFT) - eyeChunkZ;
+        return offsetX * offsetX + offsetZ * offsetZ <= (long) chunkRadius * chunkRadius + chunkRadius;
+    }
+
+    /**
+     * Chooses the best SLOT_COUNT clusters by score for the eye, among the clusters within the radius in chunks around
+     * the eye's chunk, and steps every slot's fade.
+     */
+    public void choose(LightPillarClusters clusters, double eyeX, double eyeY, double eyeZ, double dustBottomY,
+            int chunkRadius) {
         heapSize = 0;
+        int eyeChunkX = SectionPos.blockToSectionCoord(Mth.floor(eyeX));
+        int eyeChunkZ = SectionPos.blockToSectionCoord(Mth.floor(eyeZ));
         for (int cluster = 0; cluster < clusters.count(); cluster++) {
+            if (!isWithinChunkRadius(clusters.key(cluster), eyeChunkX, eyeChunkZ, chunkRadius)) {
+                continue;
+            }
             double offsetX = clusters.x(cluster) - eyeX;
             double offsetZ = clusters.z(cluster) - eyeZ;
             double clusterScore = score(clusters.red(cluster), clusters.green(cluster), clusters.blue(cluster),

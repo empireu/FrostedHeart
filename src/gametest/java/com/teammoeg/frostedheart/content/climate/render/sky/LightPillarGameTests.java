@@ -21,9 +21,16 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
 
 import com.mojang.logging.LogUtils;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.SectionPos;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.CampfireBlock;
+import net.minecraft.world.level.block.FireBlock;
+import net.minecraft.world.level.block.LiquidBlock;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
 import org.slf4j.Logger;
@@ -34,8 +41,8 @@ import java.util.Locale;
 
 /**
  * Checks the reflection off plate crystals and the light pillar they show against an integral along the view ray, the
- * pillar in the diamond dust that the shader draws with its ribbons and brightness, and how the lights that show
- * pillars are merged, colored, chosen, and faded.
+ * pillar in the diamond dust that the shader draws with its ribbons and brightness, how world changes queue the
+ * sections whose lights are found again, and how the lights that show pillars are merged, colored, chosen, and faded.
  */
 @GameTestHolder("frostedheart_calculated_sky")
 @PrefixGameTestTemplate(false)
@@ -99,6 +106,10 @@ public final class LightPillarGameTests {
      */
     private static final double[] SCENE_DISTANCE_SHARES = {0.25, 0.75, 0.95, 1.0, 1.05, 1.5, 4.0};
     private static final double[] SCENE_LATERAL_SPREADS = {0.0, 1.0};
+    /**
+     * A chunk radius that reaches the row of lights of the selection tests, which is about 58 chunks along x.
+     */
+    private static final int WIDE_CHUNK_RADIUS = 1000;
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void iceMirrorReflectsLikeASlab(GameTestHelper helper) {
@@ -529,11 +540,7 @@ public final class LightPillarGameTests {
         clusters.addLight(35, 66, -13, 0.5F, 0.25F, 0.125F);
         clusters.addLight(40, 65, -15, 0.0F, 0.0F, 1.0F);
         clusters.endSection();
-        helper.assertTrue(clusters.count() == 0 && clusters.fillingCount() == 2,
-                "A pass that is not finished shows " + clusters.count() + " clusters and fills "
-                        + clusters.fillingCount() + " instead of 0 and 2");
-        clusters.finishPass();
-        helper.assertTrue(clusters.count() == 2, "The finished pass has " + clusters.count() + " clusters, not 2");
+        helper.assertTrue(clusters.count() == 2, "The finished section has " + clusters.count() + " clusters, not 2");
         int merged = clusterWithKey(clusters, BlockPos.asLong(8, 16, -4));
         int single = clusterWithKey(clusters, BlockPos.asLong(10, 16, -4));
         helper.assertTrue(merged >= 0 && single >= 0, "The clusters do not have the keys of their cells");
@@ -553,13 +560,96 @@ public final class LightPillarGameTests {
                         + clusters.blue(merged) + " instead of 1.5 0.75 0.375");
         helper.assertTrue(clusters.x(single) == 40.5 && clusters.y(single) == 65.5 && clusters.z(single) == -14.5,
                 "A single light's cluster is not centered on its block");
+
+        clusters.beginSection(3, 4, -1);
+        clusters.addLight(56, 70, -10, 1.0F, 1.0F, 1.0F);
+        clusters.endSection();
+        long otherKey = BlockPos.asLong(14, 17, -3);
+        helper.assertTrue(clusters.count() == 3 && clusters.sectionCount() == 2,
+                "A second section gives " + clusters.count() + " clusters in " + clusters.sectionCount()
+                        + " sections instead of 3 in 2");
+        helper.assertTrue(clusterWithKey(clusters, otherKey) >= 0,
+                "The second section has no cluster with the key " + BlockPos.of(otherKey).toShortString());
+        clusters.beginSection(2, 4, -1);
+        clusters.addLight(33, 65, -15, 1.0F, 1.0F, 1.0F);
+        clusters.endSection();
+        helper.assertTrue(clusterWithKey(clusters, BlockPos.asLong(10, 16, -4)) < 0,
+                "The old cluster of the cell " + BlockPos.of(BlockPos.asLong(10, 16, -4)).toShortString()
+                        + " is still there after its section was begun again");
+        int replaced = clusterWithKey(clusters, BlockPos.asLong(8, 16, -4));
+        helper.assertTrue(replaced >= 0, "The cell " + BlockPos.of(BlockPos.asLong(8, 16, -4)).toShortString()
+                + " has no cluster after its section was begun again");
+        helper.assertTrue(clusters.x(replaced) == 33.5 && clusters.y(replaced) == 65.5 && clusters.z(replaced) == -14.5,
+                "The replaced cluster is centered at " + clusters.x(replaced) + " " + clusters.y(replaced) + " "
+                        + clusters.z(replaced) + " instead of 33.5 65.5 -14.5");
+        helper.assertTrue(clusters.red(replaced) == 1.0F && clusters.green(replaced) == 1.0F
+                        && clusters.blue(replaced) == 1.0F,
+                "The replaced cluster has the strengths " + clusters.red(replaced) + " " + clusters.green(replaced) + " "
+                        + clusters.blue(replaced) + " instead of 1 1 1");
+        helper.assertTrue(clusterWithKey(clusters, otherKey) >= 0,
+                "The cluster of the other section went away with the section begun again");
+        helper.assertTrue(clusters.count() == 2 && clusters.sectionCount() == 2,
+                "After the section was begun again there are " + clusters.count() + " clusters in "
+                        + clusters.sectionCount() + " sections instead of 2 in 2");
+
         clusters.beginSection(2, 4, -1);
         clusters.endSection();
-        clusters.finishPass();
-        helper.assertTrue(clusters.count() == 0, "A pass without lights still has " + clusters.count() + " clusters");
-        helper.assertTrue(LightPillarClusters.sectionCanShowPillars(63, 71)
-                        && !LightPillarClusters.sectionCanShowPillars(63, 72),
-                "Sections are not skipped 8 blocks below the lowest surface");
+        helper.assertTrue(clusterWithKey(clusters, BlockPos.asLong(8, 16, -4)) < 0,
+                "A section begun again without lights keeps its cluster");
+        helper.assertTrue(clusterWithKey(clusters, otherKey) >= 0,
+                "A section begun again without lights removed the cluster of another section");
+        helper.assertTrue(clusters.count() == 1 && clusters.sectionCount() == 1,
+                "A section begun again without lights leaves " + clusters.count() + " clusters in "
+                        + clusters.sectionCount() + " sections instead of 1 in 1");
+
+        LightPillarClusters column = new LightPillarClusters();
+        for (int sectionY = -4; sectionY <= 3; sectionY++) {
+            column.beginSection(5, sectionY, 7);
+            column.addLight(5 * 16 + 8, sectionY * 16 + 8, 7 * 16 + 8, 1.0F, 1.0F, 1.0F);
+            column.endSection();
+        }
+        column.beginSection(6, 0, 7);
+        column.addLight(6 * 16 + 8, 8, 7 * 16 + 8, 1.0F, 1.0F, 1.0F);
+        column.endSection();
+        helper.assertTrue(column.count() == 9 && column.sectionCount() == 9,
+                "The column and its neighbor give " + column.count() + " clusters in " + column.sectionCount()
+                        + " sections instead of 9 in 9");
+        long neighborKey = BlockPos.asLong(26, 2, 30);
+        for (int sectionY = -4; sectionY <= 3; sectionY++) {
+            column.removeSection(5, sectionY, 7);
+            assertDistinctKeys(helper, column, " after removing the section at y " + sectionY + " of the column");
+            int remaining = 4 - sectionY;
+            for (int keptY = sectionY + 1; keptY <= 3; keptY++) {
+                long keptKey = BlockPos.asLong(22, 4 * keptY + 2, 30);
+                helper.assertTrue(clusterWithKey(column, keptKey) >= 0,
+                        "The cluster " + BlockPos.of(keptKey).toShortString() + " went away with the section at y "
+                                + sectionY + " of the column");
+            }
+            helper.assertTrue(clusterWithKey(column, neighborKey) >= 0,
+                    "The cluster of the neighboring column went away with the section at y " + sectionY);
+            helper.assertTrue(column.count() == remaining && column.sectionCount() == remaining,
+                    "After removing the section at y " + sectionY + " of the column there are " + column.count()
+                            + " clusters in " + column.sectionCount() + " sections instead of " + remaining + " in "
+                            + remaining);
+        }
+        for (int sectionY = -4; sectionY <= 3; sectionY++) {
+            column.beginSection(5, sectionY, 7);
+            column.addLight(5 * 16 + 8, sectionY * 16 + 8, 7 * 16 + 8, 1.0F, 1.0F, 1.0F);
+            column.endSection();
+        }
+        helper.assertTrue(column.count() == 9, "The filled column has " + column.count() + " clusters, not 9");
+        column.removeColumn(5, 7, -4, 24);
+        assertDistinctKeys(helper, column, " after removing the column");
+        helper.assertTrue(column.count() == 1 && column.sectionCount() == 1,
+                "Removing the column leaves " + column.count() + " clusters in " + column.sectionCount()
+                        + " sections instead of 1 in 1");
+        helper.assertTrue(clusterWithKey(column, neighborKey) >= 0,
+                "Removing the column removed the cluster of the neighboring column");
+        for (int sectionY = -4; sectionY <= 3; sectionY++) {
+            long removedKey = BlockPos.asLong(22, 4 * sectionY + 2, 30);
+            helper.assertTrue(clusterWithKey(column, removedKey) < 0, "Removing the column kept the cluster "
+                    + BlockPos.of(removedKey).toShortString() + " of its section at y " + sectionY);
+        }
         helper.succeed();
     }
 
@@ -585,7 +675,7 @@ public final class LightPillarGameTests {
         LightPillarClusters clusters = new LightPillarClusters();
         addLightsInARow(clusters, lightCount, -1);
         LightPillarSelection selection = new LightPillarSelection();
-        selection.choose(clusters, 0.0, 0.5, 0.5, 1000.0);
+        selection.choose(clusters, 0.0, 0.5, 0.5, 1000.0, WIDE_CHUNK_RADIUS);
         helper.assertTrue(selection.chosenCount() == LightPillarSelection.SLOT_COUNT
                         && selection.usedCount() == LightPillarSelection.SLOT_COUNT,
                 "The selection chose " + selection.chosenCount() + " and uses " + selection.usedCount() + " slots");
@@ -671,6 +761,249 @@ public final class LightPillarGameTests {
         helper.succeed();
     }
 
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarSkyCheckReadsTheSectionAndTheLayerAbove(GameTestHelper helper) {
+        assertSkyCheck(helper, "no data at all", null, null, true);
+        assertSkyCheck(helper, "no data in the section", new DataLayer(), null, true);
+        assertSkyCheck(helper, "no data above", null, new DataLayer(), true);
+        assertSkyCheck(helper, "dark everywhere", new DataLayer(), new DataLayer(), false);
+        assertSkyCheck(helper, "8 everywhere", new DataLayer(8), new DataLayer(8), false);
+        assertSkyCheck(helper, "9 everywhere", new DataLayer(9), new DataLayer(), true);
+        assertSkyCheck(helper, "15 everywhere", new DataLayer(15), new DataLayer(), true);
+
+        assertSkyCheck(helper, "one block at 9 at 0 0 0", layerWith(0, 0, 0, 9), new DataLayer(), true);
+        assertSkyCheck(helper, "one block at 9 at 15 15 15", layerWith(15, 15, 15, 9), new DataLayer(), true);
+        assertSkyCheck(helper, "one block at 9 at 1 7 4", layerWith(1, 7, 4, 9), new DataLayer(), true);
+        assertSkyCheck(helper, "one block at 8 at 0 0 0", layerWith(0, 0, 0, 8), new DataLayer(), false);
+        assertSkyCheck(helper, "one block at 8 at 15 15 15", layerWith(15, 15, 15, 8), new DataLayer(), false);
+        assertSkyCheck(helper, "one block at 8 at 1 7 4", layerWith(1, 7, 4, 8), new DataLayer(), false);
+
+        assertSkyCheck(helper, "one block at 12 in the lowest layer above at 3 0 7", new DataLayer(),
+                layerWith(3, 0, 7, 12), true);
+        assertSkyCheck(helper, "one block at 15 in the second layer above at 3 1 7", new DataLayer(),
+                layerWith(3, 1, 7, 15), false);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarWorkQueueFollowsLoadsLightAndBlockChanges(GameTestHelper helper) {
+        long column = ChunkPos.asLong(1, 2);
+        long otherColumn = ChunkPos.asLong(-3, 4);
+        long blockInColumn = BlockPos.asLong(1 * 16 + 3, 5 * 16 + 4, 2 * 16 + 5);
+        long otherBlockInSection = BlockPos.asLong(1 * 16 + 9, 5 * 16 + 10, 2 * 16 + 11);
+        BlockState air = Blocks.AIR.defaultBlockState();
+        BlockState torch = Blocks.TORCH.defaultBlockState();
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        BlockState dirt = Blocks.DIRT.defaultBlockState();
+        BlockState lavaSource = Blocks.LAVA.defaultBlockState().setValue(LiquidBlock.LEVEL, 0);
+        BlockState flowingLava = Blocks.LAVA.defaultBlockState().setValue(LiquidBlock.LEVEL, 3);
+        BlockState youngFire = Blocks.FIRE.defaultBlockState().setValue(FireBlock.AGE, 0);
+        BlockState oldFire = Blocks.FIRE.defaultBlockState().setValue(FireBlock.AGE, 5);
+        BlockState litCampfire = Blocks.CAMPFIRE.defaultBlockState().setValue(CampfireBlock.LIT, true);
+        BlockState unlitCampfire = Blocks.CAMPFIRE.defaultBlockState().setValue(CampfireBlock.LIT, false);
+
+        LightPillarWorkQueue queue = new LightPillarWorkQueue();
+        queue.onColumnLoaded(column);
+        helper.assertTrue(!queue.onBlockChanged(blockInColumn, air, torch),
+                "A block change in a column that waits for its light queues its section");
+        helper.assertTrue(queue.queuedSectionCount() == 0 && !queue.nextSection(),
+                "A column that waits for its light has " + queue.queuedSectionCount() + " queued sections");
+        queue.startTracking(-4, 24);
+        helper.assertTrue(queue.onColumnLit(column), "A loaded column does not report that it waited for its light");
+        helper.assertTrue(queue.queuedSectionCount() == 24,
+                "A lit column queues " + queue.queuedSectionCount() + " sections instead of 24");
+        for (int sectionY = -4; sectionY <= 19; sectionY++) {
+            helper.assertTrue(queue.nextSection(), "The lit column has no section left at y " + sectionY);
+            helper.assertTrue(queue.takenSection() == SectionPos.asLong(1, sectionY, 2),
+                    "The lit column took the section " + describeSection(queue.takenSection()) + " instead of y "
+                            + sectionY);
+        }
+        helper.assertTrue(!queue.nextSection(), "The lit column has more than 24 sections");
+        helper.assertTrue(!queue.onColumnLit(column), "A column reports a second time that it waited for its light");
+        helper.assertTrue(queue.queuedSectionCount() == 0,
+                "A column lit twice queues " + queue.queuedSectionCount() + " sections");
+
+        helper.assertTrue(queue.onBlockChanged(blockInColumn, air, torch),
+                "Air turning into a torch does not queue the block's section");
+        drainSections(helper, queue, 1, "after air turned into a torch");
+        helper.assertTrue(queue.onBlockChanged(blockInColumn, torch, air),
+                "A torch turning into air does not queue the block's section");
+        drainSections(helper, queue, 1, "after a torch turned into air");
+        helper.assertTrue(!queue.onBlockChanged(blockInColumn, lavaSource, flowingLava),
+                "Lava changing its level queues the block's section");
+        helper.assertTrue(!queue.onBlockChanged(blockInColumn, youngFire, oldFire),
+                "Fire changing its age queues the block's section");
+        helper.assertTrue(!queue.onBlockChanged(blockInColumn, stone, dirt),
+                "Stone turning into dirt queues the block's section");
+        helper.assertTrue(queue.onBlockChanged(blockInColumn, litCampfire, unlitCampfire),
+                "A lit campfire turning into an unlit one does not queue the block's section");
+        drainSections(helper, queue, 1, "after a campfire went out");
+        helper.assertTrue(!LightPillarWorkQueue.changesPillars(lavaSource, flowingLava),
+                "Lava changing its level from 0 to 3 changes the pillars");
+        helper.assertTrue(!LightPillarWorkQueue.changesPillars(youngFire, oldFire),
+                "Fire changing its age from 0 to 5 changes the pillars");
+        helper.assertTrue(!LightPillarWorkQueue.changesPillars(stone, dirt),
+                "Stone turning into dirt changes the pillars");
+        helper.assertTrue(LightPillarWorkQueue.changesPillars(air, torch),
+                "Air turning into a torch does not change the pillars");
+        helper.assertTrue(LightPillarWorkQueue.changesPillars(torch, air),
+                "A torch turning into air does not change the pillars");
+        helper.assertTrue(LightPillarWorkQueue.changesPillars(litCampfire, unlitCampfire),
+                "A lit campfire turning into an unlit one does not change the pillars");
+
+        helper.assertTrue(queue.onBlockChanged(blockInColumn, air, torch),
+                "The first of two changes in a section does not queue it");
+        helper.assertTrue(!queue.onBlockChanged(otherBlockInSection, air, torch),
+                "A second change in a queued section queues it again");
+        drainSections(helper, queue, 1, "after two changes in one section");
+
+        helper.assertTrue(queue.onSkyLightChanged(SectionPos.asLong(1, 5, 2)) == 2,
+                "A sky light change at y 5 queues " + queue.queuedSectionCount() + " sections instead of 2");
+        drainSections(helper, queue, 2, "after a sky light change at y 5");
+        helper.assertTrue(queue.onSkyLightChanged(SectionPos.asLong(1, 20, 2)) == 1,
+                "A sky light change at y 20 does not queue only y 19");
+        helper.assertTrue(queue.nextSection() && queue.takenSection() == SectionPos.asLong(1, 19, 2),
+                "A sky light change at y 20 queues " + describeSection(queue.takenSection()) + " instead of y 19");
+        drainSections(helper, queue, 0, "after a sky light change at y 20");
+        helper.assertTrue(queue.onSkyLightChanged(SectionPos.asLong(1, -4, 2)) == 1,
+                "A sky light change at y -4 does not queue only y -4");
+        helper.assertTrue(queue.nextSection() && queue.takenSection() == SectionPos.asLong(1, -4, 2),
+                "A sky light change at y -4 queues " + describeSection(queue.takenSection()) + " instead of y -4");
+        drainSections(helper, queue, 0, "after a sky light change at y -4");
+
+        helper.assertTrue(queue.onBlockChanged(otherBlockInSection, air, torch),
+                "A change in a loaded and lit column does not queue its section");
+        queue.onColumnUnloaded(column);
+        helper.assertTrue(!queue.nextSection(), "A queued section of an unloaded column is taken");
+        helper.assertTrue(queue.nextDroppedColumn() && queue.takenColumn() == column,
+                "The unloaded column is not reported as dropped");
+        helper.assertTrue(!queue.nextDroppedColumn(), "The unloaded column is reported twice as dropped");
+
+        queue.stopTracking();
+        queue.onColumnLoaded(column);
+        queue.onColumnLoaded(otherColumn);
+        helper.assertTrue(queue.onColumnLit(column), "A column loaded again does not wait for its light again");
+        helper.assertTrue(queue.queuedSectionCount() == 0 && !queue.nextSection(),
+                "A column lit while not tracking queues " + queue.queuedSectionCount() + " sections");
+        helper.assertTrue(queue.isLoaded(otherColumn) && queue.isAwaitingLight(otherColumn),
+                "A column loaded while not tracking is not kept");
+        int litColumns = queue.startTracking(-4, 24);
+        helper.assertTrue(litColumns == 1,
+                "Starting to track queues " + litColumns + " columns instead of the 1 with its light");
+        for (int sectionY = -4; sectionY <= 19; sectionY++) {
+            helper.assertTrue(queue.nextSection(), "The column lit before tracking has no section left at y "
+                    + sectionY);
+            helper.assertTrue(queue.takenSection() == SectionPos.asLong(1, sectionY, 2),
+                    "The column lit before tracking took the section " + describeSection(queue.takenSection())
+                            + " instead of y " + sectionY);
+        }
+        helper.assertTrue(!queue.nextSection(), "Starting to track queues more than the 24 sections of the lit column");
+        helper.assertTrue(queue.onColumnLit(otherColumn),
+                "The column that waited for its light does not report that it waited");
+        helper.assertTrue(queue.queuedSectionCount() == 24,
+                "Lighting the second column queues " + queue.queuedSectionCount() + " sections instead of 24");
+        drainSections(helper, queue, 24, "after lighting the second column");
+
+        queue.reset();
+        helper.assertTrue(queue.loadedColumnCount() == 0,
+                "A reset queue still has " + queue.loadedColumnCount() + " loaded columns");
+        helper.assertTrue(!queue.isTracking(), "A reset queue still tracks");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void lightPillarSelectionSkipsClustersOutsideTheChunkRadius(GameTestHelper helper) {
+        assertWithinRadius(helper, "chunk 2 0", BlockPos.asLong(8, 0, 0), 2, true);
+        assertWithinRadius(helper, "chunk 2 1", BlockPos.asLong(8, 0, 4), 2, true);
+        assertWithinRadius(helper, "chunk 2 2", BlockPos.asLong(8, 0, 8), 2, false);
+        assertWithinRadius(helper, "chunk -1 -2", BlockPos.asLong(-1, 0, -5), 2, true);
+        assertWithinRadius(helper, "chunk -3 0", BlockPos.asLong(-12, 0, 0), 2, false);
+
+        long nearKey = BlockPos.asLong(0, 0, 0);
+        long farKey = BlockPos.asLong(12, 0, 0);
+        LightPillarClusters clusters = new LightPillarClusters();
+        clusters.beginSection(0, 0, 0);
+        clusters.addLight(1, 1, 1, 1.0F, 1.0F, 1.0F);
+        clusters.endSection();
+        clusters.beginSection(3, 0, 0);
+        clusters.addLight(3 * 16 + 1, 1, 1, 1.0F, 1.0F, 1.0F);
+        clusters.endSection();
+        helper.assertTrue(clusterWithKey(clusters, nearKey) >= 0 && clusterWithKey(clusters, farKey) >= 0,
+                "The clusters do not have the keys of their cells");
+
+        LightPillarSelection selection = new LightPillarSelection();
+        selection.choose(clusters, 0.5, 0.5, 0.5, 1000.0, 2);
+        helper.assertTrue(selection.chosenCount() == 1 && selection.usedCount() == 1,
+                "Within 2 chunks the selection chose " + selection.chosenCount() + " clusters and uses "
+                        + selection.usedCount() + " slots instead of 1 and 1");
+        helper.assertTrue(slotWithKey(selection, nearKey) >= 0,
+                "Within 2 chunks the near cluster is not chosen");
+        helper.assertTrue(slotWithKey(selection, farKey) < 0,
+                "Within 2 chunks the cluster 3 chunks away is chosen");
+
+        selection.clear();
+        selection.choose(clusters, 0.5, 0.5, 0.5, 1000.0, 3);
+        helper.assertTrue(selection.chosenCount() == 2 && selection.usedCount() == 2,
+                "Within 3 chunks the selection chose " + selection.chosenCount() + " clusters and uses "
+                        + selection.usedCount() + " slots instead of 2 and 2");
+        helper.assertTrue(slotWithKey(selection, nearKey) >= 0 && slotWithKey(selection, farKey) >= 0,
+                "Within 3 chunks not both clusters are chosen");
+        helper.succeed();
+    }
+
+    private static void assertSkyCheck(GameTestHelper helper, String where, DataLayer sectionSkyLight,
+            DataLayer aboveSkyLight, boolean expected) {
+        boolean actual = LightPillarClusters.sectionCanShowPillars(sectionSkyLight, aboveSkyLight);
+        helper.assertTrue(actual == expected, "A section can show pillars " + actual + " with " + where
+                + " instead of " + expected);
+    }
+
+    /**
+     * A layer of sky light that is 0 everywhere except at the one block.
+     */
+    private static DataLayer layerWith(int blockX, int blockY, int blockZ, int skyLight) {
+        DataLayer layer = new DataLayer();
+        layer.set(blockX, blockY, blockZ, skyLight);
+        return layer;
+    }
+
+    /**
+     * Checks that no two clusters share a key, and that each cluster is found by its key at its own index.
+     */
+    private static void assertDistinctKeys(GameTestHelper helper, LightPillarClusters clusters, String when) {
+        for (int cluster = 0; cluster < clusters.count(); cluster++) {
+            long key = clusters.key(cluster);
+            for (int other = cluster + 1; other < clusters.count(); other++) {
+                helper.assertTrue(clusters.key(other) != key, "The clusters " + cluster + " and " + other
+                        + " have the same key " + BlockPos.of(key).toShortString() + when);
+            }
+            helper.assertTrue(clusterWithKey(clusters, key) == cluster, "The cluster " + cluster + " with the key "
+                    + BlockPos.of(key).toShortString() + " is not found at its index" + when);
+        }
+    }
+
+    /**
+     * Takes the count sections of the queue and checks that no more are left.
+     */
+    private static void drainSections(GameTestHelper helper, LightPillarWorkQueue queue, int count, String when) {
+        for (int taken = 0; taken < count; taken++) {
+            helper.assertTrue(queue.nextSection(), "The queue has only " + taken + " sections " + when
+                    + " instead of " + count);
+        }
+        helper.assertTrue(!queue.nextSection(), "The queue has more than " + count + " sections " + when);
+    }
+
+    private static String describeSection(long section) {
+        return SectionPos.x(section) + " " + SectionPos.y(section) + " " + SectionPos.z(section);
+    }
+
+    private static void assertWithinRadius(GameTestHelper helper, String where, long clusterKey, int chunkRadius,
+            boolean expected) {
+        boolean actual = LightPillarSelection.isWithinChunkRadius(clusterKey, 0, 0, chunkRadius);
+        helper.assertTrue(actual == expected, "The cluster in " + where + " is within " + chunkRadius
+                + " chunks " + actual + " instead of " + expected);
+    }
+
     private static int clusterWithKey(LightPillarClusters clusters, long key) {
         for (int cluster = 0; cluster < clusters.count(); cluster++) {
             if (clusters.key(cluster) == key) {
@@ -690,8 +1023,7 @@ public final class LightPillarGameTests {
     }
 
     /**
-     * Adds equal lights along the x axis, one per section from x = 8 on, leaving out the light at the skipped index,
-     * and finishes the pass.
+     * Adds equal lights along the x axis, one per section from x = 8 on, leaving out the light at the skipped index.
      */
     private static void addLightsInARow(LightPillarClusters clusters, int count, int skipped) {
         for (int light = 0; light < count; light++) {
@@ -702,7 +1034,6 @@ public final class LightPillarGameTests {
             clusters.addLight(16 * light + 8, 0, 0, 1.0F, 1.0F, 1.0F);
             clusters.endSection();
         }
-        clusters.finishPass();
     }
 
     private static long rowKey(int light) {
@@ -711,7 +1042,7 @@ public final class LightPillarGameTests {
 
     private static void stepSelection(LightPillarSelection selection, LightPillarClusters clusters, int steps) {
         for (int step = 0; step < steps; step++) {
-            selection.choose(clusters, 0.0, 0.5, 0.5, 1000.0);
+            selection.choose(clusters, 0.0, 0.5, 0.5, 1000.0, WIDE_CHUNK_RADIUS);
         }
     }
 

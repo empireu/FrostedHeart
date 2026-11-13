@@ -19,27 +19,38 @@
 
 package com.teammoeg.frostedheart.content.climate.render.sky;
 
+import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.SectionPos;
+import net.minecraft.world.level.chunk.DataLayer;
 
+import javax.annotation.Nullable;
 import java.util.Arrays;
 
 /**
- * The lights that can show pillars, merged into one cluster per cell of 4 by 4 by 4 blocks.
- * A scan adds the lights of one chunk section at a time and finishes a pass once it has seen every section. Finishing
- * replaces all clusters of the previous pass at once, and until then the previous pass's clusters are the ones read.
+ * The lights that can show pillars, merged into one cluster per cell of 4 by 4 by 4 blocks, kept per chunk section.
+ * The lights of a section are added between beginSection and endSection, which replaces every cluster the section had.
  * A cluster holds the summed strength of its lights per channel and their center weighted by their summed strength.
- * Its key is the packed position of its cell, which stays the same from pass to pass.
+ * Its key is the packed position of its cell. Removing a cluster moves the last one into its index, so indices are only
+ * valid until the next change.
  */
 public final class LightPillarClusters {
     public static final int CELL_SIZE = 4;
+    /**
+     * A light needs more sky light than this at its block or the block above to show a pillar.
+     */
+    public static final int SKY_LIGHT_THRESHOLD = 8;
     private static final int SECTION_SIZE = 16;
     private static final int CELLS_PER_EDGE = SECTION_SIZE / CELL_SIZE;
     private static final int CELLS_PER_SECTION = CELLS_PER_EDGE * CELLS_PER_EDGE * CELLS_PER_EDGE;
     /**
-     * How far below the lowest surface around a section the sky light can still show a pillar. Sky light falls by one
-     * per block from the open air above the surface, and a light needs 8 at itself or the block above.
+     * The bytes of a section's light data that hold its lowest layer of blocks, at two blocks per byte.
      */
-    static final int SKY_LIGHT_DEPTH = 8;
+    private static final int LOWEST_LAYER_BYTES = SECTION_SIZE * SECTION_SIZE / 2;
+    private static final int INITIAL_SECTIONS = 1024;
+    private static final int INITIAL_CLUSTERS = 4096;
+    private static final int NO_INDEX = -1;
 
     private final double[] cellX = new double[CELLS_PER_SECTION];
     private final double[] cellY = new double[CELLS_PER_SECTION];
@@ -51,15 +62,54 @@ public final class LightPillarClusters {
     private int sectionX;
     private int sectionY;
     private int sectionZ;
-    private ClusterList read = new ClusterList();
-    private ClusterList filling = new ClusterList();
 
     /**
-     * Whether a section whose top block is at the height can hold a light with enough sky light for a pillar, when the
-     * lowest surface block in its chunk and the chunks around it is at the lowest surface height.
+     * For each section with clusters, a mask with one bit per cell that holds a cluster.
      */
-    public static boolean sectionCanShowPillars(int sectionTopY, int lowestSurfaceY) {
-        return sectionTopY >= lowestSurfaceY - SKY_LIGHT_DEPTH;
+    private final Long2LongOpenHashMap sectionCells = new Long2LongOpenHashMap(INITIAL_SECTIONS);
+    private final Long2IntOpenHashMap clusterIndices = new Long2IntOpenHashMap(INITIAL_CLUSTERS);
+    private long[] keys = new long[INITIAL_CLUSTERS];
+    private double[] x = new double[INITIAL_CLUSTERS];
+    private double[] y = new double[INITIAL_CLUSTERS];
+    private double[] z = new double[INITIAL_CLUSTERS];
+    private float[] red = new float[INITIAL_CLUSTERS];
+    private float[] green = new float[INITIAL_CLUSTERS];
+    private float[] blue = new float[INITIAL_CLUSTERS];
+    private int size;
+
+    public LightPillarClusters() {
+        clusterIndices.defaultReturnValue(NO_INDEX);
+    }
+
+    /**
+     * Whether a section can hold a light with enough sky light for a pillar, from the sky light data of the section
+     * and of the section above, each null where the light engine stores none. A light counts by the sky light at its
+     * own block or the block above, so the lowest layer of the section above counts too. Missing data counts as lit,
+     * because the sky light engine takes the light of a section without data from the sections above it.
+     */
+    public static boolean sectionCanShowPillars(@Nullable DataLayer sectionSkyLight, @Nullable DataLayer aboveSkyLight) {
+        return hasLightAboveThreshold(sectionSkyLight, DataLayer.SIZE)
+                || hasLightAboveThreshold(aboveSkyLight, LOWEST_LAYER_BYTES);
+    }
+
+    /**
+     * Whether the first bytes of the light data hold a value above SKY_LIGHT_THRESHOLD.
+     */
+    private static boolean hasLightAboveThreshold(@Nullable DataLayer light, int byteCount) {
+        if (light == null) {
+            return true;
+        }
+        if (light.isDefinitelyHomogenous()) {
+            return light.get(0, 0, 0) > SKY_LIGHT_THRESHOLD;
+        }
+        byte[] data = light.getData();
+        for (int index = 0; index < byteCount; index++) {
+            int pair = data[index];
+            if ((pair & 0xF) > SKY_LIGHT_THRESHOLD || ((pair >> 4) & 0xF) > SKY_LIGHT_THRESHOLD) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -89,21 +139,103 @@ public final class LightPillarClusters {
     }
 
     /**
-     * Ends the section begun last and adds a cluster for each of its cells that has lights to the pass being filled.
+     * Ends the section begun last and replaces its clusters with one for each of its cells that has lights.
      */
     public void endSection() {
+        removeSection(sectionX, sectionY, sectionZ);
+        long usedCells = 0L;
         for (int cell = 0; cell < CELLS_PER_SECTION; cell++) {
             double weight = cellWeight[cell];
             if (!(weight > 0.0)) {
                 continue;
             }
-            int keyX = sectionX * CELLS_PER_EDGE + cell % CELLS_PER_EDGE;
-            int keyY = sectionY * CELLS_PER_EDGE + (cell / CELLS_PER_EDGE) % CELLS_PER_EDGE;
-            int keyZ = sectionZ * CELLS_PER_EDGE + cell / (CELLS_PER_EDGE * CELLS_PER_EDGE);
-            filling.add(BlockPos.asLong(keyX, keyY, keyZ), cellX[cell] / weight, cellY[cell] / weight,
+            add(cellKey(sectionX, sectionY, sectionZ, cell), cellX[cell] / weight, cellY[cell] / weight,
                     cellZ[cell] / weight, cellRed[cell], cellGreen[cell], cellBlue[cell]);
+            usedCells |= 1L << cell;
+        }
+        if (usedCells != 0L) {
+            sectionCells.put(SectionPos.asLong(sectionX, sectionY, sectionZ), usedCells);
         }
         resetCells();
+    }
+
+    /**
+     * Removes the clusters of the chunk section at the section coordinates.
+     */
+    public void removeSection(int sectionX, int sectionY, int sectionZ) {
+        long usedCells = sectionCells.remove(SectionPos.asLong(sectionX, sectionY, sectionZ));
+        while (usedCells != 0L) {
+            int cell = Long.numberOfTrailingZeros(usedCells);
+            usedCells &= usedCells - 1L;
+            remove(cellKey(sectionX, sectionY, sectionZ, cell));
+        }
+    }
+
+    /**
+     * Removes the clusters of the sections of a chunk column, from the lowest section up through the count.
+     */
+    public void removeColumn(int chunkX, int chunkZ, int lowestSectionY, int sectionCount) {
+        for (int sectionY = lowestSectionY; sectionY < lowestSectionY + sectionCount; sectionY++) {
+            removeSection(chunkX, sectionY, chunkZ);
+        }
+    }
+
+    /**
+     * Removes every cluster.
+     */
+    public void clear() {
+        sectionCells.clear();
+        clusterIndices.clear();
+        size = 0;
+        resetCells();
+    }
+
+    private static long cellKey(int sectionX, int sectionY, int sectionZ, int cell) {
+        return BlockPos.asLong(sectionX * CELLS_PER_EDGE + cell % CELLS_PER_EDGE,
+                sectionY * CELLS_PER_EDGE + (cell / CELLS_PER_EDGE) % CELLS_PER_EDGE,
+                sectionZ * CELLS_PER_EDGE + cell / (CELLS_PER_EDGE * CELLS_PER_EDGE));
+    }
+
+    private void add(long key, double clusterX, double clusterY, double clusterZ, float clusterRed,
+            float clusterGreen, float clusterBlue) {
+        if (size == keys.length) {
+            int capacity = 2 * size;
+            keys = Arrays.copyOf(keys, capacity);
+            x = Arrays.copyOf(x, capacity);
+            y = Arrays.copyOf(y, capacity);
+            z = Arrays.copyOf(z, capacity);
+            red = Arrays.copyOf(red, capacity);
+            green = Arrays.copyOf(green, capacity);
+            blue = Arrays.copyOf(blue, capacity);
+        }
+        keys[size] = key;
+        x[size] = clusterX;
+        y[size] = clusterY;
+        z[size] = clusterZ;
+        red[size] = clusterRed;
+        green[size] = clusterGreen;
+        blue[size] = clusterBlue;
+        clusterIndices.put(key, size);
+        size++;
+    }
+
+    private void remove(long key) {
+        int index = clusterIndices.remove(key);
+        if (index == NO_INDEX) {
+            return;
+        }
+        size--;
+        if (index == size) {
+            return;
+        }
+        keys[index] = keys[size];
+        x[index] = x[size];
+        y[index] = y[size];
+        z[index] = z[size];
+        red[index] = red[size];
+        green[index] = green[size];
+        blue[index] = blue[size];
+        clusterIndices.put(keys[index], index);
     }
 
     private void resetCells() {
@@ -117,113 +249,44 @@ public final class LightPillarClusters {
     }
 
     /**
-     * Makes the clusters of the pass being filled the ones read, and starts an empty pass.
-     */
-    public void finishPass() {
-        ClusterList finished = filling;
-        filling = read;
-        read = finished;
-        filling.clear();
-    }
-
-    /**
-     * Drops what the pass being filled holds, so a new pass starts empty and the clusters read stay.
-     */
-    public void abandonPass() {
-        filling.clear();
-        resetCells();
-    }
-
-    /**
-     * Removes the clusters of both passes.
-     */
-    public void clear() {
-        read.clear();
-        filling.clear();
-        resetCells();
-    }
-
-    /**
-     * The number of clusters in the pass being filled.
-     */
-    public int fillingCount() {
-        return filling.size;
-    }
-
-    /**
-     * The number of clusters read, from the last finished pass.
+     * The number of clusters.
      */
     public int count() {
-        return read.size;
+        return size;
+    }
+
+    /**
+     * The number of chunk sections with clusters.
+     */
+    public int sectionCount() {
+        return sectionCells.size();
     }
 
     public long key(int cluster) {
-        return read.keys[cluster];
+        return keys[cluster];
     }
 
     public double x(int cluster) {
-        return read.x[cluster];
+        return x[cluster];
     }
 
     public double y(int cluster) {
-        return read.y[cluster];
+        return y[cluster];
     }
 
     public double z(int cluster) {
-        return read.z[cluster];
+        return z[cluster];
     }
 
     public float red(int cluster) {
-        return read.red[cluster];
+        return red[cluster];
     }
 
     public float green(int cluster) {
-        return read.green[cluster];
+        return green[cluster];
     }
 
     public float blue(int cluster) {
-        return read.blue[cluster];
-    }
-
-    /**
-     * Clusters in arrays that grow when full and are kept when cleared, so a filled list allocates nothing again.
-     */
-    private static final class ClusterList {
-        private static final int INITIAL_CAPACITY = 256;
-
-        private long[] keys = new long[INITIAL_CAPACITY];
-        private double[] x = new double[INITIAL_CAPACITY];
-        private double[] y = new double[INITIAL_CAPACITY];
-        private double[] z = new double[INITIAL_CAPACITY];
-        private float[] red = new float[INITIAL_CAPACITY];
-        private float[] green = new float[INITIAL_CAPACITY];
-        private float[] blue = new float[INITIAL_CAPACITY];
-        private int size;
-
-        private void add(long key, double clusterX, double clusterY, double clusterZ, float clusterRed,
-                float clusterGreen, float clusterBlue) {
-            if (size == keys.length) {
-                int capacity = 2 * size;
-                keys = Arrays.copyOf(keys, capacity);
-                x = Arrays.copyOf(x, capacity);
-                y = Arrays.copyOf(y, capacity);
-                z = Arrays.copyOf(z, capacity);
-                red = Arrays.copyOf(red, capacity);
-                green = Arrays.copyOf(green, capacity);
-                blue = Arrays.copyOf(blue, capacity);
-            }
-            keys[size] = key;
-            x[size] = clusterX;
-            y[size] = clusterY;
-            z[size] = clusterZ;
-            red[size] = clusterRed;
-            green[size] = clusterGreen;
-            blue[size] = clusterBlue;
-            size++;
-        }
-
-        private void clear() {
-            size = 0;
-        }
+        return blue[cluster];
     }
 }

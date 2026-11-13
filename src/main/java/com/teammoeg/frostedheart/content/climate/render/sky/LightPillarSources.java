@@ -21,6 +21,7 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
 
 import com.mojang.logging.LogUtils;
 import com.teammoeg.frostedheart.FHMain;
+import com.teammoeg.frostedheart.mixin.client.LightEngineAccessor_LightPillars;
 import it.unimi.dsi.fastutil.objects.Reference2ObjectOpenHashMap;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -28,11 +29,14 @@ import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.util.Mth;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.lighting.LayerLightEventListener;
+import net.minecraft.world.level.lighting.LayerLightSectionStorage;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
@@ -42,20 +46,21 @@ import net.minecraftforge.fml.common.Mod;
 import org.slf4j.Logger;
 
 import javax.annotation.Nullable;
+import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.function.Predicate;
 
 /**
- * Finds the lights around the player that can show light pillars, on the client tick.
- * Each tick tests a fixed number of chunk sections within pillarChunkRadius by their block palette, and walks the blocks
- * of at most a fixed number of sections whose palette holds a light. Sections too far below the surface for sky light
- * are skipped. A light counts by its sky light, which leaves out lights indoors and in caves, and lights are merged into
- * LightPillarClusters. Each full pass replaces the clusters of the last one, and LightPillarSelection chooses from them
- * every tick. The scan runs only while the calculated sky is allowed and the diamond dust is above zero.
+ * Finds the lights in the loaded chunks that can show light pillars, and chooses those to draw on the client tick.
+ * LightPillarWorldChanges queues the chunk sections whose lights may have changed, and each tick takes a fixed number
+ * of them. A section is skipped when its block palette holds no light that shows pillars, or when neither its sky light
+ * nor the lowest layer of the section above it reaches above LightPillarClusters.SKY_LIGHT_THRESHOLD. Otherwise its
+ * blocks are walked. A light counts by its sky light, which leaves out lights indoors and in caves, and lights are
+ * merged into LightPillarClusters. LightPillarSelection chooses from them every tick while there is diamond dust.
+ * The index is kept while the calculated sky is allowed, so nothing is read from the world while nothing changes.
  * Client thread only.
  */
 @OnlyIn(Dist.CLIENT)
@@ -63,15 +68,10 @@ import java.util.function.Predicate;
 public final class LightPillarSources {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int SECTION_TESTS_PER_TICK = 256;
+    private static final int SECTIONS_WALKED_PER_TICK = 4;
     private static final int SECTION_BLOCKS = 16 * 16 * 16;
-    private static final int BLOCKS_WALKED_PER_TICK = 4 * SECTION_BLOCKS;
+    private static final int TICKS_PER_SECOND = 20;
     private static final int LISTED_PILLARS = 10;
-    /**
-     * Lowest surfaces are kept for the chunks of a pass and one ring of chunks around them, at the largest radius.
-     */
-    private static final int SURFACE_GRID_SIDE = 2 * (int) SkySetting.PILLAR_CHUNK_RADIUS.maximum() + 3;
-    private static final int SURFACE_NOT_READ = Integer.MIN_VALUE;
-    private static final int SURFACE_UNLOADED = Integer.MAX_VALUE;
     /**
      * The share of the way to the ground under the camera that the dust's bottom moves per tick, which follows the
      * ground over about 30 seconds.
@@ -83,35 +83,28 @@ public final class LightPillarSources {
     private static final double TELEPORT_BLOCKS = 16.0;
     private static final Predicate<BlockState> SHOWS_PILLAR = LightPillarEmitters::showsPillar;
     private static final float[] WHITE = {1.0F, 1.0F, 1.0F};
+    @Nullable
+    private static final com.sun.management.ThreadMXBean ALLOCATION_COUNTER = findAllocationCounter();
 
     private static final LightPillarClusters clusters = new LightPillarClusters();
     private static final LightPillarSelection selection = new LightPillarSelection();
     private static final Reference2ObjectOpenHashMap<BlockState, float[]> emitterColors =
             new Reference2ObjectOpenHashMap<>();
     private static final BlockPos.MutableBlockPos lightPosition = new BlockPos.MutableBlockPos();
-    private static final int[] lowestSurfaces = new int[SURFACE_GRID_SIDE * SURFACE_GRID_SIDE];
     private static int[] texturePixels = new int[SECTION_BLOCKS];
 
     @Nullable
     private static ClientLevel scannedLevel;
     private static boolean failed;
-    private static boolean scanning;
-    private static boolean passRunning;
-    private static boolean passFinishedThisTick;
-    private static int centerChunkX;
-    private static int centerChunkZ;
-    private static int passRadius;
-    private static int columnIndex;
-    /**
-     * The next section to test in the column, or -1 before the column's first section is found.
-     */
-    private static int sectionIndex;
+    private static boolean indexing;
+    private static int chunkRadius;
     private static double dustBottomY = Double.NaN;
     private static double lastEyeX = Double.NaN;
     private static double lastEyeZ = Double.NaN;
 
-    private static final PassStatistics currentPass = new PassStatistics();
-    private static final PassStatistics lastPass = new PassStatistics();
+    private static final SecondStatistics currentSecond = new SecondStatistics();
+    private static final SecondStatistics lastSecond = new SecondStatistics();
+    private static int ticksThisSecond;
 
     private LightPillarSources() {
     }
@@ -127,10 +120,12 @@ public final class LightPillarSources {
             reset();
             scannedLevel = level;
         }
-        LightPillarWorldChanges.tick(level, level != null && !failed && CalculatedSkyRenderer.isAllowed(level));
+        LightPillarWorldChanges.tick();
+        rollStatistics();
         if (level == null || failed) {
             return;
         }
+        long allocatedBefore = allocatedBytes();
         long start = System.nanoTime();
         try {
             tick(minecraft, level);
@@ -141,31 +136,54 @@ public final class LightPillarSources {
                     + "again.", exception);
             return;
         }
-        if (scanning) {
-            currentPass.addTick(System.nanoTime() - start);
+        if (indexing) {
+            currentSecond.addTick(System.nanoTime() - start, allocatedBytes() - allocatedBefore);
         }
-        if (passFinishedThisTick) {
-            lastPass.copy(currentPass);
-            currentPass.clear();
-            passFinishedThisTick = false;
+    }
+
+    /**
+     * The bytes the client thread allocated so far, or 0 where the JVM does not count them.
+     */
+    private static long allocatedBytes() {
+        return ALLOCATION_COUNTER != null ? ALLOCATION_COUNTER.getCurrentThreadAllocatedBytes() : 0L;
+    }
+
+    @Nullable
+    private static com.sun.management.ThreadMXBean findAllocationCounter() {
+        if (ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean threads
+                && threads.isThreadAllocatedMemorySupported() && threads.isThreadAllocatedMemoryEnabled()) {
+            return threads;
         }
+        return null;
     }
 
     private static void tick(Minecraft minecraft, ClientLevel level) {
         Vec3 eye = minecraft.gameRenderer.getMainCamera().getPosition();
         updateDustBottom(level, eye);
-        scanning = CalculatedSkyRenderer.isAllowed(level) && DiamondDustExtinction.lastValue() > 0.0;
-        if (!scanning) {
-            if (passRunning) {
-                clusters.abandonPass();
-                currentPass.clear();
-                passRunning = false;
+        if (!CalculatedSkyRenderer.isAllowed(level)) {
+            if (indexing) {
+                stopIndexing();
             }
             selection.chooseNone();
             return;
         }
-        scan(minecraft, level, eye);
-        selection.choose(clusters, eye.x, eye.y, eye.z, dustBottomY);
+        if (!indexing) {
+            LightPillarWorldChanges.startTracking(level);
+            indexing = true;
+        }
+        index(minecraft, level);
+        chunkRadius = chunkRadius(minecraft);
+        if (DiamondDustExtinction.lastValue() > 0.0) {
+            selection.choose(clusters, eye.x, eye.y, eye.z, dustBottomY, chunkRadius);
+        } else {
+            selection.chooseNone();
+        }
+    }
+
+    private static int chunkRadius(Minecraft minecraft) {
+        int configured = (int) Math.round(SkySetting.PILLAR_CHUNK_RADIUS.get());
+        int largest = (int) SkySetting.PILLAR_CHUNK_RADIUS.maximum();
+        return Math.max(1, Math.min(Math.min(configured, largest), minecraft.options.getEffectiveRenderDistance()));
     }
 
     /**
@@ -190,118 +208,68 @@ public final class LightPillarSources {
         dustBottomY = Double.isNaN(dustBottomY) ? ground : dustBottomY + (ground - dustBottomY) * DUST_BOTTOM_STEP;
     }
 
-    private static void scan(Minecraft minecraft, ClientLevel level, Vec3 eye) {
-        if (!passRunning) {
-            startPass(minecraft, eye);
-        }
-        int side = 2 * passRadius + 1;
-        int columns = side * side;
-        int tests = 0;
-        int blocks = 0;
-        while (tests < SECTION_TESTS_PER_TICK && blocks < BLOCKS_WALKED_PER_TICK) {
-            if (columnIndex >= columns) {
-                finishPass();
-                return;
-            }
-            int offsetX = columnIndex % side - passRadius;
-            int offsetZ = columnIndex / side - passRadius;
-            LevelChunk chunk = offsetX * offsetX + offsetZ * offsetZ <= passRadius * passRadius + passRadius
-                    ? level.getChunkSource().getChunk(centerChunkX + offsetX, centerChunkZ + offsetZ, false) : null;
-            if (chunk == null) {
-                nextColumn();
-                continue;
-            }
-            if (sectionIndex < 0) {
-                sectionIndex = firstSectionIndex(level, offsetX, offsetZ);
-            }
-            LevelChunkSection[] sections = chunk.getSections();
-            if (sectionIndex >= sections.length) {
-                nextColumn();
-                continue;
-            }
-            LevelChunkSection section = sections[sectionIndex];
-            tests++;
-            currentPass.sectionsTested++;
-            if (!section.hasOnlyAir() && section.maybeHas(SHOWS_PILLAR)) {
-                walk(minecraft, level, section, centerChunkX + offsetX,
-                        level.getSectionYFromSectionIndex(sectionIndex), centerChunkZ + offsetZ);
-                blocks += SECTION_BLOCKS;
-                currentPass.sectionsWalked++;
-            }
-            sectionIndex++;
-        }
-    }
-
-    private static void startPass(Minecraft minecraft, Vec3 eye) {
-        int configured = (int) Math.round(SkySetting.PILLAR_CHUNK_RADIUS.get());
-        int largest = (int) SkySetting.PILLAR_CHUNK_RADIUS.maximum();
-        passRadius = Math.max(1, Math.min(Math.min(configured, largest),
-                minecraft.options.getEffectiveRenderDistance()));
-        centerChunkX = SectionPos.blockToSectionCoord(Mth.floor(eye.x));
-        centerChunkZ = SectionPos.blockToSectionCoord(Mth.floor(eye.z));
-        columnIndex = 0;
-        sectionIndex = -1;
-        Arrays.fill(lowestSurfaces, SURFACE_NOT_READ);
-        passRunning = true;
-    }
-
-    private static void nextColumn() {
-        columnIndex++;
-        sectionIndex = -1;
-    }
-
-    private static void finishPass() {
-        clusters.finishPass();
-        currentPass.clusters = clusters.count();
-        passRunning = false;
-        passFinishedThisTick = true;
-    }
-
     /**
-     * The index of the column's lowest section that can hold a light with enough sky light for a pillar.
+     * Drops the clusters of unloaded columns, then updates queued sections until a budget is used up.
      */
-    private static int firstSectionIndex(ClientLevel level, int offsetX, int offsetZ) {
-        int lowest = SURFACE_UNLOADED;
-        for (int aroundX = -1; aroundX <= 1; aroundX++) {
-            for (int aroundZ = -1; aroundZ <= 1; aroundZ++) {
-                lowest = Math.min(lowest, lowestSurface(level, offsetX + aroundX, offsetZ + aroundZ));
-            }
-        }
+    private static void index(Minecraft minecraft, ClientLevel level) {
+        LightPillarWorkQueue queue = LightPillarWorldChanges.queue();
+        int lowestSectionY = level.getMinSection();
         int sectionCount = level.getSectionsCount();
-        for (int index = 0; index < sectionCount; index++) {
-            int topY = SectionPos.sectionToBlockCoord(level.getSectionYFromSectionIndex(index)) + 15;
-            if (LightPillarClusters.sectionCanShowPillars(topY, lowest)) {
-                return index;
+        while (queue.nextDroppedColumn()) {
+            long column = queue.takenColumn();
+            clusters.removeColumn(ChunkPos.getX(column), ChunkPos.getZ(column), lowestSectionY, sectionCount);
+            currentSecond.columnsDropped++;
+        }
+        LayerLightSectionStorage<?> skyLight = skyLightStorage(level);
+        int tests = 0;
+        int walks = 0;
+        while (tests < SECTION_TESTS_PER_TICK && walks < SECTIONS_WALKED_PER_TICK && queue.nextSection()) {
+            tests++;
+            if (updateSection(minecraft, level, skyLight, queue.takenSection())) {
+                walks++;
             }
         }
-        return sectionCount;
+        currentSecond.sectionsTested += tests;
+        currentSecond.sectionsWalked += walks;
     }
 
     /**
-     * The height of the lowest top block of the chunk at the offset from the pass's center, read once per pass, or
-     * SURFACE_UNLOADED for a chunk that is not loaded.
+     * The storage of the level's sky light, or null for a level without sky light.
      */
-    private static int lowestSurface(ClientLevel level, int offsetX, int offsetZ) {
-        int gridIndex = (offsetX + passRadius + 1) * SURFACE_GRID_SIDE + offsetZ + passRadius + 1;
-        int lowest = lowestSurfaces[gridIndex];
-        if (lowest != SURFACE_NOT_READ) {
-            return lowest;
-        }
-        lowest = SURFACE_UNLOADED;
-        LevelChunk chunk = level.getChunkSource().getChunk(centerChunkX + offsetX, centerChunkZ + offsetZ, false);
-        if (chunk != null) {
-            for (int blockX = 0; blockX < 16; blockX++) {
-                for (int blockZ = 0; blockZ < 16; blockZ++) {
-                    lowest = Math.min(lowest, chunk.getHeight(Heightmap.Types.WORLD_SURFACE, blockX, blockZ));
-                }
-            }
-        }
-        lowestSurfaces[gridIndex] = lowest;
-        return lowest;
+    @Nullable
+    private static LayerLightSectionStorage<?> skyLightStorage(ClientLevel level) {
+        LayerLightEventListener listener = level.getLightEngine().getLayerListener(LightLayer.SKY);
+        return listener instanceof LightEngineAccessor_LightPillars accessor ? accessor.frostedheart$getStorage() : null;
     }
 
     /**
-     * Adds every light of the section with sky light above 8 at itself or the block above to the clusters.
+     * Replaces the clusters of a section with the lights found in it now, or removes them when the section cannot hold
+     * a light that shows a pillar. Returns whether the section's blocks were walked.
+     */
+    private static boolean updateSection(Minecraft minecraft, ClientLevel level,
+            @Nullable LayerLightSectionStorage<?> skyLight, long sectionKey) {
+        int chunkX = SectionPos.x(sectionKey);
+        int sectionY = SectionPos.y(sectionKey);
+        int chunkZ = SectionPos.z(sectionKey);
+        LevelChunk chunk = level.getChunkSource().getChunk(chunkX, chunkZ, false);
+        if (chunk == null || skyLight == null) {
+            clusters.removeSection(chunkX, sectionY, chunkZ);
+            return false;
+        }
+        LevelChunkSection section = chunk.getSection(level.getSectionIndexFromSectionY(sectionY));
+        if (section.hasOnlyAir() || !section.maybeHas(SHOWS_PILLAR)
+                || !LightPillarClusters.sectionCanShowPillars(skyLight.getDataLayerData(sectionKey),
+                skyLight.getDataLayerData(SectionPos.offset(sectionKey, 0, 1, 0)))) {
+            clusters.removeSection(chunkX, sectionY, chunkZ);
+            return false;
+        }
+        walk(minecraft, level, section, chunkX, sectionY, chunkZ);
+        return true;
+    }
+
+    /**
+     * Replaces the section's clusters with every light of the section with sky light above
+     * LightPillarClusters.SKY_LIGHT_THRESHOLD at itself or the block above.
      */
     @SuppressWarnings("deprecation")
     private static void walk(Minecraft minecraft, ClientLevel level, LevelChunkSection section, int chunkX,
@@ -309,6 +277,7 @@ public final class LightPillarSources {
         int originX = SectionPos.sectionToBlockCoord(chunkX);
         int originY = SectionPos.sectionToBlockCoord(sectionY);
         int originZ = SectionPos.sectionToBlockCoord(chunkZ);
+        int threshold = LightPillarClusters.SKY_LIGHT_THRESHOLD;
         clusters.beginSection(chunkX, sectionY, chunkZ);
         for (int blockY = 0; blockY < 16; blockY++) {
             for (int blockZ = 0; blockZ < 16; blockZ++) {
@@ -322,14 +291,15 @@ public final class LightPillarSources {
                     int skyLight = level.getBrightness(LightLayer.SKY, lightPosition);
                     lightPosition.setY(lightPosition.getY() + 1);
                     skyLight = Math.max(skyLight, level.getBrightness(LightLayer.SKY, lightPosition));
-                    if (skyLight <= 8) {
+                    if (skyLight <= threshold) {
                         continue;
                     }
-                    float strength = LightPillarEmitters.strength(emission) * Math.min(1.0F, (skyLight - 8) / 7.0F);
+                    float strength = LightPillarEmitters.strength(emission)
+                            * Math.min(1.0F, (skyLight - threshold) / (15.0F - threshold));
                     float[] color = emitterColor(minecraft, state);
                     clusters.addLight(originX + blockX, originY + blockY, originZ + blockZ, color[0] * strength,
                             color[1] * strength, color[2] * strength);
-                    currentPass.lights++;
+                    currentSecond.lights++;
                 }
             }
         }
@@ -375,17 +345,30 @@ public final class LightPillarSources {
         return color;
     }
 
-    private static void reset() {
+    private static void stopIndexing() {
+        LightPillarWorldChanges.stopTracking();
         clusters.clear();
+        indexing = false;
+    }
+
+    private static void reset() {
+        stopIndexing();
         selection.clear();
-        passRunning = false;
-        passFinishedThisTick = false;
-        scanning = false;
         dustBottomY = Double.NaN;
         lastEyeX = Double.NaN;
         lastEyeZ = Double.NaN;
-        currentPass.clear();
-        lastPass.clear();
+        currentSecond.clear();
+        lastSecond.clear();
+        ticksThisSecond = 0;
+    }
+
+    private static void rollStatistics() {
+        ticksThisSecond++;
+        if (ticksThisSecond >= TICKS_PER_SECOND) {
+            lastSecond.copy(currentSecond);
+            currentSecond.clear();
+            ticksThisSecond = 0;
+        }
     }
 
     /**
@@ -414,7 +397,7 @@ public final class LightPillarSources {
     }
 
     /**
-     * A line about the scan and the last finished pass, for the client command.
+     * A line about the index and the work of the last full second, for the client command.
      */
     public static String describe(ClientLevel level) {
         String state;
@@ -423,18 +406,22 @@ public final class LightPillarSources {
         } else if (!CalculatedSkyRenderer.isAllowed(level)) {
             state = "idle while the calculated sky is not drawn";
         } else if (!(DiamondDustExtinction.lastValue() > 0.0)) {
-            state = "idle without diamond dust";
+            state = "indexing, none chosen without diamond dust";
         } else {
-            state = "scanning " + passRadius + " chunks around";
+            state = "indexing, choosing within " + chunkRadius + " chunks";
         }
-        String pass = lastPass.ticks == 0 ? "no pass finished yet" : String.format(Locale.ROOT,
-                "last pass %d ticks with %d sections tested, %d walked, %d lights in %d clusters, "
-                        + "tick %.3f ms mean and %.3f ms most",
-                lastPass.ticks, lastPass.sectionsTested, lastPass.sectionsWalked, lastPass.lights, lastPass.clusters,
-                lastPass.nanos / 1.0e6 / lastPass.ticks, lastPass.mostNanos / 1.0e6);
-        return String.format(Locale.ROOT, "Light pillars %s, %s; %d chosen, %d of %d slots used, dust bottom y %.1f",
-                state, pass, selection.chosenCount(), selection.usedCount(), LightPillarSelection.SLOT_COUNT,
-                dustBottomY);
+        double meanMilliseconds = lastSecond.ticks == 0 ? 0.0 : lastSecond.nanos / 1.0e6 / lastSecond.ticks;
+        String allocated = ALLOCATION_COUNTER != null ? lastSecond.allocatedBytes + " bytes allocated"
+                : "allocations not counted by this JVM";
+        return String.format(Locale.ROOT,
+                "Light pillars %s; %d clusters in %d sections, %d sections queued; last second %d sections tested, "
+                        + "%d walked, %d lights found, %d chunks dropped, tick %.3f ms mean and %.3f ms most, %s; "
+                        + "%d chosen, %d of %d slots used, dust bottom y %.1f",
+                state, clusters.count(), clusters.sectionCount(),
+                LightPillarWorldChanges.queue().queuedSectionCount(), lastSecond.sectionsTested,
+                lastSecond.sectionsWalked, lastSecond.lights, lastSecond.columnsDropped, meanMilliseconds,
+                lastSecond.mostNanos / 1.0e6, allocated, selection.chosenCount(), selection.usedCount(),
+                LightPillarSelection.SLOT_COUNT, dustBottomY);
     }
 
     /**
@@ -464,31 +451,34 @@ public final class LightPillarSources {
     }
 
     /**
-     * Counts of one pass of the scan, and the time its ticks took.
+     * Counts of one second of indexing, and the time and memory its ticks took.
      */
-    private static final class PassStatistics {
+    private static final class SecondStatistics {
         private int ticks;
         private int sectionsTested;
         private int sectionsWalked;
         private int lights;
-        private int clusters;
+        private int columnsDropped;
         private long nanos;
         private long mostNanos;
+        private long allocatedBytes;
 
-        private void addTick(long tickNanos) {
+        private void addTick(long tickNanos, long tickAllocatedBytes) {
             ticks++;
             nanos += tickNanos;
             mostNanos = Math.max(mostNanos, tickNanos);
+            allocatedBytes += tickAllocatedBytes;
         }
 
-        private void copy(PassStatistics other) {
+        private void copy(SecondStatistics other) {
             ticks = other.ticks;
             sectionsTested = other.sectionsTested;
             sectionsWalked = other.sectionsWalked;
             lights = other.lights;
-            clusters = other.clusters;
+            columnsDropped = other.columnsDropped;
             nanos = other.nanos;
             mostNanos = other.mostNanos;
+            allocatedBytes = other.allocatedBytes;
         }
 
         private void clear() {
@@ -496,9 +486,10 @@ public final class LightPillarSources {
             sectionsTested = 0;
             sectionsWalked = 0;
             lights = 0;
-            clusters = 0;
+            columnsDropped = 0;
             nanos = 0;
             mostNanos = 0;
+            allocatedBytes = 0;
         }
     }
 }

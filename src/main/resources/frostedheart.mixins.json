@@ -117,6 +117,7 @@
     "client.GuiMixin",
     "client.IngameGuiAccess",
     "client.LevelRendererMixin",
+    "client.LightEngineAccessor_LightPillars",
     "client.LivingEntityRendererMixin",
     "client.MixinClientEvents",
     "client.MixinLightTexture",

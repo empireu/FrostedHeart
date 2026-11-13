@@ -20,7 +20,6 @@
 package com.teammoeg.frostedheart.content.climate.render.sky;
 
 import com.teammoeg.frostedheart.FHMain;
-import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.objects.Reference2IntMap;
 import it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -44,44 +43,27 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Collects the changes in the client world that light pillars depend on, as reported by hooks, so nothing has to poll
- * the world. Block changes come from ClientLevel.setBlocksDirty, sky light computed on the client from
- * ClientChunkCache.onLightUpdate, sky light received from the server from ClientPacketListener.readSectionList, and
- * chunk columns from the Forge chunk events. The hooks only mark sections and columns, and the client tick takes the
- * marks. Nothing is marked while the calculated sky is not allowed, or before the first client tick in a new level.
- * Client thread only.
+ * Passes the changes in the client world that light pillars depend on, as hooks report them, to a
+ * LightPillarWorkQueue, so nothing has to poll the world. Block changes come from ClientLevel.setBlocksDirty, sky light
+ * computed on the client from ClientChunkCache.onLightUpdate, sky light received from the server from
+ * ClientPacketListener.readSectionList, and chunk columns from the Forge chunk events. The hooks only queue, and the
+ * client tick takes the work. The queue follows the level of the latest hook call, and it queues sections only while
+ * LightPillarSources tracks. Client thread only.
  */
 @OnlyIn(Dist.CLIENT)
 @Mod.EventBusSubscriber(modid = FHMain.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
 public final class LightPillarWorldChanges {
-    private static final int INITIAL_CAPACITY = 1024;
     private static final int TICKS_PER_SECOND = 20;
-
-    /**
-     * Sections where a block that shows pillars appeared, went away, or changed state.
-     */
-    private static final LongOpenHashSet emitterSections = new LongOpenHashSet(INITIAL_CAPACITY);
-    /**
-     * Sections whose sky light may have changed.
-     */
-    private static final LongOpenHashSet skyLightSections = new LongOpenHashSet(INITIAL_CAPACITY);
-    /**
-     * Columns whose blocks arrived from the server.
-     */
-    private static final LongOpenHashSet loadedColumns = new LongOpenHashSet(INITIAL_CAPACITY);
-    /**
-     * Columns whose sky light arrived from the server.
-     */
-    private static final LongOpenHashSet litColumns = new LongOpenHashSet(INITIAL_CAPACITY);
-    private static final LongOpenHashSet unloadedColumns = new LongOpenHashSet(INITIAL_CAPACITY);
-    private static final Counts currentSecond = new Counts();
-    private static final Counts lastSecond = new Counts();
     private static final int LISTED_BLOCKS = 3;
     private static final long NO_POSITION = Long.MIN_VALUE;
 
+    private static final LightPillarWorkQueue queue = new LightPillarWorkQueue();
+    private static final Counts currentSecond = new Counts();
+    private static final Counts lastSecond = new Counts();
+
     /**
      * Block changes per block of the current and of the last second, counted for the new state or for the old one
-     * when the new one is air. Light changes are counted for the block that shows pillars.
+     * when the new one is air. Changes at lights are counted for the block that shows pillars.
      */
     private static Reference2IntOpenHashMap<Block> currentBlocks = new Reference2IntOpenHashMap<>();
     private static Reference2IntOpenHashMap<Block> lastBlocks = new Reference2IntOpenHashMap<>();
@@ -91,8 +73,7 @@ public final class LightPillarWorldChanges {
     private static long lastEmitterPosition = NO_POSITION;
 
     @Nullable
-    private static ClientLevel trackedLevel;
-    private static boolean listening;
+    private static ClientLevel queueLevel;
     private static int ticksThisSecond;
 
     private LightPillarWorldChanges() {
@@ -102,17 +83,20 @@ public final class LightPillarWorldChanges {
      * Notes a block state change in a client level, called whenever the old and new state differ.
      */
     public static void onBlockChanged(ClientLevel level, BlockPos pos, BlockState oldState, BlockState newState) {
-        if (!listening || level != trackedLevel) {
+        followLevel(level);
+        if (!queue.isTracking()) {
             return;
         }
         currentSecond.blocksChanged++;
         currentBlocks.addTo(newState.isAir() ? oldState.getBlock() : newState.getBlock(), 1);
         boolean oldShowsPillar = LightPillarEmitters.showsPillar(oldState);
         if (oldShowsPillar || LightPillarEmitters.showsPillar(newState)) {
-            emitterSections.add(SectionPos.blockToSection(pos.asLong()));
-            currentSecond.emittersChanged++;
+            currentSecond.changesAtLights++;
             currentEmitters.addTo(oldShowsPillar ? oldState.getBlock() : newState.getBlock(), 1);
             currentEmitterPosition = pos.asLong();
+        }
+        if (queue.onBlockChanged(pos.asLong(), oldState, newState)) {
+            currentSecond.sectionsQueuedByBlocks++;
         }
     }
 
@@ -120,106 +104,130 @@ public final class LightPillarWorldChanges {
      * Notes light the client computed in a section. The new values are readable when this is called.
      */
     public static void onLightUpdated(ClientLevel level, LightLayer layer, SectionPos section) {
-        if (layer != LightLayer.SKY || !listening || level != trackedLevel) {
+        followLevel(level);
+        if (layer != LightLayer.SKY || !queue.isTracking()) {
             return;
         }
-        skyLightSections.add(section.asLong());
         currentSecond.skyLightSectionsComputed++;
+        currentSecond.sectionsQueuedByLight += queue.onSkyLightChanged(section.asLong());
     }
 
     /**
      * Notes light received from the server for a column, in the light sections whose bit is set in either mask.
      * The bits count from the lowest light section. The new values become readable later in the same frame.
+     * Every chunk that arrives passes here, so a column waiting for its light is queued whole.
      */
     public static void onLightReceived(ClientLevel level, int chunkX, int chunkZ, LightLayer layer, BitSet dataMask,
             BitSet emptyMask, int lowestLightSection, int lightSectionCount) {
-        if (layer != LightLayer.SKY || !listening || level != trackedLevel) {
+        followLevel(level);
+        if (layer != LightLayer.SKY) {
             return;
         }
-        litColumns.add(ChunkPos.asLong(chunkX, chunkZ));
-        currentSecond.columnsLit++;
+        boolean wasWaiting = queue.onColumnLit(ChunkPos.asLong(chunkX, chunkZ));
+        if (!queue.isTracking()) {
+            return;
+        }
+        if (wasWaiting) {
+            currentSecond.columnsLit++;
+        }
         for (int index = 0; index < lightSectionCount; index++) {
             if (dataMask.get(index) || emptyMask.get(index)) {
-                skyLightSections.add(SectionPos.asLong(chunkX, lowestLightSection + index, chunkZ));
                 currentSecond.skyLightSectionsReceived++;
+                currentSecond.sectionsQueuedByLight += queue.onSkyLightChanged(
+                        SectionPos.asLong(chunkX, lowestLightSection + index, chunkZ));
             }
         }
     }
 
     @SubscribeEvent
     public static void onChunkLoad(ChunkEvent.Load event) {
-        if (!(event.getLevel() instanceof ClientLevel level) || !listening || level != trackedLevel) {
+        if (!(event.getLevel() instanceof ClientLevel level)) {
             return;
         }
-        loadedColumns.add(event.getChunk().getPos().toLong());
-        currentSecond.columnsLoaded++;
+        followLevel(level);
+        queue.onColumnLoaded(event.getChunk().getPos().toLong());
+        if (queue.isTracking()) {
+            currentSecond.columnsLoaded++;
+        }
     }
 
     @SubscribeEvent
     public static void onChunkUnload(ChunkEvent.Unload event) {
-        if (!(event.getLevel() instanceof ClientLevel level) || !listening || level != trackedLevel) {
+        if (!(event.getLevel() instanceof ClientLevel level)) {
             return;
         }
-        long column = event.getChunk().getPos().toLong();
-        loadedColumns.remove(column);
-        litColumns.remove(column);
-        unloadedColumns.add(column);
-        currentSecond.columnsUnloaded++;
+        followLevel(level);
+        queue.onColumnUnloaded(event.getChunk().getPos().toLong());
+        if (queue.isTracking()) {
+            currentSecond.columnsUnloaded++;
+        }
     }
 
     /**
-     * Takes the marks of the last tick, given the client level and whether the calculated sky is allowed in it.
-     * Marks are dropped when the level changes or the sky is not allowed.
+     * Forgets the loaded columns of an earlier level when a hook reports a new one.
      */
-    static void tick(@Nullable ClientLevel level, boolean allowed) {
-        if (level != trackedLevel || !allowed) {
-            clearMarks();
-        }
-        trackedLevel = level;
-        listening = allowed && level != null;
-        currentSecond.sectionsToRewalk += emitterSections.size();
-        currentSecond.sectionsToRelight += skyLightSections.size();
-        clearMarks();
-        ticksThisSecond++;
-        if (ticksThisSecond >= TICKS_PER_SECOND) {
-            lastSecond.copy(currentSecond);
-            currentSecond.clear();
-            Reference2IntOpenHashMap<Block> finishedBlocks = currentBlocks;
-            currentBlocks = lastBlocks;
-            lastBlocks = finishedBlocks;
-            currentBlocks.clear();
-            Reference2IntOpenHashMap<Block> finishedEmitters = currentEmitters;
-            currentEmitters = lastEmitters;
-            lastEmitters = finishedEmitters;
-            currentEmitters.clear();
-            lastEmitterPosition = currentEmitterPosition;
-            currentEmitterPosition = NO_POSITION;
-            ticksThisSecond = 0;
+    private static void followLevel(ClientLevel level) {
+        if (level != queueLevel) {
+            queue.reset();
+            queueLevel = level;
         }
     }
 
-    private static void clearMarks() {
-        emitterSections.clear();
-        skyLightSections.clear();
-        loadedColumns.clear();
-        litColumns.clear();
-        unloadedColumns.clear();
+    /**
+     * Starts queueing the sections of the level, beginning with every section of the loaded columns that have their
+     * sky light.
+     */
+    static void startTracking(ClientLevel level) {
+        followLevel(level);
+        queue.startTracking(level.getMinSection(), level.getSectionsCount());
+    }
+
+    static void stopTracking() {
+        queue.stopTracking();
+    }
+
+    static LightPillarWorkQueue queue() {
+        return queue;
+    }
+
+    /**
+     * Rolls the counts over once a second.
+     */
+    static void tick() {
+        ticksThisSecond++;
+        if (ticksThisSecond < TICKS_PER_SECOND) {
+            return;
+        }
+        lastSecond.copy(currentSecond);
+        currentSecond.clear();
+        Reference2IntOpenHashMap<Block> finishedBlocks = currentBlocks;
+        currentBlocks = lastBlocks;
+        lastBlocks = finishedBlocks;
+        currentBlocks.clear();
+        Reference2IntOpenHashMap<Block> finishedEmitters = currentEmitters;
+        currentEmitters = lastEmitters;
+        lastEmitters = finishedEmitters;
+        currentEmitters.clear();
+        lastEmitterPosition = currentEmitterPosition;
+        currentEmitterPosition = NO_POSITION;
+        ticksThisSecond = 0;
     }
 
     /**
      * A line about the world changes of the last full second, for the client command.
      */
     public static String describe() {
-        if (!listening) {
+        if (!queue.isTracking()) {
             return "World changes are not tracked while the calculated sky is not drawn";
         }
         return String.format(Locale.ROOT,
-                "World changes in the last second: %d blocks with %d at lights, sky light in %d sections computed "
-                        + "and %d received, %d chunks loaded, %d lit, %d unloaded; %d sections to rewalk, "
-                        + "%d to relight",
-                lastSecond.blocksChanged, lastSecond.emittersChanged, lastSecond.skyLightSectionsComputed,
-                lastSecond.skyLightSectionsReceived, lastSecond.columnsLoaded, lastSecond.columnsLit,
-                lastSecond.columnsUnloaded, lastSecond.sectionsToRewalk, lastSecond.sectionsToRelight);
+                "World changes in the last second: %d blocks with %d at lights queuing %d sections, sky light in %d "
+                        + "sections computed and %d received queuing %d sections, %d chunks loaded, %d lit, "
+                        + "%d unloaded; %d chunks loaded in all",
+                lastSecond.blocksChanged, lastSecond.changesAtLights, lastSecond.sectionsQueuedByBlocks,
+                lastSecond.skyLightSectionsComputed, lastSecond.skyLightSectionsReceived,
+                lastSecond.sectionsQueuedByLight, lastSecond.columnsLoaded, lastSecond.columnsLit,
+                lastSecond.columnsUnloaded, queue.loadedColumnCount());
     }
 
     /**
@@ -229,7 +237,7 @@ public final class LightPillarWorldChanges {
         String lastEmitter = lastEmitterPosition == NO_POSITION ? "none"
                 : BlockPos.of(lastEmitterPosition).toShortString();
         return "Changed most: " + mostChanged(lastBlocks) + "; at lights: " + mostChanged(lastEmitters)
-                + "; last light change at " + lastEmitter;
+                + "; last change at a light at " + lastEmitter;
     }
 
     private static String mostChanged(Reference2IntOpenHashMap<Block> counts) {
@@ -250,41 +258,41 @@ public final class LightPillarWorldChanges {
     }
 
     /**
-     * Counts of hook calls, and of distinct sections taken by the client tick.
+     * Counts of hook calls and of the sections they queued.
      */
     private static final class Counts {
         private int blocksChanged;
-        private int emittersChanged;
+        private int changesAtLights;
+        private int sectionsQueuedByBlocks;
         private int skyLightSectionsComputed;
         private int skyLightSectionsReceived;
+        private int sectionsQueuedByLight;
         private int columnsLoaded;
         private int columnsLit;
         private int columnsUnloaded;
-        private int sectionsToRewalk;
-        private int sectionsToRelight;
 
         private void copy(Counts other) {
             blocksChanged = other.blocksChanged;
-            emittersChanged = other.emittersChanged;
+            changesAtLights = other.changesAtLights;
+            sectionsQueuedByBlocks = other.sectionsQueuedByBlocks;
             skyLightSectionsComputed = other.skyLightSectionsComputed;
             skyLightSectionsReceived = other.skyLightSectionsReceived;
+            sectionsQueuedByLight = other.sectionsQueuedByLight;
             columnsLoaded = other.columnsLoaded;
             columnsLit = other.columnsLit;
             columnsUnloaded = other.columnsUnloaded;
-            sectionsToRewalk = other.sectionsToRewalk;
-            sectionsToRelight = other.sectionsToRelight;
         }
 
         private void clear() {
             blocksChanged = 0;
-            emittersChanged = 0;
+            changesAtLights = 0;
+            sectionsQueuedByBlocks = 0;
             skyLightSectionsComputed = 0;
             skyLightSectionsReceived = 0;
+            sectionsQueuedByLight = 0;
             columnsLoaded = 0;
             columnsLit = 0;
             columnsUnloaded = 0;
-            sectionsToRewalk = 0;
-            sectionsToRelight = 0;
         }
     }
 }
