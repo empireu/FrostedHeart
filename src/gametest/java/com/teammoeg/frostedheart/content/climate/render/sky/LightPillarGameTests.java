@@ -1308,6 +1308,36 @@ public final class LightPillarGameTests {
         helper.succeed();
     }
 
+    @GameTest(template = "phase0a_empty", timeoutTicks = 400)
+    public static void lightPillarCrystalDrawsFollowThePoissonDistribution(GameTestHelper helper) {
+        int draws = 200000;
+        for (double meanCount : new double[]{0.3, 2.9, 3.1, 6.0, 15.0, 17.0, 100.0, 1.0e4}) {
+            int largest = (int) Math.ceil(meanCount + 10.0 * Math.sqrt(meanCount) + 10.0);
+            int[] drawnCounts = new int[largest + 1];
+            for (int draw = 0; draw < draws; draw++) {
+                double count = LightPillarOptics.crystalsDrawn(meanCount, draw * 0x9e3779b9);
+                helper.assertTrue(count >= 0.0 && count == Math.floor(count), "A cell with a mean count of "
+                        + meanCount + " draws " + count + " crystals, not a whole count");
+                drawnCounts[(int) Math.min(count, largest)]++;
+            }
+            // The Kolmogorov Smirnov distance of the drawn counts from the Poisson distribution, whose terms are summed
+            // as logarithms since exp(-meanCount) underflows for large means:
+            double logTerm = -meanCount;
+            double poisson = 0.0;
+            double drawn = 0.0;
+            double distance = 0.0;
+            for (int count = 0; count <= largest; count++) {
+                poisson += Math.exp(logTerm);
+                drawn += drawnCounts[count] / (double) draws;
+                distance = Math.max(distance, Math.abs(drawn - poisson));
+                logTerm += Math.log(meanCount / (count + 1));
+            }
+            helper.assertTrue(distance <= 0.01, "Crystal counts drawn for a mean count of " + meanCount
+                    + " differ from the Poisson distribution by " + distance);
+        }
+        helper.succeed();
+    }
+
     @GameTest(template = "phase0a_empty", timeoutTicks = 1200)
     public static void lightPillarRibbonsHoldTheGlints(GameTestHelper helper) {
         double refractiveIndex = IceHaloFormulas.refractiveIndex(1);

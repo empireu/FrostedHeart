@@ -94,9 +94,10 @@ final class LightPillarOptics {
      */
     static final double MOST_SPARKLE = 64.0;
     /**
-     * Mean counts of crystals above this are drawn from a normal distribution instead of the Poisson distribution.
+     * Mean counts of crystals above this are drawn from a normal deviate by a closed form of the Poisson distribution's
+     * quantile instead of by summing the distribution.
      */
-    private static final double LARGEST_COUNTED_MEAN = 16.0;
+    private static final double LARGEST_COUNTED_MEAN = 3.0;
     private static final int MOST_DRAWN = 48;
     private static final int GOLDEN_RATIO_STEP = 0x9e3779b9;
     /**
@@ -389,15 +390,18 @@ final class LightPillarOptics {
     }
 
     /**
-     * A count of crystals for their mean count, from the Poisson distribution up to LARGEST_COUNTED_MEAN and from a
-     * normal distribution above.
+     * A count of crystals for their mean count, from the Poisson distribution up to LARGEST_COUNTED_MEAN and above from
+     * a normal deviate by the Cornish Fisher expansion of the Poisson distribution's quantile, rounded to a whole count.
      */
-    private static double crystalsDrawn(double meanCount, int seed) {
+    static double crystalsDrawn(double meanCount, int seed) {
         double chance = uniform(seed);
         if (meanCount > LARGEST_COUNTED_MEAN) {
             double angle = 2.0 * Math.PI * uniform(hash(seed));
-            return Math.max(0.0, meanCount + Math.sqrt(meanCount)
-                    * Math.sqrt(-2.0 * Math.log(Math.max(chance, 1.0e-7))) * Math.cos(angle));
+            double deviate = Math.sqrt(-2.0 * Math.log(Math.max(chance, 1.0e-7))) * Math.cos(angle);
+            double root = Math.sqrt(meanCount);
+            double quantile = meanCount + root * deviate + (deviate * deviate - 1.0) / 6.0
+                    + deviate * (1.0 - deviate * deviate) / (72.0 * root);
+            return Math.max(0.0, Math.floor(quantile + 0.5));
         }
         double term = Math.exp(-meanCount);
         double cumulative = term;

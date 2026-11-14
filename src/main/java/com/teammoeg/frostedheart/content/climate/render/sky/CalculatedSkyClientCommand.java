@@ -22,6 +22,7 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.teammoeg.frostedheart.FHMain;
@@ -71,7 +72,10 @@ public final class CalculatedSkyClientCommand {
                 .then(literal("off").executes(context -> setEnabled(context, false)))
                 .then(literal("reset").executes(CalculatedSkyClientCommand::reset))
                 .then(literal("pillars").executes(CalculatedSkyClientCommand::pillars)
-                        .then(literal("fill").executes(CalculatedSkyClientCommand::toggleFillView)))
+                        .then(literal("fill").executes(CalculatedSkyClientCommand::toggleFillView))
+                        .then(literal("debug").then(Commands.argument("mode",
+                                IntegerArgumentType.integer(0, LightPillarRenderer.LAST_DEBUG_MODE))
+                                .executes(CalculatedSkyClientCommand::setDebugMode))))
                 .then(set);
         CalculatedSkyScreenshots.addCommands(command);
         registerCommand(event.getDispatcher(), command);
@@ -165,6 +169,14 @@ public final class CalculatedSkyClientCommand {
                 ? "Light pillar fill view on: green pixels show light, red ones are computed for nothing, and "
                         + "overlapping ribbons add up"
                 : "Light pillar fill view off");
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int setDebugMode(CommandContext<CommandSourceStack> context) {
+        int mode = IntegerArgumentType.getInteger(context, "mode");
+        String leftOut = LightPillarRenderer.setDebugMode(mode);
+        send(context, mode > 0 ? "Light pillar debug mode " + mode + " leaves out " + leftOut
+                : "Light pillar debug mode off");
         return Command.SINGLE_SUCCESS;
     }
 

@@ -90,6 +90,15 @@ public final class LightPillarRenderer {
      * The twinkle clock wraps here, which keeps it precise in single precision.
      */
     private static final double TWINKLE_CLOCK_WRAP = 65536.0;
+    /**
+     * What the fragment stage leaves out in each debug mode, as debugMode in light_pillars.glsl.
+     */
+    private static final String[] DEBUG_MODES = {"off", "the integral, replaced by a constant, and with it the glitter",
+            "the glitter, with the ribbon widths kept", "the scene depth, so pillars show through the scene",
+            "everything but the flat ribbons"};
+    public static final int LAST_DEBUG_MODE = DEBUG_MODES.length - 1;
+    private static final int DEBUG_NO_SCENE_DEPTH = 3;
+    private static final int DEBUG_RIBBONS_ONLY = 4;
     private static final FloatBuffer lightBuffer = BufferUtils.createFloatBuffer(4 * SLOTS);
     private static final FloatBuffer overhangBuffer = BufferUtils.createFloatBuffer(2 * SLOTS);
     private static final FloatBuffer colorBuffer = BufferUtils.createFloatBuffer(4 * SLOTS);
@@ -127,10 +136,12 @@ public final class LightPillarRenderer {
     private static int crystalCountScaleUniform;
     private static int twinkleClockUniform;
     private static int fillViewUniform;
+    private static int debugModeUniform;
     /**
      * Whether the ribbons show where the fragment stage runs instead of the pillars, for the client command.
      */
     private static boolean fillView;
+    private static int debugMode;
     private static double twinkleClock;
     private static long lastTwinkleNanos;
     private static double lastTwinkleX;
@@ -313,7 +324,8 @@ public final class LightPillarRenderer {
         int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
         try {
             bindColorFramebuffer(mainTarget);
-            RenderSystem.bindTexture(mainTarget.getDepthTextureId());
+            boolean readsSceneDepth = debugMode != DEBUG_NO_SCENE_DEPTH && debugMode != DEBUG_RIBBONS_ONLY;
+            RenderSystem.bindTexture(readsSceneDepth ? mainTarget.getDepthTextureId() : 0);
             shaderProgram.use();
             if (uniformsProgram != shaderProgram) {
                 setFixedUniforms(shaderProgram.programId);
@@ -336,6 +348,7 @@ public final class LightPillarRenderer {
                     SkySetting.PILLAR_CRYSTAL_SIZE.get()));
             GL20.glUniform1f(twinkleClockUniform, (float) twinkleClock);
             GL20.glUniform1f(fillViewUniform, fillView ? 1.0F : 0.0F);
+            GL20.glUniform1i(debugModeUniform, debugMode);
             RenderSystem.enableBlend();
             RenderSystem.blendEquation(GL14.GL_FUNC_ADD);
             RenderSystem.blendFuncSeparate(GL11.GL_ONE_MINUS_DST_COLOR, GL11.GL_ONE, GL11.GL_ZERO, GL11.GL_ONE);
@@ -437,6 +450,7 @@ public final class LightPillarRenderer {
         crystalCountScaleUniform = GL20.glGetUniformLocation(programId, "crystalCountScale");
         twinkleClockUniform = GL20.glGetUniformLocation(programId, "twinkleClock");
         fillViewUniform = GL20.glGetUniformLocation(programId, "fillView");
+        debugModeUniform = GL20.glGetUniformLocation(programId, "debugMode");
     }
 
     /**
@@ -512,6 +526,17 @@ public final class LightPillarRenderer {
     }
 
     /**
+     * Sets the debug mode, from 0 to LAST_DEBUG_MODE, and returns what the fragment stage leaves out in it, for
+     * measuring the cost of each part. 1 shades every pixel whose scene lies beyond the light alike instead of computing
+     * the integral and the glitter, 2 leaves out the glitter but keeps the ribbons as wide, 3 neither binds nor reads
+     * the scene depth, and 4 shades every pixel the ribbons cover alike.
+     */
+    public static String setDebugMode(int mode) {
+        debugMode = Math.max(0, Math.min(LAST_DEBUG_MODE, mode));
+        return DEBUG_MODES[debugMode];
+    }
+
+    /**
      * A line about the slots drawn in the last frame and the time their draw takes, for the client command. A slot
      * counts when its fade is above 0, whether or not its pillar is in view.
      */
@@ -519,7 +544,8 @@ public final class LightPillarRenderer {
         if (failed) {
             return "Light pillar drawing stopped after an error, see the log";
         }
-        return String.format(Locale.ROOT, "Light pillar slots drawn in the last frame: %d; %s%s", drawnPillars,
-                timer.describe(), fillView ? "; fill view on" : "");
+        return String.format(Locale.ROOT, "Light pillar slots drawn in the last frame: %d; %s%s%s", drawnPillars,
+                timer.describe(), fillView ? "; fill view on" : "",
+                debugMode > 0 ? "; debug mode " + debugMode + " leaves out " + DEBUG_MODES[debugMode] : "");
     }
 }
