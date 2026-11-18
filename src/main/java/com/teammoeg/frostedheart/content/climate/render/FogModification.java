@@ -22,11 +22,13 @@ package com.teammoeg.frostedheart.content.climate.render;
 import com.teammoeg.frostedheart.FHMain;
 import com.teammoeg.frostedheart.content.climate.ClientClimateData;
 import com.teammoeg.frostedheart.content.climate.gamedata.climate.ClimateType;
+import com.teammoeg.frostedheart.content.climate.render.fog.WeatherFogRenderer;
 import com.teammoeg.frostedheart.content.climate.render.weather.ClientWeatherFrame;
 import com.teammoeg.frostedheart.content.climate.render.weather.ClientWeatherState;
 import com.teammoeg.frostedheart.infrastructure.config.FHConfig;
 import net.minecraft.Util;
 import net.minecraft.client.Camera;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.util.FastColor;
 import net.minecraft.util.Mth;
@@ -60,6 +62,9 @@ public class FogModification {
         double partialTick = event.getPartialTick();
 
         Entity var4 = camera.getEntity();
+        if (var4 != null && var4.level() instanceof ClientLevel level && WeatherFogRenderer.isActive(level)) {
+            return;
+        }
         if (var4 instanceof Player player) {
             if (camera.getFluidInCamera() == FogType.NONE && prevFogDensity > 0.0F) {
                 int color = snowColor(player.level(), (float)partialTick);
@@ -82,6 +87,11 @@ public class FogModification {
     public static void renderFogDensity(ViewportEvent.RenderFog event) {
         Camera camera = event.getCamera();
         Entity var3 = camera.getEntity();
+        if (var3 != null && var3.level() instanceof ClientLevel level && WeatherFogRenderer.isActive(level)) {
+            prevFogDensity = 0.0F;
+            prevFogTick = -1L;
+            return;
+        }
         if (var3 instanceof Player player) {
             float expectedFogDensity = 0.0F;
             ClientWeatherFrame weatherFrame = ClientWeatherFrame.INSTANCE;

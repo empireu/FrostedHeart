@@ -122,6 +122,7 @@
     "client.ForgeGuiMixin",
     "client.GuiMixin",
     "client.IngameGuiAccess",
+    "client.LevelRendererAccess",
     "client.LevelRendererMixin",
     "client.LightEngineAccessor_LightPillars",
     "client.LivingEntityRendererMixin",

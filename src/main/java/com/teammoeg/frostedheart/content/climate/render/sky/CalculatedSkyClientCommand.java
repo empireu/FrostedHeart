@@ -26,6 +26,7 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.teammoeg.frostedheart.FHMain;
+import com.teammoeg.frostedheart.content.climate.render.fog.WeatherFogRenderer;
 import com.teammoeg.frostedheart.infrastructure.config.FHConfig;
 import net.minecraft.client.Minecraft;
 import net.minecraft.commands.CommandSourceStack;
@@ -77,6 +78,7 @@ public final class CalculatedSkyClientCommand {
                                 IntegerArgumentType.integer(0, LightPillarRenderer.LAST_DEBUG_MODE))
                                 .executes(CalculatedSkyClientCommand::setDebugMode))))
                 .then(literal("dust").executes(CalculatedSkyClientCommand::dust))
+                .then(literal("fog").executes(CalculatedSkyClientCommand::fog))
                 .then(set);
         CalculatedSkyScreenshots.addCommands(command);
         registerCommand(event.getDispatcher(), command);
@@ -110,6 +112,7 @@ public final class CalculatedSkyClientCommand {
             LightPillarSources.clearFailure();
             LightPillarRenderer.clearFailure();
             DustGlitterRenderer.clearFailure();
+            WeatherFogRenderer.clearFailure();
         }
         return status(context);
     }
@@ -147,6 +150,7 @@ public final class CalculatedSkyClientCommand {
                 CalculatedSkyRenderer.lastTablesMilliseconds(), CalculatedSkyRenderer.lastHaloProfileMilliseconds(),
                 CalculatedSkyRenderer.lastHaloMapMilliseconds(), CalculatedSkyRenderer.lastViewMilliseconds()));
         send(context, "Sky draw: " + CalculatedSkyRenderer.describeDrawTime());
+        send(context, "Fog draw: " + WeatherFogRenderer.describeDrawTime());
         return Command.SINGLE_SUCCESS;
     }
 
@@ -171,6 +175,12 @@ public final class CalculatedSkyClientCommand {
         send(context, DustGlitterRenderer.describe());
         send(context, DustColumns.describe());
         send(context, DustLights.describe());
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int fog(CommandContext<CommandSourceStack> context) {
+        send(context, WeatherFogRenderer.describe());
+        send(context, WeatherFogRenderer.describeBound());
         return Command.SINGLE_SUCCESS;
     }
 

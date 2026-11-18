@@ -47,8 +47,8 @@ public final class FogSettingsGameTests {
         helper.assertTrue(enabledRebuilds == SkySetting.Rebuilds.NOTHING, "fogEnabled rebuilds " + enabledRebuilds
                 + " instead of NOTHING");
 
-        checkNumberSetting(helper, SkySetting.FOG_SNOW_VISIBILITY, "fogSnowVisibility", 60.0, 8.0, 2048.0);
-        checkNumberSetting(helper, SkySetting.FOG_BLIZZARD_VISIBILITY, "fogBlizzardVisibility", 20.0, 4.0, 2048.0);
+        checkNumberSetting(helper, SkySetting.FOG_SNOW_VISIBILITY, "fogSnowVisibility", 300.0, 8.0, 2048.0);
+        checkNumberSetting(helper, SkySetting.FOG_BLIZZARD_VISIBILITY, "fogBlizzardVisibility", 80.0, 4.0, 2048.0);
         checkNumberSetting(helper, SkySetting.FOG_HEIGHT_SCALE, "fogHeightScale", 128.0, 16.0, 1024.0);
 
         double snowVisibility = SkySetting.FOG_SNOW_VISIBILITY.defaultValue();

@@ -33,6 +33,8 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.logging.LogUtils;
 import com.teammoeg.frostedheart.FHMain;
 import com.teammoeg.frostedheart.bootstrap.client.FHShaders;
+import com.teammoeg.frostedheart.content.climate.render.fog.HeightFog;
+import com.teammoeg.frostedheart.content.climate.render.fog.WeatherFogRenderer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.world.phys.Vec3;
@@ -312,9 +314,10 @@ public final class LightPillarRenderer {
     /**
      * Packs the slots that show into the slot buffer in slot order, SLOT_VECTORS vectors each as the uniform block
      * PillarSlots of light_pillars.glsl reads them, and returns how many show. A slot shows while its fade times how
-     * much of its light shows through the fog set up for the terrain is above 0, which LevelRenderer keeps from before
-     * the terrain until after this stage, and that times the opacity is its opacity. Each holds its light's position
-     * relative to the eye and its count of lights, its color, its rim toward the eye, its cap relative to the eye as
+     * much of its light shows through the fog is above 0, which is the new fog's share when it was drawn this frame and
+     * vanilla's fog set up for the terrain otherwise, which LevelRenderer keeps from before the terrain until after
+     * this stage, and that times the opacity is its opacity. Each holds its light's position relative to the eye and
+     * its count of lights, its color, its rim toward the eye, its cap relative to the eye as
      * LightPillarOptics.shelteredCap lowers it to its ceiling toward the eye, the half width of its cluster across the
      * view, and its slot.
      */
@@ -324,6 +327,7 @@ public final class LightPillarRenderer {
             return 0;
         }
         LightPillarSelection selection = LightPillarSources.selection();
+        boolean newFogDrawn = WeatherFogRenderer.isDrawnThisFrame();
         float fogStart = RenderSystem.getShaderFogStart();
         float fogEnd = RenderSystem.getShaderFogEnd();
         float fogOpacity = RenderSystem.getShaderFogColor()[3];
@@ -338,9 +342,16 @@ public final class LightPillarRenderer {
             double offsetX = selection.x(slot) - eyeX;
             double offsetY = selection.y(slot) - eyeY;
             double offsetZ = selection.z(slot) - eyeZ;
-            fade *= (float) LightPillarOptics.fogVisibility(
-                    LightPillarOptics.fogDistance(offsetX, offsetY, offsetZ, cylinderFog), fogStart, fogEnd,
-                    fogOpacity);
+            if (newFogDrawn) {
+                // The fog draws at this stage at HIGH priority, so it has set this frame's fog by now:
+                double length = Math.sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
+                fade *= (float) HeightFog.transmittance(HeightFog.opticalDepth(WeatherFogRenderer.eyeExtinction(),
+                        length, offsetY, WeatherFogRenderer.weather().heightScale()));
+            } else {
+                fade *= (float) LightPillarOptics.fogVisibility(
+                        LightPillarOptics.fogDistance(offsetX, offsetY, offsetZ, cylinderFog), fogStart, fogEnd,
+                        fogOpacity);
+            }
             if (!(fade > 0.0F)) {
                 continue;
             }

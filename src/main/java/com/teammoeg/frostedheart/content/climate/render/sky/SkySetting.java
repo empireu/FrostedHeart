@@ -132,9 +132,9 @@ public enum SkySetting {
             + "of the render distance.", true, null),
     FOG_SNOW_VISIBILITY("fogSnowVisibility", "Distance in blocks at sea level at which terrain fades into the "
             + "fog of snowfall, keeping 2% of its contrast. The fog thins above sea level and thickens below it, as "
-            + "fogHeightScale sets.", Rebuilds.NOTHING, 60.0, 8.0, 2048.0),
+            + "fogHeightScale sets.", Rebuilds.NOTHING, 300.0, 8.0, 2048.0),
     FOG_BLIZZARD_VISIBILITY("fogBlizzardVisibility", "Distance in blocks at sea level at which terrain fades into "
-            + "the fog of a blizzard, keeping 2% of its contrast.", Rebuilds.NOTHING, 20.0, 4.0, 2048.0),
+            + "the fog of a blizzard, keeping 2% of its contrast.", Rebuilds.NOTHING, 80.0, 4.0, 2048.0),
     FOG_HEIGHT_SCALE("fogHeightScale", "Height in blocks over which the fog of snow and blizzards thins by a factor "
             + "of about 2.7 going up from sea level, and thickens by the same factor going down.", Rebuilds.NOTHING,
             128.0, 16.0, 1024.0);
