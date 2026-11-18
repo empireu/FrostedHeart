@@ -35,7 +35,7 @@ import java.util.Locale;
  * Render thread only.
  */
 @OnlyIn(Dist.CLIENT)
-final class SkyDrawTimer {
+public final class SkyDrawTimer {
     private static final int QUERY_PAIRS = 4;
     private static final int AVERAGED_DRAWS = 120;
 
@@ -56,7 +56,7 @@ final class SkyDrawTimer {
     private boolean measuringGpu;
     private long beginNanos;
 
-    void begin() {
+    public void begin() {
         beginNanos = System.nanoTime();
         if (!checked) {
             GLCapabilities capabilities = GL.getCapabilities();
@@ -77,7 +77,7 @@ final class SkyDrawTimer {
         }
     }
 
-    void end() {
+    public void end() {
         if (measuringGpu) {
             GL33C.glQueryCounter(endQueries[nextPair], GL33C.GL_TIMESTAMP);
             pending[nextPair] = true;
@@ -108,7 +108,7 @@ final class SkyDrawTimer {
     /**
      * The means for the client command.
      */
-    String describe() {
+    public String describe() {
         if (cpuCount == 0) {
             return "no draw measured yet";
         }

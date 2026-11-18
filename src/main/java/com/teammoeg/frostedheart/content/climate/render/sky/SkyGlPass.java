@@ -41,7 +41,7 @@ import javax.annotation.Nullable;
  * right. All passes share one full screen quad. Render thread only.
  */
 @OnlyIn(Dist.CLIENT)
-final class SkyGlPass {
+public final class SkyGlPass {
     @Nullable
     private static VertexBuffer fullScreenQuad;
 
@@ -51,11 +51,11 @@ final class SkyGlPass {
     private boolean blending;
     private boolean depthTest;
 
-    SkyGlPass(int textureUnits) {
+    public SkyGlPass(int textureUnits) {
         previousBindings = new int[textureUnits];
     }
 
-    void begin() {
+    public void begin() {
         previousProgram = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
         previousActiveTexture = GlStateManager._getActiveTexture();
         blending = GL11.glIsEnabled(GL11.GL_BLEND);
@@ -68,7 +68,7 @@ final class SkyGlPass {
         RenderSystem.disableDepthTest();
     }
 
-    void end() {
+    public void end() {
         GL20.glUseProgram(previousProgram);
         for (int unit = 0; unit < previousBindings.length; unit++) {
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + unit);
@@ -86,7 +86,7 @@ final class SkyGlPass {
     /**
      * Draws a quad over the whole screen in clip space with the current program, which receives the position only.
      */
-    static void drawFullScreenQuad() {
+    public static void drawFullScreenQuad() {
         VertexBuffer quad = fullScreenQuad();
         quad.bind();
         try {

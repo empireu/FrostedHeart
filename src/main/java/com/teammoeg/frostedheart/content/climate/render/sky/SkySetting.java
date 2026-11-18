@@ -126,7 +126,18 @@ public enum SkySetting {
             + "blocks giving light make, at full block light, in vanilla's block light color. They show day and night "
             + "within 16 blocks, as many as dustGlitterPlainShare. 0 draws none.", Rebuilds.NOTHING, 1.0, 0.0, 10.0),
     TEXEL_DEGREES("texelDegrees", "Size of the sky's square texels in degrees. They are fixed to the sky like the "
-            + "sun's texture. 0 draws a smooth sky.", Rebuilds.HALOS, 0.5, 0.0, 5.0);
+            + "sun's texture. 0 draws a smooth sky.", Rebuilds.HALOS, 0.5, 0.0, 5.0),
+    FOG_ENABLED("fogEnabled", "Draws the fog of snow and blizzards with the calculated sky, thicker in valleys "
+            + "and thinner on hills, and as far at every render distance. Off keeps the older fog, which is a share "
+            + "of the render distance.", true, null),
+    FOG_SNOW_VISIBILITY("fogSnowVisibility", "Distance in blocks at sea level at which terrain fades into the "
+            + "fog of snowfall, keeping 2% of its contrast. The fog thins above sea level and thickens below it, as "
+            + "fogHeightScale sets.", Rebuilds.NOTHING, 60.0, 8.0, 2048.0),
+    FOG_BLIZZARD_VISIBILITY("fogBlizzardVisibility", "Distance in blocks at sea level at which terrain fades into "
+            + "the fog of a blizzard, keeping 2% of its contrast.", Rebuilds.NOTHING, 20.0, 4.0, 2048.0),
+    FOG_HEIGHT_SCALE("fogHeightScale", "Height in blocks over which the fog of snow and blizzards thins by a factor "
+            + "of about 2.7 going up from sea level, and thickens by the same factor going down.", Rebuilds.NOTHING,
+            128.0, 16.0, 1024.0);
 
     /**
      * What a build does again when a setting changes. The views are built again with either part.
