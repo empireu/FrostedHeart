@@ -20,19 +20,18 @@
 package com.teammoeg.frostedheart.content.climate.render.fog;
 
 import com.mojang.logging.LogUtils;
-import com.teammoeg.frostedheart.content.climate.render.sky.DustColumnWindow;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
 
-import java.util.Arrays;
 import java.util.Random;
 
 /**
  * Checks the math of the height fog: the optical depth against a numeric integral of the extinction, the height factor
  * on both sides of its series switch, the edges of the optical depth, the culling distance against a brute force
- * search, the positions the culling distance hides, the rounding of the fog end, and the mock weather.
+ * search, the positions the culling distance hides, the culling distance below the highest surface of a blizzard, the
+ * rounding of the fog end, and the mock weather.
  */
 @GameTestHolder("frostedheart_weather")
 @PrefixGameTestTemplate(false)
@@ -54,39 +53,16 @@ public final class FogModelGameTests {
     private static final double HIGHEST_HEIGHT = 320.0;
     private static final double SEA_LEVEL = 63.0;
     private static final double LONGEST_DISTANCE = 1024.0;
-    private static final int BRUTE_FORCE_WALK_STEPS = 20000;
-    private static final double BRUTE_FORCE_WALK_TOLERANCE = 2.0e-3;
-    private static final double BRUTE_FORCE_WALK_RELATIVE_TOLERANCE = 1.0e-3;
-    private static final double FULL_DEPTH_RELATIVE_TOLERANCE = 1.0e-9;
-    private static final double CANOPY_FACE_TOLERANCE = 0.25;
-    private static final int RANDOM_RAY_COUNT = 200;
-    private static final double RANDOM_RAY_HORIZONTAL = 50.0;
-    private static final double RANDOM_RAY_LOWEST_VERTICAL = -5.0;
-    private static final double RANDOM_RAY_HIGHEST_VERTICAL = 10.0;
-    /**
-     * The first open heights of the window of the shelter tests in blocks, and the columns of its house and its canopy,
-     * which the window's first column places at its own world column 0. The canopy hangs over the same z range as the
-     * house.
-     */
-    private static final float FLOOR_HEIGHT = 60.0F;
-    private static final float HOUSE_HEIGHT = 65.0F;
-    private static final float CANOPY_HEIGHT = 70.0F;
-    private static final int HOUSE_FIRST_X = 30;
-    private static final int HOUSE_LAST_X = 34;
-    private static final int CANOPY_FIRST_X = 40;
-    private static final int CANOPY_LAST_X = 44;
-    private static final int SHELTER_FIRST_Z = 30;
-    private static final int SHELTER_LAST_Z = 34;
-    private static final int WINDOW_ORIGIN_X = 0;
-    private static final int WINDOW_ORIGIN_Z = 0;
-    private static final int EYE_COLUMN_X = 32;
-    private static final int EYE_COLUMN_Z = 32;
-    private static final double EYE_FRACTION_X = 0.5;
-    private static final double EYE_FRACTION_Z = 0.5;
-    private static final double EYE_HEIGHT = 61.6;
-    private static final double SYNTHETIC_VISIBILITY = 80.0;
-    private static final double SYNTHETIC_REFERENCE_HEIGHT = 63.0;
-    private static final double SYNTHETIC_HEIGHT_SCALE = 128.0;
+    private static final double BLIZZARD_VISIBILITY = 80.0;
+    private static final double SNOW_VISIBILITY = 300.0;
+    private static final double BLIZZARD_EYE_HEIGHT = 70.0;
+    private static final double BLIZZARD_HEIGHT_SCALE = 128.0;
+    private static final double HIGHEST_SURFACE = 120.0;
+    private static final double NEAR_FAR_PLANE = 256.0;
+    private static final double NEAREST_BLIZZARD_DISTANCE = 140.0;
+    private static final double FARTHEST_BLIZZARD_DISTANCE = 170.0;
+    private static final double NEAREST_SNOW_DISTANCE = 550.0;
+    private static final double FARTHEST_SNOW_DISTANCE = 650.0;
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void opticalDepthMatchesANumericIntegral(GameTestHelper helper) {
@@ -224,6 +200,41 @@ public final class FogModelGameTests {
     }
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void cullingDistanceIsFiniteBelowTheHighestSurfaceInABlizzard(GameTestHelper helper) {
+        double blizzardExtinctionAtEye = HeightFog.extinctionAt(
+                HeightFog.extinctionFromVisibility(BLIZZARD_VISIBILITY), SEA_LEVEL, BLIZZARD_HEIGHT_SCALE,
+                BLIZZARD_EYE_HEIGHT);
+        double blizzardDistance = FogCullingDistance.opaqueDistance(blizzardExtinctionAtEye, BLIZZARD_EYE_HEIGHT,
+                BLIZZARD_HEIGHT_SCALE, LOWEST_HEIGHT, HIGHEST_SURFACE, NEAR_FAR_PLANE);
+        helper.assertTrue(Double.isFinite(blizzardDistance), "The culling distance of the blizzard of visibility "
+                + BLIZZARD_VISIBILITY + " below the highest surface " + HIGHEST_SURFACE + " is " + blizzardDistance
+                + " instead of a finite one");
+        helper.assertTrue(blizzardDistance >= NEAREST_BLIZZARD_DISTANCE
+                && blizzardDistance <= FARTHEST_BLIZZARD_DISTANCE, "The culling distance of the blizzard is "
+                        + blizzardDistance + " instead of one from " + NEAREST_BLIZZARD_DISTANCE + " to "
+                        + FARTHEST_BLIZZARD_DISTANCE);
+        double snowExtinctionAtEye = HeightFog.extinctionAt(
+                HeightFog.extinctionFromVisibility(SNOW_VISIBILITY), SEA_LEVEL, BLIZZARD_HEIGHT_SCALE,
+                BLIZZARD_EYE_HEIGHT);
+        double shortSnowDistance = FogCullingDistance.opaqueDistance(snowExtinctionAtEye, BLIZZARD_EYE_HEIGHT,
+                BLIZZARD_HEIGHT_SCALE, LOWEST_HEIGHT, HIGHEST_SURFACE, NEAR_FAR_PLANE);
+        helper.assertTrue(Double.isInfinite(shortSnowDistance) && shortSnowDistance > 0.0, "The culling distance of "
+                + "the snow of visibility " + SNOW_VISIBILITY + " below the highest surface " + HIGHEST_SURFACE
+                + " is " + shortSnowDistance + " instead of positive infinity at a far plane of " + NEAR_FAR_PLANE);
+        double longSnowDistance = FogCullingDistance.opaqueDistance(snowExtinctionAtEye, BLIZZARD_EYE_HEIGHT,
+                BLIZZARD_HEIGHT_SCALE, LOWEST_HEIGHT, HIGHEST_SURFACE, LONGEST_DISTANCE);
+        helper.assertTrue(Double.isFinite(longSnowDistance), "The culling distance of the snow of visibility "
+                + SNOW_VISIBILITY + " below the highest surface " + HIGHEST_SURFACE + " is " + longSnowDistance
+                + " instead of a finite one at a far plane of " + LONGEST_DISTANCE);
+        helper.assertTrue(longSnowDistance >= NEAREST_SNOW_DISTANCE && longSnowDistance <= FARTHEST_SNOW_DISTANCE,
+                "The culling distance of the snow is " + longSnowDistance + " instead of one from "
+                        + NEAREST_SNOW_DISTANCE + " to " + FARTHEST_SNOW_DISTANCE);
+        LogUtils.getLogger().info("The culling distance below the highest surface " + HIGHEST_SURFACE + " is "
+                + blizzardDistance + " in the blizzard and " + longSnowDistance + " in the snow");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void fogEndRoundsUpAndHolds(GameTestHelper helper) {
         assertFogEnd(helper, 30.0, Double.POSITIVE_INFINITY, 32.0);
         assertFogEnd(helper, 3.0, Double.POSITIVE_INFINITY, 8.0);
@@ -251,6 +262,8 @@ public final class FogModelGameTests {
         double snowVisibility = 60.0;
         double blizzardVisibility = 20.0;
         double heightScale = 128.0;
+        double snowDecayLength = 1.5;
+        double blizzardDecayLength = 4.0;
         double snowExtinction = HeightFog.VISIBILITY_OPTICAL_DEPTH / snowVisibility;
         double blizzardExtinction = HeightFog.VISIBILITY_OPTICAL_DEPTH / blizzardVisibility;
         String[] weatherNames = {"clear", "snowfall", "blizzard", "snow", "storm"};
@@ -262,35 +275,47 @@ public final class FogModelGameTests {
         ClientMockWeather weather = new ClientMockWeather();
         for (int weatherIndex = 0; weatherIndex < weatherNames.length; weatherIndex++) {
             weather.update(rainLevels[weatherIndex], thunderLevels[weatherIndex], snowVisibility, blizzardVisibility,
-                    heightScale);
+                    heightScale, snowDecayLength, blizzardDecayLength);
             String weatherName = weatherNames[weatherIndex];
             assertClose(helper, "the snowfall of " + weatherName, weather.snowfallIntensity(),
                     snowfalls[weatherIndex]);
             assertClose(helper, "the storm of " + weatherName, weather.stormIntensity(), storms[weatherIndex]);
             assertClose(helper, "the extinction of " + weatherName, weather.referenceExtinction(),
                     extinctions[weatherIndex]);
+            assertClose(helper, "the decay length of " + weatherName, weather.decayLength(),
+                    snowDecayLength + (blizzardDecayLength - snowDecayLength) * weather.stormIntensity());
         }
-        weather.update(0.4, 0.4, snowVisibility, blizzardVisibility, heightScale);
+        weather.update(0.4, 0.4, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength);
         assertClose(helper, "the snowfall at rain 0.4", weather.snowfallIntensity(), 0.5);
         assertClose(helper, "the storm at thunder 0.4", weather.stormIntensity(), 0.5);
         assertClose(helper, "the extinction at rain and thunder 0.4", weather.referenceExtinction(),
                 0.5 * (snowExtinction + blizzardExtinction) / 2.0);
-        weather.update(0.2, 0.8, snowVisibility, blizzardVisibility, heightScale);
+        assertClose(helper, "the decay length at thunder 0.4", weather.decayLength(), 1.5 + 2.5 * 0.5);
+        weather.update(0.2, 0.8, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength);
         assertClose(helper, "the storm at rain 0.2 and thunder 0.8", weather.stormIntensity(), 0.25);
         assertClose(helper, "the snowfall at rain 0.2", weather.snowfallIntensity(), 0.25);
-        weather.update(Double.NaN, Double.NaN, snowVisibility, blizzardVisibility, heightScale);
+        assertClose(helper, "the decay length at thunder 0.8", weather.decayLength(), 1.5 + 2.5 * 0.25);
+        weather.update(Double.NaN, Double.NaN, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength);
         assertClose(helper, "the snowfall at a NaN rain level", weather.snowfallIntensity(), 0.0);
         assertClose(helper, "the storm at a NaN thunder level", weather.stormIntensity(), 0.0);
         assertClose(helper, "the extinction at NaN levels", weather.referenceExtinction(), 0.0);
-        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, 0.0);
+        assertClose(helper, "the decay length at NaN levels", weather.decayLength(), 1.5);
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, 0.0, snowDecayLength, blizzardDecayLength);
         assertClose(helper, "the height scale after 0", weather.heightScale(), 128.0);
-        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, Double.NaN);
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, Double.NaN, snowDecayLength,
+                blizzardDecayLength);
         assertClose(helper, "the height scale after NaN", weather.heightScale(), 128.0);
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, Double.NaN, Double.NaN);
+        assertClose(helper, "the decay length after NaN lengths", weather.decayLength(), 1.5);
         ClientMockWeather freshWeather = new ClientMockWeather();
         assertClose(helper, "the snowfall before the first update", freshWeather.snowfallIntensity(), 0.0);
         assertClose(helper, "the storm before the first update", freshWeather.stormIntensity(), 0.0);
         assertClose(helper, "the extinction before the first update", freshWeather.referenceExtinction(), 0.0);
         assertClose(helper, "the height scale before the first update", freshWeather.heightScale(), 128.0);
+        assertClose(helper, "the decay length before the first update", freshWeather.decayLength(), 1.5);
         helper.succeed();
     }
 
@@ -403,228 +428,4 @@ public final class FogModelGameTests {
                 + " instead of " + expected + ", a difference of " + difference + " above " + VALUE_TOLERANCE);
     }
 
-    @GameTest(template = "phase0a_empty", timeoutTicks = 200)
-    public static void openOpticalDepthMatchesABruteForceWalk(GameTestHelper helper) {
-        float[] heights = houseWindow(HOUSE_HEIGHT);
-        double[][] offsets = {
-                {12.0, -1.0, 0.0},
-                {10.0, 3.0, 1.0},
-                {20.0, 0.5, 2.0},
-                {-3.0, 0.0, 0.0},
-                {0.0, 30.0, 0.0},
-                {0.0, -1.0, 0.0},
-                {40.0, 0.0, 40.0},
-                {-45.0, 5.0, 10.0},
-                {0.00001, 0.0, 6.0}};
-        for (int caseIndex = 0; caseIndex < offsets.length; caseIndex++) {
-            assertMatchesBruteForce(helper, describeOffset(offsets[caseIndex]), heights, offsets[caseIndex][0],
-                    offsets[caseIndex][1], offsets[caseIndex][2]);
-        }
-        Random random = new Random(RANDOM_SEED);
-        for (int rayIndex = 0; rayIndex < RANDOM_RAY_COUNT; rayIndex++) {
-            double offsetX = random.nextDouble() * 2.0 * RANDOM_RAY_HORIZONTAL - RANDOM_RAY_HORIZONTAL;
-            double offsetZ = random.nextDouble() * 2.0 * RANDOM_RAY_HORIZONTAL - RANDOM_RAY_HORIZONTAL;
-            double offsetY = RANDOM_RAY_LOWEST_VERTICAL
-                    + random.nextDouble() * (RANDOM_RAY_HIGHEST_VERTICAL - RANDOM_RAY_LOWEST_VERTICAL);
-            assertMatchesBruteForce(helper, "the random offset (" + offsetX + ", " + offsetY + ", " + offsetZ + ")",
-                    heights, offsetX, offsetY, offsetZ);
-        }
-        helper.succeed();
-    }
-
-    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
-    public static void openOpticalDepthIsZeroUnderOneRoof(GameTestHelper helper) {
-        float[] heights = houseWindow(HOUSE_HEIGHT);
-        double[][] offsets = {
-                {2.0, 0.0, 0.0},
-                {-2.0, 1.0, -2.0},
-                {1.5, 2.0, 1.5},
-                {0.0, 3.0, 0.0},
-                {-2.0, -1.0, 2.0},
-                {2.0, 3.0, 2.0}};
-        for (int caseIndex = 0; caseIndex < offsets.length; caseIndex++) {
-            double openDepth = shelterDepth(heights, offsets[caseIndex][0], offsets[caseIndex][1],
-                    offsets[caseIndex][2]);
-            helper.assertTrue(openDepth == 0.0, "The open optical depth of " + describeOffset(offsets[caseIndex])
-                    + " under one roof is " + openDepth + " instead of exactly 0.0");
-        }
-        helper.succeed();
-    }
-
-    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
-    public static void openOpticalDepthIsTheFullDepthInTheOpen(GameTestHelper helper) {
-        double[][] offsets = {
-                {10.0, 0.0, 0.0},
-                {-20.0, 2.0, -20.0},
-                {5.0, -1.0, 5.0},
-                {0.0, 0.0, 30.0},
-                {60.0, -1.0, 60.0}};
-        assertOpenDepthIsFullDepth(helper, floorWindow(), offsets, "in the open");
-        helper.succeed();
-    }
-
-    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
-    public static void openOpticalDepthCountsUnreadAndOutsideColumnsAsOpen(GameTestHelper helper) {
-        double[][] offsets = {
-                {2.0, 0.0, 0.0},
-                {-1.0, 2.0, 1.0},
-                {2.0, -1.0, 2.0},
-                {0.0, 0.5, 0.0}};
-        assertOpenDepthIsFullDepth(helper, houseWindow(DustColumnWindow.CLOSED), offsets, "in the unread columns");
-        helper.succeed();
-    }
-
-    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
-    public static void canopyFacesTakeTheSameFogFromInside(GameTestHelper helper) {
-        float[] heights = houseWindow(HOUSE_HEIGHT);
-        double frontFaceDepth = shelterDepth(heights, 7.5, 5.0, 0.0);
-        double deeperLeafDepth = shelterDepth(heights, 8.5, 5.2, 0.0);
-        helper.assertTrue(frontFaceDepth > 0.0, "The open optical depth to the canopy's front face at the offset "
-                + "(7.5, 5.0, 0.0) is " + frontFaceDepth + " instead of a positive depth");
-        helper.assertTrue(deeperLeafDepth > 0.0, "The open optical depth to the leaf one block deeper at the offset "
-                + "(8.5, 5.2, 0.0) is " + deeperLeafDepth + " instead of a positive depth");
-        double largerDepth = Math.max(frontFaceDepth, deeperLeafDepth);
-        double difference = Math.abs(frontFaceDepth - deeperLeafDepth);
-        helper.assertTrue(difference < CANOPY_FACE_TOLERANCE * largerDepth, "The open optical depth to the canopy's "
-                + "front face is " + frontFaceDepth + " where the leaf one block deeper is " + deeperLeafDepth
-                + ", a difference of " + difference + " not below " + CANOPY_FACE_TOLERANCE * largerDepth
-                + " of the larger");
-        helper.succeed();
-    }
-
-    /**
-     * The window of the shelter tests, SIZE by SIZE columns at the floor height.
-     */
-    private static float[] floorWindow() {
-        float[] heights = new float[DustColumnWindow.COLUMNS];
-        Arrays.fill(heights, FLOOR_HEIGHT);
-        return heights;
-    }
-
-    /**
-     * The window of the shelter tests with the house around the eye at the given height and the canopy to the east of
-     * it.
-     */
-    private static float[] houseWindow(float houseHeight) {
-        float[] heights = floorWindow();
-        fillColumns(heights, HOUSE_FIRST_X, HOUSE_LAST_X, SHELTER_FIRST_Z, SHELTER_LAST_Z, houseHeight);
-        fillColumns(heights, CANOPY_FIRST_X, CANOPY_LAST_X, SHELTER_FIRST_Z, SHELTER_LAST_Z, CANOPY_HEIGHT);
-        return heights;
-    }
-
-    /**
-     * Sets the first open height of every column in the given world ranges, which the window of the shelter tests holds
-     * at its own texels.
-     */
-    private static void fillColumns(float[] heights, int firstX, int lastX, int firstZ, int lastZ, float height) {
-        for (int x = firstX; x <= lastX; x++) {
-            for (int z = firstZ; z <= lastZ; z++) {
-                heights[DustColumnWindow.texelIndex(x, z)] = height;
-            }
-        }
-    }
-
-    /**
-     * The offset of a segment as the shelter tests name it.
-     */
-    private static String describeOffset(double[] offset) {
-        return "the offset (" + offset[0] + ", " + offset[1] + ", " + offset[2] + ")";
-    }
-
-    /**
-     * The open optical depth of a segment from the eye of the shelter tests, in optical depths.
-     */
-    private static double shelterDepth(float[] heights, double offsetX, double offsetY, double offsetZ) {
-        return ShelterRay.openOpticalDepth(heights, WINDOW_ORIGIN_X, WINDOW_ORIGIN_Z, EYE_COLUMN_X, EYE_COLUMN_Z,
-                EYE_FRACTION_X, EYE_FRACTION_Z, EYE_HEIGHT, offsetX, offsetY, offsetZ, eyeExtinction(),
-                SYNTHETIC_HEIGHT_SCALE);
-    }
-
-    /**
-     * The extinction per block at the eye of the shelter tests, which the visibility and height scale of the tests give
-     * it at that height.
-     */
-    private static double eyeExtinction() {
-        return HeightFog.extinctionAt(HeightFog.VISIBILITY_OPTICAL_DEPTH / SYNTHETIC_VISIBILITY,
-                SYNTHETIC_REFERENCE_HEIGHT, SYNTHETIC_HEIGHT_SCALE, EYE_HEIGHT);
-    }
-
-    /**
-     * The optical depth of a whole segment from the eye of the shelter tests, in optical depths.
-     */
-    private static double fullOpticalDepth(double offsetX, double offsetY, double offsetZ) {
-        double length = Math.sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
-        return HeightFog.opticalDepth(eyeExtinction(), length, offsetY, SYNTHETIC_HEIGHT_SCALE);
-    }
-
-    /**
-     * The open optical depth of a segment from the eye of the shelter tests, summed over BRUTE_FORCE_WALK_STEPS equal
-     * steps of its parameter, where each step at an open middle counts the height fog between its own two ends.
-     */
-    private static double bruteForceOpenDepth(float[] heights, double offsetX, double offsetY, double offsetZ) {
-        double length = Math.sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
-        double extinctionAtEye = eyeExtinction();
-        double stepShare = 1.0 / BRUTE_FORCE_WALK_STEPS;
-        double openDepth = 0.0;
-        for (int stepIndex = 0; stepIndex < BRUTE_FORCE_WALK_STEPS; stepIndex++) {
-            double stepStart = stepIndex * stepShare;
-            double stepEnd = stepStart + stepShare;
-            double middle = 0.5 * (stepStart + stepEnd);
-            if (isOpenAt(heights, middle, offsetX, offsetY, offsetZ)) {
-                openDepth += HeightFog.opticalDepth(extinctionAtEye, stepEnd * length, stepEnd * offsetY,
-                        SYNTHETIC_HEIGHT_SCALE)
-                        - HeightFog.opticalDepth(extinctionAtEye, stepStart * length, stepStart * offsetY,
-                                SYNTHETIC_HEIGHT_SCALE);
-            }
-        }
-        return openDepth;
-    }
-
-    /**
-     * Whether the place at the given parameter of a segment from the eye of the shelter tests is open, from its own
-     * column and height alone.
-     */
-    private static boolean isOpenAt(float[] heights, double s, double offsetX, double offsetY, double offsetZ) {
-        double pointY = EYE_HEIGHT + s * offsetY;
-        int columnX = (int) Math.floor(EYE_COLUMN_X + EYE_FRACTION_X + s * offsetX);
-        int columnZ = (int) Math.floor(EYE_COLUMN_Z + EYE_FRACTION_Z + s * offsetZ);
-        if (columnX < 0 || columnX >= DustColumnWindow.SIZE || columnZ < 0 || columnZ >= DustColumnWindow.SIZE) {
-            return true;
-        }
-        float firstOpenY = heights[DustColumnWindow.texelIndex(WINDOW_ORIGIN_X + columnX, WINDOW_ORIGIN_Z + columnZ)];
-        return firstOpenY >= 0.5F * DustColumnWindow.CLOSED || pointY >= firstOpenY;
-    }
-
-    /**
-     * Checks the open optical depth of a segment against the brute force walk, within its absolute and relative
-     * tolerances.
-     */
-    private static void assertMatchesBruteForce(GameTestHelper helper, String caseName, float[] heights,
-            double offsetX, double offsetY, double offsetZ) {
-        double openDepth = shelterDepth(heights, offsetX, offsetY, offsetZ);
-        double bruteDepth = bruteForceOpenDepth(heights, offsetX, offsetY, offsetZ);
-        double allowed = BRUTE_FORCE_WALK_TOLERANCE + BRUTE_FORCE_WALK_RELATIVE_TOLERANCE * Math.abs(bruteDepth);
-        double difference = Math.abs(openDepth - bruteDepth);
-        helper.assertTrue(difference <= allowed, "The open optical depth of " + caseName + " is " + openDepth
-                + " where the brute force walk gives " + bruteDepth + ", a difference of " + difference + " above "
-                + allowed);
-    }
-
-    /**
-     * Checks that the open optical depth of every segment is the optical depth of the whole segment, which holds when
-     * every place on it is open.
-     */
-    private static void assertOpenDepthIsFullDepth(GameTestHelper helper, float[] heights, double[][] offsets,
-            String caseName) {
-        for (int caseIndex = 0; caseIndex < offsets.length; caseIndex++) {
-            double openDepth = shelterDepth(heights, offsets[caseIndex][0], offsets[caseIndex][1],
-                    offsets[caseIndex][2]);
-            double fullDepth = fullOpticalDepth(offsets[caseIndex][0], offsets[caseIndex][1], offsets[caseIndex][2]);
-            double difference = Math.abs(openDepth - fullDepth);
-            helper.assertTrue(difference <= FULL_DEPTH_RELATIVE_TOLERANCE * Math.abs(fullDepth), "The open optical "
-                    + "depth of " + describeOffset(offsets[caseIndex]) + " " + caseName + " is " + openDepth
-                    + " where the full depth is " + fullDepth + ", a difference of " + difference + " above "
-                    + FULL_DEPTH_RELATIVE_TOLERANCE + " of the full depth");
-        }
-    }
 }

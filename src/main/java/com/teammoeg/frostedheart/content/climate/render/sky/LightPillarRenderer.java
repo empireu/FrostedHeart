@@ -343,7 +343,7 @@ public final class LightPillarRenderer {
             double offsetY = selection.y(slot) - eyeY;
             double offsetZ = selection.z(slot) - eyeZ;
             if (newFogDrawn) {
-                // The fog draws at this stage at HIGH priority, so it has set this frame's fog by now:
+                // The fog draws at AFTER_TRIPWIRE_BLOCKS, earlier in the frame, so it has set this frame's fog by now:
                 double length = Math.sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
                 fade *= (float) HeightFog.transmittance(HeightFog.opticalDepth(WeatherFogRenderer.eyeExtinction(),
                         length, offsetY, WeatherFogRenderer.weather().heightScale()));

@@ -143,7 +143,15 @@ public enum SkySetting {
             0.0, 1.0),
     FOG_FIELD_BUDGET_MICROS("fogFieldBudgetMicros", "Microseconds per frame spent reading blocks and finding where "
             + "snow reaches, for the fog's shelter. More makes the fog settle sooner after a teleport and keep up in "
-            + "fast flight, at a cost in frame time.", Rebuilds.NOTHING, 500.0, 50.0, 5000.0);
+            + "fast flight, at a cost in frame time.", Rebuilds.NOTHING, 500.0, 50.0, 5000.0),
+    FOG_SNOW_DECAY_LENGTH("fogSnowDecayLength", "Distance in blocks over which the fog of snowfall thins going under "
+            + "cover, by a factor of about 2.7. Larger lets snow fog reach deeper under porches and canopies.",
+            Rebuilds.NOTHING, 1.5, 0.25, 4.3),
+    FOG_BLIZZARD_DECAY_LENGTH("fogBlizzardDecayLength", "The same for a blizzard, whose wind drives the snow deeper "
+            + "under cover.", Rebuilds.NOTHING, 4.0, 0.25, 4.3),
+    FOG_FIELD_RADIUS("fogFieldRadius", "Distance in blocks around the eye within which the fog follows every block of "
+            + "shelter. Beyond it, the fog follows the height of the highest block of each column. More costs GPU "
+            + "time.", Rebuilds.NOTHING, 32.0, 12.0, 40.0);
 
     /**
      * What a build does again when a setting changes. The views are built again with either part.

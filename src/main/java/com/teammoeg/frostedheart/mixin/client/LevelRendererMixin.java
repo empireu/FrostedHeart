@@ -25,7 +25,6 @@ import com.teammoeg.frostedheart.infrastructure.config.FHConfig;
 import com.teammoeg.frostedheart.bootstrap.reference.FHParticleTypes;
 import com.teammoeg.frostedheart.bootstrap.reference.FHSoundEvents;
 import com.teammoeg.frostedheart.content.climate.render.InfraredViewRenderer;
-import com.teammoeg.frostedheart.content.climate.render.fog.WeatherFogRenderer;
 import com.teammoeg.frostedheart.content.climate.render.sky.CalculatedSkyRenderer;
 import com.teammoeg.frostedheart.content.climate.render.weather.ClientWeatherFrame;
 import com.teammoeg.frostedheart.content.climate.render.weather.ClientWeatherState;
@@ -99,11 +98,6 @@ public abstract class LevelRendererMixin {
     private void frostedheart$selectPrecipitationOwner(LightTexture manager, float partialTicks,
                                                        double x, double y, double z, CallbackInfo ci) {
         if (ClientWeatherFrame.INSTANCE.ownsPrecipitation()) {
-            ci.cancel();
-            return;
-        }
-        if (WeatherFogRenderer.defersSnow()) {
-            WeatherFogRenderer.deferSnow(manager, partialTicks, x, y, z);
             ci.cancel();
         }
     }

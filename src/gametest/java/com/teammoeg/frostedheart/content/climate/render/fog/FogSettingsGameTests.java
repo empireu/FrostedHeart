@@ -52,6 +52,9 @@ public final class FogSettingsGameTests {
         checkNumberSetting(helper, SkySetting.FOG_HEIGHT_SCALE, "fogHeightScale", 128.0, 16.0, 1024.0);
         checkNumberSetting(helper, SkySetting.FOG_LEAF_POROSITY, "fogLeafPorosity", 0.3, 0.0, 1.0);
         checkNumberSetting(helper, SkySetting.FOG_FIELD_BUDGET_MICROS, "fogFieldBudgetMicros", 500.0, 50.0, 5000.0);
+        checkNumberSetting(helper, SkySetting.FOG_SNOW_DECAY_LENGTH, "fogSnowDecayLength", 1.5, 0.25, 4.3);
+        checkNumberSetting(helper, SkySetting.FOG_BLIZZARD_DECAY_LENGTH, "fogBlizzardDecayLength", 4.0, 0.25, 4.3);
+        checkNumberSetting(helper, SkySetting.FOG_FIELD_RADIUS, "fogFieldRadius", 32.0, 12.0, 40.0);
 
         double snowVisibility = SkySetting.FOG_SNOW_VISIBILITY.defaultValue();
         double blizzardVisibility = SkySetting.FOG_BLIZZARD_VISIBILITY.defaultValue();
@@ -60,20 +63,26 @@ public final class FogSettingsGameTests {
 
         SkySetting[] settings = SkySetting.values();
         int lastIndex = settings.length - 1;
-        helper.assertTrue(lastIndex >= 5, "SkySetting has " + settings.length + " settings, fewer than the 6 fog "
+        helper.assertTrue(lastIndex >= 8, "SkySetting has " + settings.length + " settings, fewer than the 9 fog "
                 + "settings");
-        helper.assertTrue(settings[lastIndex - 5] == SkySetting.FOG_ENABLED, "SkySetting has "
-                + settings[lastIndex - 5] + " sixth from the end instead of FOG_ENABLED");
-        helper.assertTrue(settings[lastIndex - 4] == SkySetting.FOG_SNOW_VISIBILITY, "SkySetting has "
-                + settings[lastIndex - 4] + " fifth from the end instead of FOG_SNOW_VISIBILITY");
-        helper.assertTrue(settings[lastIndex - 3] == SkySetting.FOG_BLIZZARD_VISIBILITY, "SkySetting has "
-                + settings[lastIndex - 3] + " fourth from the end instead of FOG_BLIZZARD_VISIBILITY");
-        helper.assertTrue(settings[lastIndex - 2] == SkySetting.FOG_HEIGHT_SCALE, "SkySetting has "
-                + settings[lastIndex - 2] + " third from the end instead of FOG_HEIGHT_SCALE");
-        helper.assertTrue(settings[lastIndex - 1] == SkySetting.FOG_LEAF_POROSITY, "SkySetting has "
-                + settings[lastIndex - 1] + " second from the end instead of FOG_LEAF_POROSITY");
-        helper.assertTrue(settings[lastIndex] == SkySetting.FOG_FIELD_BUDGET_MICROS, "SkySetting ends with "
-                + settings[lastIndex] + " instead of FOG_FIELD_BUDGET_MICROS");
+        helper.assertTrue(settings[lastIndex - 8] == SkySetting.FOG_ENABLED, "SkySetting has "
+                + settings[lastIndex - 8] + " ninth from the end instead of FOG_ENABLED");
+        helper.assertTrue(settings[lastIndex - 7] == SkySetting.FOG_SNOW_VISIBILITY, "SkySetting has "
+                + settings[lastIndex - 7] + " eighth from the end instead of FOG_SNOW_VISIBILITY");
+        helper.assertTrue(settings[lastIndex - 6] == SkySetting.FOG_BLIZZARD_VISIBILITY, "SkySetting has "
+                + settings[lastIndex - 6] + " seventh from the end instead of FOG_BLIZZARD_VISIBILITY");
+        helper.assertTrue(settings[lastIndex - 5] == SkySetting.FOG_HEIGHT_SCALE, "SkySetting has "
+                + settings[lastIndex - 5] + " sixth from the end instead of FOG_HEIGHT_SCALE");
+        helper.assertTrue(settings[lastIndex - 4] == SkySetting.FOG_LEAF_POROSITY, "SkySetting has "
+                + settings[lastIndex - 4] + " fifth from the end instead of FOG_LEAF_POROSITY");
+        helper.assertTrue(settings[lastIndex - 3] == SkySetting.FOG_FIELD_BUDGET_MICROS, "SkySetting has "
+                + settings[lastIndex - 3] + " fourth from the end instead of FOG_FIELD_BUDGET_MICROS");
+        helper.assertTrue(settings[lastIndex - 2] == SkySetting.FOG_SNOW_DECAY_LENGTH, "SkySetting has "
+                + settings[lastIndex - 2] + " third from the end instead of FOG_SNOW_DECAY_LENGTH");
+        helper.assertTrue(settings[lastIndex - 1] == SkySetting.FOG_BLIZZARD_DECAY_LENGTH, "SkySetting has "
+                + settings[lastIndex - 1] + " second from the end instead of FOG_BLIZZARD_DECAY_LENGTH");
+        helper.assertTrue(settings[lastIndex] == SkySetting.FOG_FIELD_RADIUS, "SkySetting ends with "
+                + settings[lastIndex] + " instead of FOG_FIELD_RADIUS");
 
         helper.succeed();
     }

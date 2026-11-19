@@ -81,7 +81,11 @@ public final class CalculatedSkyClientCommand {
                                 .executes(CalculatedSkyClientCommand::setDebugMode))))
                 .then(literal("dust").executes(CalculatedSkyClientCommand::dust))
                 .then(literal("fog").executes(CalculatedSkyClientCommand::fog)
-                        .then(literal("verify").executes(CalculatedSkyClientCommand::verifyFogTextures)))
+                        .then(literal("verify").executes(CalculatedSkyClientCommand::verifyFogTextures))
+                        .then(literal("selftest").executes(CalculatedSkyClientCommand::fogSelfTest))
+                        .then(literal("debug").then(fogDebugMode("off")).then(fogDebugMode("field"))
+                                .then(fogDebugMode("cells")).then(fogDebugMode("noregion"))
+                                .then(fogDebugMode("nofar")).then(fogDebugMode("analytic"))))
                 .then(set);
         CalculatedSkyScreenshots.addCommands(command);
         registerCommand(event.getDispatcher(), command);
@@ -191,6 +195,25 @@ public final class CalculatedSkyClientCommand {
 
     private static int verifyFogTextures(CommandContext<CommandSourceStack> context) {
         for (String line : ClientSnowField.verifyTextures()) {
+            send(context, line);
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    /**
+     * The debug subcommand of fog for one mode, which shows a debug view or leaves one part of the walk out.
+     */
+    private static LiteralArgumentBuilder<CommandSourceStack> fogDebugMode(String mode) {
+        return literal(mode).executes(context -> setFogDebugMode(context, mode));
+    }
+
+    private static int setFogDebugMode(CommandContext<CommandSourceStack> context, String mode) {
+        send(context, WeatherFogRenderer.setDebugMode(mode));
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int fogSelfTest(CommandContext<CommandSourceStack> context) {
+        for (String line : WeatherFogRenderer.selfTest()) {
             send(context, line);
         }
         return Command.SINGLE_SUCCESS;

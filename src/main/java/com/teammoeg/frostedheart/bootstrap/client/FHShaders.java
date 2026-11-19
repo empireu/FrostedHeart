@@ -207,8 +207,8 @@ public class FHShaders extends Shaders {
     }
 
     /**
-     * The fragment stage of the weather fog, weather_fog.glsl followed by weather_fog.fsh in one source, which is
-     * compiled on first use.
+     * The fragment stage of the weather fog, weather_fog.glsl followed by snow_walk.glsl and weather_fog.fsh in one
+     * source, which is compiled on first use.
      */
     public static Shader getWeatherFog() {
         if (!weatherFogUnloadOnReload) {
@@ -217,6 +217,7 @@ public class FHShaders extends Shaders {
         }
         if (WEATHER_FOG == null) {
             String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/snow_walk.glsl")) + "\n"
                     + readShaderSource(FHMain.rl("shaders/weather_fog.fsh"));
             WEATHER_FOG = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
         }

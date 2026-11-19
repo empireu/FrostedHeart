@@ -105,6 +105,7 @@
     "tetra.MixinToolbeltInventory"
   ],
   "client": [
+    "client.embeddium.CloudRendererFogMixin",
     "client.embeddium.InfraredRendererFactoryMixin",
     "client.embeddium.InfraredArenaFormatMixin",
     "client.embeddium.InfraredVertexBindingsMixin",
@@ -122,7 +123,6 @@
     "client.ForgeGuiMixin",
     "client.GuiMixin",
     "client.IngameGuiAccess",
-    "client.LevelRendererAccess",
     "client.LevelRendererMixin",
     "client.LightEngineAccessor_LightPillars",
     "client.LivingEntityRendererMixin",

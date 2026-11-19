@@ -107,8 +107,8 @@ public final class DustColumns {
     }
 
     private static boolean isWanted(ClientLevel level) {
-        return CalculatedSkyRenderer.isAllowed(level) && (SkySetting.FOG_ENABLED.isOn()
-                || Math.round(SkySetting.DUST_GLITTER_COUNT.get()) > 0 && SkySetting.DUST_GLITTER_OPEN_AIR.isOn());
+        return CalculatedSkyRenderer.isAllowed(level) && Math.round(SkySetting.DUST_GLITTER_COUNT.get()) > 0
+                && SkySetting.DUST_GLITTER_OPEN_AIR.isOn();
     }
 
     private static void stopTracking() {
@@ -151,21 +151,15 @@ public final class DustColumns {
      * Whether the window holds a column of the client's level, which it does for the eye's column from the tick after
      * any jump or level change.
      */
-    public static boolean covers(int x, int z) {
+    static boolean covers(int x, int z) {
         return trackedLevel != null && trackedLevel == Minecraft.getInstance().level && window.contains(x, z);
     }
 
-    /**
-     * The window's first column in x, or 0 before the window is placed.
-     */
-    public static int originX() {
+    static int originX() {
         return window.originX();
     }
 
-    /**
-     * The window's first column in z, or 0 before the window is placed.
-     */
-    public static int originZ() {
+    static int originZ() {
         return window.originZ();
     }
 
@@ -173,7 +167,7 @@ public final class DustColumns {
      * The texture of the heights, a single float channel of SIZE by SIZE texels indexed by world column modulo SIZE,
      * made on first use and uploaded again when a height changed. The texture bound before stays bound.
      */
-    public static int texture() {
+    static int texture() {
         boolean allocate = texture == 0;
         if (!window.takeChanged() && !allocate) {
             return texture;
@@ -231,8 +225,7 @@ public final class DustColumns {
      */
     public static String describe() {
         if (trackedLevel == null) {
-            return "Dust columns are not tracked while fogEnabled is off and no glints can be drawn or "
-                    + "dustGlitterOpenAir is off";
+            return "Dust columns are not tracked while no glints can be drawn or dustGlitterOpenAir is off";
         }
         String allocated = LightPillarSources.countsAllocations()
                 ? String.format(Locale.ROOT, "%d bytes allocated", lastBytes)

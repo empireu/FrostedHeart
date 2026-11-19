@@ -31,10 +31,12 @@ public final class ClientMockWeather implements WeatherConditions {
      */
     public static final double FULL_LEVEL = 0.8;
     private static final double DEFAULT_HEIGHT_SCALE = 128.0;
+    private static final double DEFAULT_DECAY_LENGTH = 1.5;
     private double snowfallIntensity;
     private double stormIntensity;
     private double referenceExtinction;
     private double heightScale = DEFAULT_HEIGHT_SCALE;
+    private double decayLength = DEFAULT_DECAY_LENGTH;
 
     /**
      * Takes the weather of this frame, which replaces the weather of the frame before.
@@ -46,9 +48,11 @@ public final class ClientMockWeather implements WeatherConditions {
      * @param blizzardVisibility the fog visibility in blocks of a full blizzard, from the fog settings
      * @param heightScale the height scale in blocks of the fog, which replaces the current one only when it is positive
      *        and not NaN
+     * @param snowDecayLength the decay length in blocks of the snow share in snowfall, from the fog settings
+     * @param blizzardDecayLength the decay length in blocks of the snow share in a full blizzard, from the fog settings
      */
     public void update(double rainLevel, double thunderLevel, double snowVisibility, double blizzardVisibility,
-            double heightScale) {
+            double heightScale, double snowDecayLength, double blizzardDecayLength) {
         double snowfall = clamp(countNaNAsZero(rainLevel) / FULL_LEVEL);
         double storm = Math.min(clamp(countNaNAsZero(thunderLevel) / FULL_LEVEL), snowfall);
         double snowExtinction = HeightFog.extinctionFromVisibility(snowVisibility);
@@ -56,6 +60,8 @@ public final class ClientMockWeather implements WeatherConditions {
         this.snowfallIntensity = snowfall;
         this.stormIntensity = storm;
         this.referenceExtinction = snowfall * (snowExtinction + (blizzardExtinction - snowExtinction) * storm);
+        double updatedDecayLength = snowDecayLength + (blizzardDecayLength - snowDecayLength) * storm;
+        this.decayLength = Double.isNaN(updatedDecayLength) ? DEFAULT_DECAY_LENGTH : updatedDecayLength;
         if (heightScale > 0.0) {
             this.heightScale = heightScale;
         }
@@ -91,6 +97,15 @@ public final class ClientMockWeather implements WeatherConditions {
     @Override
     public double heightScale() {
         return heightScale;
+    }
+
+    /**
+     * The distance in blocks over which the snow share falls by a factor of e going under cover, which is the snow or
+     * blizzard decay length of the last update by its storm, and 1.5 before the first one or after NaN lengths.
+     */
+    @Override
+    public double decayLength() {
+        return decayLength;
     }
 
     private static double countNaNAsZero(double level) {

@@ -49,4 +49,10 @@ public interface WeatherConditions {
      * @return the height scale in blocks, positive
      */
     double heightScale();
+
+    /**
+     * The distance in blocks over which the snow share falls by a factor of e going under cover.
+     * @return the decay length in blocks, positive
+     */
+    double decayLength();
 }
