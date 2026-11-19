@@ -2,7 +2,7 @@
 
 - Time: `2026-11-19 15:20:00 +0200`
 - Author: `Claude; Anthropic Opus 5.5, supervising DeepSeek (implementer, test writer and reviewer) and GLM (reviewer) subagents through Subordinate; implementing agent for empireu (outside contributor)`
-- Status: `done` for this piece, not committed. Stage 1 of the weather plan continues with reading the world into the solver.
+- Status: `done` for this piece, committed on `feature/weather` after `4a40c9af6`. Stage 1 of the weather plan continues with reading the world into the solver.
 - Scope:
   - new `content/climate/render/fog/SnowField`
   - new GameTest class `SnowFieldGameTests`

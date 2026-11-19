@@ -20,6 +20,7 @@
 package com.teammoeg.frostedheart.content.climate.render.sky;
 
 import com.teammoeg.frostedheart.FHMain;
+import com.teammoeg.frostedheart.content.climate.render.fog.ClientSnowField;
 import it.unimi.dsi.fastutil.objects.Reference2IntMap;
 import it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -51,7 +52,7 @@ import java.util.Locale;
  * received from the server from ClientPacketListener.readSectionList, and chunk columns from the Forge chunk events.
  * The hooks only queue, and the client tick takes the work. The queue follows the level of the latest hook call, and
  * it queues sections only while LightPillarSources tracks. Block changes and chunks that arrive also go to DustColumns
- * first, and block light computed or received goes to DustLights. Client thread only.
+ * and ClientSnowField first, and block light computed or received goes to DustLights. Client thread only.
  */
 @OnlyIn(Dist.CLIENT)
 @Mod.EventBusSubscriber(modid = FHMain.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
@@ -88,6 +89,7 @@ public final class LightPillarWorldChanges {
     public static void onBlockChanged(ClientLevel level, BlockPos pos, BlockState oldState, BlockState newState) {
         followLevel(level);
         DustColumns.onBlockChanged(level, pos, oldState, newState);
+        ClientSnowField.onBlockChanged(level, pos, newState);
         if (!queue.isTracking()) {
             return;
         }
@@ -164,6 +166,7 @@ public final class LightPillarWorldChanges {
         followLevel(level);
         ChunkPos chunk = event.getChunk().getPos();
         DustColumns.onChunkLoaded(level, chunk.x, chunk.z);
+        ClientSnowField.onChunkLoaded(level, chunk.x, chunk.z);
         queue.onColumnLoaded(chunk.toLong());
         if (queue.isTracking()) {
             currentSecond.columnsLoaded++;

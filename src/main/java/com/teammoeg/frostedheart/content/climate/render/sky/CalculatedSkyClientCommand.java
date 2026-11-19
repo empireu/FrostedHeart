@@ -26,6 +26,7 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.teammoeg.frostedheart.FHMain;
+import com.teammoeg.frostedheart.content.climate.render.fog.ClientSnowField;
 import com.teammoeg.frostedheart.content.climate.render.fog.WeatherFogRenderer;
 import com.teammoeg.frostedheart.infrastructure.config.FHConfig;
 import net.minecraft.client.Minecraft;
@@ -181,6 +182,7 @@ public final class CalculatedSkyClientCommand {
     private static int fog(CommandContext<CommandSourceStack> context) {
         send(context, WeatherFogRenderer.describe());
         send(context, WeatherFogRenderer.describeBound());
+        send(context, ClientSnowField.describe());
         return Command.SINGLE_SUCCESS;
     }
 

@@ -137,7 +137,13 @@ public enum SkySetting {
             + "the fog of a blizzard, keeping 2% of its contrast.", Rebuilds.NOTHING, 80.0, 4.0, 2048.0),
     FOG_HEIGHT_SCALE("fogHeightScale", "Height in blocks over which the fog of snow and blizzards thins by a factor "
             + "of about 2.7 going up from sea level, and thickens by the same factor going down.", Rebuilds.NOTHING,
-            128.0, 16.0, 1024.0);
+            128.0, 16.0, 1024.0),
+    FOG_LEAF_POROSITY("fogLeafPorosity", "Share of a face that leaves let falling snow and its fog through, so fog "
+            + "thins under a canopy. 0 makes leaves as closed as stone, and 1 as open as air.", Rebuilds.NOTHING, 0.3,
+            0.0, 1.0),
+    FOG_FIELD_BUDGET_MICROS("fogFieldBudgetMicros", "Microseconds per frame spent reading blocks and finding where "
+            + "snow reaches, for the fog's shelter. More makes the fog settle sooner after a teleport and keep up in "
+            + "fast flight, at a cost in frame time.", Rebuilds.NOTHING, 500.0, 50.0, 5000.0);
 
     /**
      * What a build does again when a setting changes. The views are built again with either part.
