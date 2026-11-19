@@ -40,6 +40,7 @@ import net.minecraftforge.fml.common.Mod;
 import org.slf4j.Logger;
 
 import javax.annotation.Nullable;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -50,6 +51,8 @@ import java.util.Locale;
  * SnowField.FILL_JUMP blocks or a level change, and each frame reads cells and steps the solver until the budget is
  * spent. LightPillarWorldChanges passes the block changes and the chunk loads of the tracked level, and a tag update
  * that arrives from the server clears the masks of the states and fills the field again.
+ * The window of far heights follows the eye on the same ticks, and the two textures that the fog reads are uploaded
+ * for the frame that asks for them with prepareTextures.
  * An error turns the field off, and it comes back once the fog is turned off and on again.
  * Client thread only.
  */
@@ -60,6 +63,11 @@ public final class ClientSnowField {
     private static final int TICKS_PER_SECOND = 20;
     private static final int READ_STEPS_PER_BATCH = 256;
     private static final int SOLVER_STEPS_PER_BATCH = 1024;
+    /**
+     * The number of tiles of the window of far heights that one client tick reads, which is a column of chunks after a
+     * move of one chunk and a thirtysecond of the window after a fill.
+     */
+    private static final int FAR_TILES_PER_TICK = 128;
     private static final double NANOSECONDS_PER_MICROSECOND = 1000.0;
     private static final double NANOSECONDS_PER_MILLISECOND = 1.0e6;
 
@@ -71,6 +79,8 @@ public final class ClientSnowField {
     private static SnowField field;
     @Nullable
     private static SnowFieldReader reader;
+    @Nullable
+    private static FarHeights farHeights;
     @Nullable
     private static ClientLevel trackedLevel;
     /**
@@ -86,6 +96,7 @@ public final class ClientSnowField {
     private static long currentCellsRead;
     private static long currentSolverSteps;
     private static int currentBlockChanges;
+    private static long currentFarTilesRead;
     private static long currentNanos;
     private static int currentFrames;
     private static long currentLargestFrameNanos;
@@ -93,6 +104,7 @@ public final class ClientSnowField {
     private static long lastCellsRead;
     private static long lastSolverSteps;
     private static int lastBlockChanges;
+    private static long lastFarTilesRead;
     private static long lastNanos;
     private static int lastFrames;
     private static long lastLargestFrameNanos;
@@ -210,7 +222,8 @@ public final class ClientSnowField {
     }
 
     /**
-     * Applies a block change of the tracked level to the field, and counts it and its time in the statistics.
+     * Applies a block change of the tracked level to the field and to the window of far heights, and counts it and its
+     * time in the statistics.
      * @param level the level the change is in
      * @param pos the block position of the change
      * @param newState the block state the block has now
@@ -224,6 +237,10 @@ public final class ClientSnowField {
         long start = System.nanoTime();
         try {
             currentReader.onBlockChanged(lookup, pos.getX(), pos.getY(), pos.getZ(), newState);
+            FarHeights currentFarHeights = farHeights;
+            if (currentFarHeights != null) {
+                currentFarHeights.onBlockChanged(lookup, pos.getX(), pos.getZ());
+            }
             currentBlockChanges++;
         } catch (RuntimeException exception) {
             failed = true;
@@ -236,24 +253,31 @@ public final class ClientSnowField {
     }
 
     /**
-     * Queues the columns of a chunk that arrived in the tracked level, a new one or one sent again.
+     * Queues the columns of a chunk that arrived in the tracked level, a new one or one sent again, and reads its tile
+     * of the far heights at once.
      * @param level the level the chunk is in
      * @param chunkX the chunk x
      * @param chunkZ the chunk z
      */
     public static void onChunkLoaded(ClientLevel level, int chunkX, int chunkZ) {
         SnowFieldReader currentReader = reader;
+        FarHeights currentFarHeights = farHeights;
         if (level == trackedLevel && currentReader != null) {
             currentReader.queueChunk(chunkX, chunkZ);
+            if (currentFarHeights != null) {
+                currentFarHeights.onChunkLoaded(lookup, chunkX, chunkZ);
+            }
         }
     }
 
     /**
-     * A line about the work of the last second and the state of the field, for the client command.
+     * A line about the work of the last second and the state of the field and of the window of far heights, for the
+     * client command.
      */
     public static String describe() {
         SnowField currentField = field;
         SnowFieldReader currentReader = reader;
+        FarHeights currentFarHeights = farHeights;
         if (trackedLevel == null || currentField == null || currentReader == null) {
             return "Snow field follows no level while the fog is off or the calculated sky is not drawn";
         }
@@ -262,16 +286,100 @@ public final class ClientSnowField {
                 : "allocations not counted by this JVM";
         String solvedBox = coversWholeCube(currentField) ? "the solved box covers the whole cube"
                 : "the solved box covers part of the cube";
+        String farWindow = currentFarHeights == null ? "no window of far heights"
+                : String.format(Locale.ROOT, "the window of far heights at the chunk %d %d %s with %d tiles waiting "
+                        + "and %d fills", currentFarHeights.originChunkX(), currentFarHeights.originChunkZ(),
+                        currentFarHeights.isReadPending() ? "waits for reads" : "is read",
+                        currentFarHeights.pendingTileCount(), currentFarHeights.fillCount());
         return String.format(Locale.ROOT,
-                "Snow field in the last second: %d cells read, %d solver steps, %d block changes, %.3f ms of work per "
-                        + "tick over %d frames with the largest frame at %.3f ms, %s; %d boxes waiting, %s, %d queue "
-                        + "entries, %d spilled cells, %d fills, %d resolveAll calls, %d spills, %d box overflows, %s",
-                lastCellsRead, lastSolverSteps, lastBlockChanges,
+                "Snow field in the last second: %d cells read, %d far tiles read, %d solver steps, %d block changes, "
+                        + "%.3f ms of work per tick over %d frames with the largest frame at %.3f ms, %s; %d boxes "
+                        + "waiting, %s, %d queue entries, %d spilled cells, %d fills, %d resolveAll calls, %d spills, "
+                        + "%d box overflows, %s; %s",
+                lastCellsRead, lastFarTilesRead, lastSolverSteps, lastBlockChanges,
                 lastNanos * 1.0e-6 / TICKS_PER_SECOND, lastFrames,
                 lastLargestFrameNanos / NANOSECONDS_PER_MILLISECOND, allocated, currentReader.queuedBoxCount(),
                 currentField.isDrained() ? "solver drained" : "solver working", currentField.queuedEntryCount(),
                 currentField.spilledCellCount(), currentField.fillCount(), currentField.resolveAllCount(),
-                currentField.spillCount(), currentReader.boxOverflowCount(), solvedBox);
+                currentField.spillCount(), currentReader.boxOverflowCount(), solvedBox, farWindow);
+    }
+
+    /**
+     * Uploads the field and the far heights for the frame that draws the fog, which must happen before the draw. An
+     * error of the render thread is the caller's to catch, since the fog pass turns itself off on a RuntimeException.
+     * @return whether there is a field of the level of the game, which makes both textures current
+     */
+    public static boolean prepareTextures() {
+        ClientLevel level = trackedLevel;
+        SnowField currentField = field;
+        FarHeights currentFarHeights = farHeights;
+        if (level == null || currentField == null || currentFarHeights == null
+                || level != Minecraft.getInstance().level) {
+            return false;
+        }
+        SnowFieldTextures.uploadField(currentField);
+        SnowFieldTextures.uploadHeights(currentFarHeights);
+        return true;
+    }
+
+    /**
+     * The field texture of the last prepareTextures.
+     * @return the texture id, or 0 before the texture is made
+     */
+    public static int fieldTexture() {
+        return SnowFieldTextures.fieldTexture();
+    }
+
+    /**
+     * The height texture of the last prepareTextures.
+     * @return the texture id, or 0 before the texture is made
+     */
+    public static int heightTexture() {
+        return SnowFieldTextures.heightTexture();
+    }
+
+    /**
+     * The window of far heights of the fog, for the uniforms of the shader.
+     * @return the window, or null while the field follows no level
+     */
+    @Nullable
+    public static FarHeights farHeights() {
+        return farHeights;
+    }
+
+    /**
+     * The field of the fog, for the uniforms of the shader.
+     * @return the field, or null while the field follows no level
+     */
+    @Nullable
+    public static SnowField field() {
+        return field;
+    }
+
+    /**
+     * The upper height of the vanilla fog bound: the largest surface height of the window of far heights, or the
+     * maximum build height of the tracked level while its reads are pending.
+     * @return the height in blocks, or Integer.MAX_VALUE while the tracked level is not the level of the game
+     */
+    public static int highestSurface() {
+        ClientLevel level = trackedLevel;
+        FarHeights currentFarHeights = farHeights;
+        if (level == null || currentFarHeights == null || level != Minecraft.getInstance().level) {
+            return Integer.MAX_VALUE;
+        }
+        return currentFarHeights.highestSurface(level.getMinBuildHeight(), level.getMaxBuildHeight());
+    }
+
+    /**
+     * The lines of the texture check of the client command, which uploads the two textures and reads them back.
+     * @return the lines to send
+     */
+    public static List<String> verifyTextures() {
+        if (trackedLevel == null || field == null || farHeights == null
+                || trackedLevel != Minecraft.getInstance().level) {
+            return List.of("The snow field is not tracked, so there is no texture to verify");
+        }
+        return SnowFieldTextures.verify(field, farHeights);
     }
 
     /**
@@ -282,11 +390,12 @@ public final class ClientSnowField {
     }
 
     /**
-     * Creates the field on first use, then fills it for a new level or a requested fill and moves it otherwise, and
-     * applies a leaf porosity that changed since the last application.
+     * Creates the field on first use, then fills it for a new level or a requested fill and moves it otherwise, applies
+     * a leaf porosity that changed since the last application, and moves the window of far heights to the eye and reads
+     * its pending tiles.
      */
     private static void followEye(ClientLevel level, int eyeX, int eyeY, int eyeZ) {
-        if (faces == null || field == null || reader == null) {
+        if (faces == null || field == null || reader == null || farHeights == null) {
             double porosity = SkySetting.FOG_LEAF_POROSITY.get();
             SnowFaces createdFaces = new SnowFaces(porosity);
             SnowField createdField = new SnowField(createdFaces, SnowField.DEFAULT_SIZE,
@@ -294,6 +403,7 @@ public final class ClientSnowField {
             faces = createdFaces;
             field = createdField;
             reader = new SnowFieldReader(createdField, createdFaces);
+            farHeights = new FarHeights();
             leafPorosity = porosity;
         }
         if (level != trackedLevel) {
@@ -302,6 +412,7 @@ public final class ClientSnowField {
             faces.clearStateCache();
             applyLeafPorosity();
             fillRequested = false;
+            farHeights.forget();
             reader.fill(eyeX, eyeY, eyeZ);
         } else if (fillRequested) {
             fillRequested = false;
@@ -313,6 +424,10 @@ public final class ClientSnowField {
             applyLeafPorosity();
             field.resolveAll();
         }
+        long farTilesReadBefore = farHeights.tilesRead();
+        farHeights.follow(eyeX, eyeZ);
+        farHeights.readPending(lookup, FAR_TILES_PER_TICK);
+        currentFarTilesRead += farHeights.tilesRead() - farTilesReadBefore;
     }
 
     /**
@@ -354,7 +469,7 @@ public final class ClientSnowField {
     }
 
     /**
-     * Rolls the statistics over once a second.
+     * Rolls the statistics over once a second, and the upload statistics of the textures with them.
      */
     private static void rollStatistics() {
         ticksThisSecond++;
@@ -364,6 +479,7 @@ public final class ClientSnowField {
         lastCellsRead = currentCellsRead;
         lastSolverSteps = currentSolverSteps;
         lastBlockChanges = currentBlockChanges;
+        lastFarTilesRead = currentFarTilesRead;
         lastNanos = currentNanos;
         lastFrames = currentFrames;
         lastLargestFrameNanos = currentLargestFrameNanos;
@@ -371,10 +487,12 @@ public final class ClientSnowField {
         currentCellsRead = 0L;
         currentSolverSteps = 0L;
         currentBlockChanges = 0;
+        currentFarTilesRead = 0L;
         currentNanos = 0L;
         currentFrames = 0;
         currentLargestFrameNanos = 0L;
         currentBytes = 0L;
         ticksThisSecond = 0;
+        SnowFieldTextures.rollStatistics();
     }
 }

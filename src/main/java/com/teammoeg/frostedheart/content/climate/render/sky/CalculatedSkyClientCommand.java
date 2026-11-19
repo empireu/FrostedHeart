@@ -27,6 +27,7 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.teammoeg.frostedheart.FHMain;
 import com.teammoeg.frostedheart.content.climate.render.fog.ClientSnowField;
+import com.teammoeg.frostedheart.content.climate.render.fog.SnowFieldTextures;
 import com.teammoeg.frostedheart.content.climate.render.fog.WeatherFogRenderer;
 import com.teammoeg.frostedheart.infrastructure.config.FHConfig;
 import net.minecraft.client.Minecraft;
@@ -79,7 +80,8 @@ public final class CalculatedSkyClientCommand {
                                 IntegerArgumentType.integer(0, LightPillarRenderer.LAST_DEBUG_MODE))
                                 .executes(CalculatedSkyClientCommand::setDebugMode))))
                 .then(literal("dust").executes(CalculatedSkyClientCommand::dust))
-                .then(literal("fog").executes(CalculatedSkyClientCommand::fog))
+                .then(literal("fog").executes(CalculatedSkyClientCommand::fog)
+                        .then(literal("verify").executes(CalculatedSkyClientCommand::verifyFogTextures)))
                 .then(set);
         CalculatedSkyScreenshots.addCommands(command);
         registerCommand(event.getDispatcher(), command);
@@ -183,6 +185,14 @@ public final class CalculatedSkyClientCommand {
         send(context, WeatherFogRenderer.describe());
         send(context, WeatherFogRenderer.describeBound());
         send(context, ClientSnowField.describe());
+        send(context, SnowFieldTextures.describe());
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int verifyFogTextures(CommandContext<CommandSourceStack> context) {
+        for (String line : ClientSnowField.verifyTextures()) {
+            send(context, line);
+        }
         return Command.SINGLE_SUCCESS;
     }
 
