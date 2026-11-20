@@ -29,6 +29,24 @@ uniform float heightScale;
 uniform float regionHalfWidth;
 // How much of the field's share the walk takes, from 0 to 1, which rises after a fill filled the shown box:
 uniform float fieldFade;
+// The tiling noise texture of the fog that the wind moves, and how much it multiplies the extinction at its peak:
+uniform sampler3D fogNoise;
+uniform float noiseStrength;
+// The blocks per tile of the fine octave of the noise, and the tile coordinate of the eye's continuous position for
+// each octave, from SnowFogNoise.tileCoordinate:
+uniform float fineNoiseTileBlocks;
+uniform vec3 fineNoiseEye;
+uniform vec3 coarseNoiseEye;
+
+// The weights of the two octaves of the noise, which sum to 1, as SnowFogNoise:
+const float SNOW_FOG_NOISE_FINE_WEIGHT = 0.35;
+const float SNOW_FOG_NOISE_COARSE_WEIGHT = 0.65;
+// How many times the fine octave's tile the coarse octave's tile is in blocks, as SnowFogNoise:
+const float SNOW_FOG_NOISE_COARSE_TILE_FACTOR = 4.3;
+// The steps that the far part of the segment is marched in while the noise is on, as SnowFogWalk.FAR_MARCH_STEPS:
+const int SNOW_WALK_FAR_MARCH_STEPS = 24;
+// The depth in optical depths of the far part that the march covers, as SnowFogWalk.FAR_MARCH_DEPTH:
+const float SNOW_WALK_FAR_MARCH_DEPTH = 3.912;
 
 // The number of texels per axis of the window of far heights minus one, as FarHeights.SIZE - 1:
 const int FAR_HEIGHTS_MASK = 1023;
@@ -46,6 +64,39 @@ const float SNOW_WALK_NO_BOUNDARY = 1.0e30;
 // The optical depth from the eye up to the given parameter of the segment, as SnowFogWalk.tauAt:
 float snowWalkTauAt(float parameter, float segmentLength, float verticalOffset) {
     return fogOpticalDepth(eyeExtinction, parameter * segmentLength, parameter * verticalOffset, heightScale);
+}
+
+// The noise at a point given as an offset from the eye's continuous position, as SnowFogWalk.noiseAt. The texture has
+// GL_LINEAR and GL_REPEAT, so the hardware filters and wraps both reads:
+float snowWalkNoise(vec3 offset) {
+    vec3 fineCoordinate = fineNoiseEye + offset / fineNoiseTileBlocks;
+    vec3 coarseCoordinate = coarseNoiseEye + offset / (fineNoiseTileBlocks * SNOW_FOG_NOISE_COARSE_TILE_FACTOR);
+    return SNOW_FOG_NOISE_FINE_WEIGHT * texture(fogNoise, fineCoordinate).r
+            + SNOW_FOG_NOISE_COARSE_WEIGHT * texture(fogNoise, coarseCoordinate).r;
+}
+
+// The parameter of the segment at which the fog of the eye's extinction and height scale reaches the given optical
+// depth, as SnowFogWalk.parameterAtDepth:
+float snowWalkParameterAtDepth(float segmentLength, float verticalOffset, float depth) {
+    float rayDepth = eyeExtinction * segmentLength;
+    if (!(depth > 0.0) || !(rayDepth > 0.0)) {
+        return 0.0;
+    }
+    float parameter;
+    if (!(heightScale > 0.0)) {
+        parameter = depth / rayDepth;
+    } else {
+        float scaledOffset = verticalOffset / heightScale;
+        float exponent = depth * scaledOffset / rayDepth;
+        if (abs(exponent) < FOG_SERIES_LIMIT) {
+            parameter = (depth / rayDepth) * (1.0 + exponent / 2.0 + exponent * exponent / 3.0);
+        } else if (1.0 - exponent > 0.0) {
+            parameter = -log(1.0 - exponent) / scaledOffset;
+        } else {
+            parameter = 1.0;
+        }
+    }
+    return clamp(parameter, 0.0, 1.0);
 }
 
 // The motion height of the column of a cell, which FarHeights.UNKNOWN makes open. The texel wraps with a bitwise and,
@@ -181,12 +232,15 @@ float snowWalkFarStop(vec3 offset, float regionEnd, out int columnsWalked) {
 }
 
 // The optical depth of the fog along the segment from the eye to the scene point at the given offset, as
-// SnowFogWalk.opticalDepth, with the cells and the columns that the walk visited and where the covered stretch at the
-// end of the segment begins. Bit 0 of partMask runs the cell walk, without which the region part takes the analytic fog,
-// and bit 1 runs the backward walk, without which the far part counts as open. The normal fog passes 3.
-float snowWalkOpticalDepth(vec3 offset, int partMask, out int cellsWalked, out int columnsWalked, out float farStop) {
+// SnowFogWalk.opticalDepth, with the cells and the columns that the walk visited, the steps of the far march, and where
+// the covered stretch at the end of the segment begins. Bit 0 of partMask runs the cell walk, without which the region
+// part takes the analytic fog, and bit 1 runs the backward walk, without which the far part counts as open. The normal
+// fog passes 3.
+float snowWalkOpticalDepth(vec3 offset, int partMask, out int cellsWalked, out int columnsWalked, out float farStop,
+        out int marchSteps) {
     cellsWalked = 0;
     columnsWalked = 0;
+    marchSteps = 0;
     farStop = 1.0;
     if (!(eyeExtinction > 0.0)) {
         return 0.0;
@@ -232,8 +286,10 @@ float snowWalkOpticalDepth(vec3 offset, int partMask, out int cellsWalked, out i
         boundaryStep.z = 1.0 / -offset.z;
     }
     bool walksRegion = (partMask & 1) != 0;
+    bool noiseOn = noiseStrength > 0.0;
     float regionDepth = 0.0;
     float enterDepth = 0.0;
+    float enter = 0.0;
     bool reachedRegionEnd = false;
     // Without the cell walk, the region takes the analytic fog in one part, so the timing modes leave out its cost:
     if (!walksRegion) {
@@ -245,8 +301,15 @@ float snowWalkOpticalDepth(vec3 offset, int partMask, out int cellsWalked, out i
         cellsWalked = cellIndex + 1;
         float exit = min(min(nextBoundary.x, nextBoundary.y), min(nextBoundary.z, regionEnd));
         float exitDepth = snowWalkTauAt(exit, segmentLength, offset.y);
-        regionDepth += snowWalkCellShare(cell) * max(0.0, exitDepth - enterDepth);
+        float share = snowWalkCellShare(cell);
+        float partDepth = max(0.0, exitDepth - enterDepth);
+        if (noiseOn && share > 0.0) {
+            float middle = (enter + exit) * 0.5;
+            partDepth *= 1.0 + noiseStrength * snowWalkNoise(middle * offset);
+        }
+        regionDepth += share * partDepth;
         enterDepth = exitDepth;
+        enter = exit;
         if (!(exit < regionEnd)) {
             reachedRegionEnd = true;
             break;
@@ -277,7 +340,22 @@ float snowWalkOpticalDepth(vec3 offset, int partMask, out int cellsWalked, out i
         if ((partMask & 2) != 0) {
             farStop = snowWalkFarStop(offset, regionEnd, columnsWalked);
         }
-        farDepth = max(0.0, snowWalkTauAt(farStop, segmentLength, offset.y) - enterDepth);
+        float baseDepth = max(0.0, snowWalkTauAt(farStop, segmentLength, offset.y) - enterDepth);
+        if (!noiseOn) {
+            farDepth = baseDepth;
+        } else if (baseDepth > 0.0) {
+            float marchedDepth = min(baseDepth, SNOW_WALK_FAR_MARCH_DEPTH);
+            float stepDepth = marchedDepth / float(SNOW_WALK_FAR_MARCH_STEPS);
+            float lastNoise = 0.0;
+            for (int step = 0; step < SNOW_WALK_FAR_MARCH_STEPS; step++) {
+                float parameter = snowWalkParameterAtDepth(segmentLength, offset.y,
+                        enterDepth + (float(step) + 0.5) * stepDepth);
+                lastNoise = snowWalkNoise(parameter * offset);
+                farDepth += stepDepth * (1.0 + noiseStrength * lastNoise);
+            }
+            farDepth += (baseDepth - marchedDepth) * (1.0 + noiseStrength * lastNoise);
+            marchSteps = SNOW_WALK_FAR_MARCH_STEPS;
+        }
     }
     float total = regionDepth + farDepth;
     if (!(total > 0.0)) {

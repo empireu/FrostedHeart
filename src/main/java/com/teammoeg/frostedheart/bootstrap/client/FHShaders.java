@@ -73,6 +73,8 @@ public class FHShaders extends Shaders {
     private static boolean diamondDustUnloadOnReload;
     private static Shader WEATHER_FOG;
     private static boolean weatherFogUnloadOnReload;
+    private static Shader WEATHER_FOG_UPSAMPLE;
+    private static boolean weatherFogUpsampleUnloadOnReload;
     public static Shader getCalculatedSky() {
         if (CALCULATED_SKY == null) {
             runAndAddReloadListener(() -> CALCULATED_SKY = load(Shader.ShaderType.FRAGMENT, FHMain.rl("calculated_sky")));
@@ -231,6 +233,35 @@ public class FHShaders extends Shaders {
         if (WEATHER_FOG != null) {
             WEATHER_FOG.deleteShader();
             WEATHER_FOG = null;
+        }
+    }
+
+    /**
+     * The fragment stage of the composite of the weather fog, weather_fog.glsl followed by snow_walk.glsl and
+     * weather_fog_upsample.fsh in one source, which is compiled on first use.
+     */
+    public static Shader getWeatherFogUpsample() {
+        if (!weatherFogUpsampleUnloadOnReload) {
+            addReloadListener(FHShaders::unloadWeatherFogUpsample);
+            weatherFogUpsampleUnloadOnReload = true;
+        }
+        if (WEATHER_FOG_UPSAMPLE == null) {
+            String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/snow_walk.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/weather_fog_upsample.fsh"));
+            WEATHER_FOG_UPSAMPLE = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
+        }
+        return WEATHER_FOG_UPSAMPLE;
+    }
+
+    /**
+     * Deletes the composite stage of the weather fog after a resource reload, so the next use compiles it from the new
+     * resources.
+     */
+    private static void unloadWeatherFogUpsample() {
+        if (WEATHER_FOG_UPSAMPLE != null) {
+            WEATHER_FOG_UPSAMPLE.deleteShader();
+            WEATHER_FOG_UPSAMPLE = null;
         }
     }
 

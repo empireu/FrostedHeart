@@ -55,4 +55,16 @@ public interface WeatherConditions {
      * @return the decay length in blocks, positive
      */
     double decayLength();
+
+    /**
+     * The speed of the wind, which moves the noise of the fog.
+     * @return the wind speed in blocks per second, not negative
+     */
+    double windSpeed();
+
+    /**
+     * The direction the wind blows toward in the x-z plane, where the wind blows toward (cos, sin) of it.
+     * @return the wind direction in radians
+     */
+    double windDirection();
 }

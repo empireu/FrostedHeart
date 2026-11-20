@@ -85,7 +85,8 @@ public final class CalculatedSkyClientCommand {
                         .then(literal("selftest").executes(CalculatedSkyClientCommand::fogSelfTest))
                         .then(literal("debug").then(fogDebugMode("off")).then(fogDebugMode("field"))
                                 .then(fogDebugMode("cells")).then(fogDebugMode("noregion"))
-                                .then(fogDebugMode("nofar")).then(fogDebugMode("analytic"))))
+                                .then(fogDebugMode("nofar")).then(fogDebugMode("analytic"))
+                                .then(fogDebugMode("transmittance")).then(fogDebugMode("fallback"))))
                 .then(set);
         CalculatedSkyScreenshots.addCommands(command);
         registerCommand(event.getDispatcher(), command);

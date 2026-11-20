@@ -63,6 +63,10 @@ public final class FogModelGameTests {
     private static final double FARTHEST_BLIZZARD_DISTANCE = 170.0;
     private static final double NEAREST_SNOW_DISTANCE = 550.0;
     private static final double FARTHEST_SNOW_DISTANCE = 650.0;
+    private static final double WIND_DIRECTION_BASE = 1.3;
+    private static final double WIND_DIRECTION_TURN = 2.0e-4;
+    private static final double WIND_DIRECTION_LONGEST_TICKS = 200000.0;
+    private static final double WIND_DIRECTION_TICK_STEP = 1000.0;
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void opticalDepthMatchesANumericIntegral(GameTestHelper helper) {
@@ -275,7 +279,7 @@ public final class FogModelGameTests {
         ClientMockWeather weather = new ClientMockWeather();
         for (int weatherIndex = 0; weatherIndex < weatherNames.length; weatherIndex++) {
             weather.update(rainLevels[weatherIndex], thunderLevels[weatherIndex], snowVisibility, blizzardVisibility,
-                    heightScale, snowDecayLength, blizzardDecayLength);
+                    heightScale, snowDecayLength, blizzardDecayLength, 50.0, 12.0, 0.0);
             String weatherName = weatherNames[weatherIndex];
             assertClose(helper, "the snowfall of " + weatherName, weather.snowfallIntensity(),
                     snowfalls[weatherIndex]);
@@ -286,29 +290,31 @@ public final class FogModelGameTests {
                     snowDecayLength + (blizzardDecayLength - snowDecayLength) * weather.stormIntensity());
         }
         weather.update(0.4, 0.4, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
-                blizzardDecayLength);
+                blizzardDecayLength, 50.0, 12.0, 0.0);
         assertClose(helper, "the snowfall at rain 0.4", weather.snowfallIntensity(), 0.5);
         assertClose(helper, "the storm at thunder 0.4", weather.stormIntensity(), 0.5);
         assertClose(helper, "the extinction at rain and thunder 0.4", weather.referenceExtinction(),
                 0.5 * (snowExtinction + blizzardExtinction) / 2.0);
         assertClose(helper, "the decay length at thunder 0.4", weather.decayLength(), 1.5 + 2.5 * 0.5);
         weather.update(0.2, 0.8, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
-                blizzardDecayLength);
+                blizzardDecayLength, 50.0, 12.0, 0.0);
         assertClose(helper, "the storm at rain 0.2 and thunder 0.8", weather.stormIntensity(), 0.25);
         assertClose(helper, "the snowfall at rain 0.2", weather.snowfallIntensity(), 0.25);
         assertClose(helper, "the decay length at thunder 0.8", weather.decayLength(), 1.5 + 2.5 * 0.25);
         weather.update(Double.NaN, Double.NaN, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
-                blizzardDecayLength);
+                blizzardDecayLength, 50.0, 12.0, 0.0);
         assertClose(helper, "the snowfall at a NaN rain level", weather.snowfallIntensity(), 0.0);
         assertClose(helper, "the storm at a NaN thunder level", weather.stormIntensity(), 0.0);
         assertClose(helper, "the extinction at NaN levels", weather.referenceExtinction(), 0.0);
         assertClose(helper, "the decay length at NaN levels", weather.decayLength(), 1.5);
-        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, 0.0, snowDecayLength, blizzardDecayLength);
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, 0.0, snowDecayLength, blizzardDecayLength, 50.0,
+                12.0, 0.0);
         assertClose(helper, "the height scale after 0", weather.heightScale(), 128.0);
         weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, Double.NaN, snowDecayLength,
-                blizzardDecayLength);
+                blizzardDecayLength, 50.0, 12.0, 0.0);
         assertClose(helper, "the height scale after NaN", weather.heightScale(), 128.0);
-        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, Double.NaN, Double.NaN);
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, Double.NaN, Double.NaN, 50.0, 12.0,
+                0.0);
         assertClose(helper, "the decay length after NaN lengths", weather.decayLength(), 1.5);
         ClientMockWeather freshWeather = new ClientMockWeather();
         assertClose(helper, "the snowfall before the first update", freshWeather.snowfallIntensity(), 0.0);
@@ -316,6 +322,55 @@ public final class FogModelGameTests {
         assertClose(helper, "the extinction before the first update", freshWeather.referenceExtinction(), 0.0);
         assertClose(helper, "the height scale before the first update", freshWeather.heightScale(), 128.0);
         assertClose(helper, "the decay length before the first update", freshWeather.decayLength(), 1.5);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void mockWeatherGivesTheWind(GameTestHelper helper) {
+        double snowVisibility = 60.0;
+        double blizzardVisibility = 20.0;
+        double heightScale = 128.0;
+        double snowDecayLength = 1.5;
+        double blizzardDecayLength = 4.0;
+        ClientMockWeather freshWeather = new ClientMockWeather();
+        assertClose(helper, "the wind speed before the first update", freshWeather.windSpeed(), 0.0);
+        assertClose(helper, "the wind direction before the first update", freshWeather.windDirection(), 0.0);
+        ClientMockWeather weather = new ClientMockWeather();
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, 50.0, 12.0, 0.0);
+        assertClose(helper, "the wind speed at the wind level 50 and the wind scale 12", weather.windSpeed(), 6.0);
+        assertClose(helper, "the wind direction at the day time 0", weather.windDirection(),
+                ClientMockWeather.windDirectionAt(0.0));
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, 150.0, 12.0, 0.0);
+        assertClose(helper, "the wind speed at the wind level 150, which counts as full", weather.windSpeed(), 12.0);
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, -5.0, 12.0, 0.0);
+        assertClose(helper, "the wind speed at the wind level -5", weather.windSpeed(), 0.0);
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, Double.NaN, 12.0, 0.0);
+        assertClose(helper, "the wind speed at a NaN wind level", weather.windSpeed(), 0.0);
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, 50.0, Double.NaN, 0.0);
+        assertClose(helper, "the wind speed at a NaN wind scale", weather.windSpeed(), 0.0);
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, 50.0, -1.0, 0.0);
+        assertClose(helper, "the wind speed at the wind scale -1", weather.windSpeed(), 0.0);
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, 50.0, 12.0, 12345.5);
+        assertClose(helper, "the wind direction at the day time 12345.5", weather.windDirection(),
+                ClientMockWeather.windDirectionAt(12345.5));
+        assertClose(helper, "the wind direction at the day time 0", ClientMockWeather.windDirectionAt(0.0),
+                WIND_DIRECTION_BASE + 0.9 * Math.sin(0.7) + 0.5 * Math.sin(2.1));
+        assertClose(helper, "the wind direction at a NaN day time", ClientMockWeather.windDirectionAt(Double.NaN),
+                WIND_DIRECTION_BASE);
+        for (double ticks = 0.0; ticks <= WIND_DIRECTION_LONGEST_TICKS; ticks += WIND_DIRECTION_TICK_STEP) {
+            double direction = ClientMockWeather.windDirectionAt(ticks);
+            double nextDirection = ClientMockWeather.windDirectionAt(ticks + 1.0);
+            double turn = Math.abs(nextDirection - direction);
+            helper.assertTrue(turn <= WIND_DIRECTION_TURN, "The wind direction turns by " + turn + " over the tick "
+                    + "after " + ticks + ", above the " + WIND_DIRECTION_TURN + " that keeps it slow");
+        }
         helper.succeed();
     }
 

@@ -32,11 +32,31 @@ public final class ClientMockWeather implements WeatherConditions {
     public static final double FULL_LEVEL = 0.8;
     private static final double DEFAULT_HEIGHT_SCALE = 128.0;
     private static final double DEFAULT_DECAY_LENGTH = 1.5;
+    /**
+     * The wind level of a full wind, which windSpeed divides by.
+     */
+    private static final double FULL_WIND_LEVEL = 100.0;
+    /**
+     * The direction the wind of windDirectionAt turns around, in radians.
+     */
+    private static final double BASE_WIND_DIRECTION = 1.3;
+    /**
+     * The two periods in ticks of the turns of the wind, and the phase of each, whose sum stays smooth and comes from
+     * the same synced day time for every player.
+     */
+    private static final double FIRST_WIND_TICKS = 36000.0;
+    private static final double SECOND_WIND_TICKS = 97000.0;
+    private static final double FIRST_WIND_PHASE = 0.7;
+    private static final double SECOND_WIND_PHASE = 2.1;
+    private static final double FIRST_WIND_WEIGHT = 0.9;
+    private static final double SECOND_WIND_WEIGHT = 0.5;
     private double snowfallIntensity;
     private double stormIntensity;
     private double referenceExtinction;
     private double heightScale = DEFAULT_HEIGHT_SCALE;
     private double decayLength = DEFAULT_DECAY_LENGTH;
+    private double windSpeed;
+    private double windDirection;
 
     /**
      * Takes the weather of this frame, which replaces the weather of the frame before.
@@ -50,9 +70,14 @@ public final class ClientMockWeather implements WeatherConditions {
      *        and not NaN
      * @param snowDecayLength the decay length in blocks of the snow share in snowfall, from the fog settings
      * @param blizzardDecayLength the decay length in blocks of the snow share in a full blizzard, from the fog settings
+     * @param windLevel the wind level of the climate, from 0 to 100, where NaN counts as 0
+     * @param windScale the speed in blocks per second of a full wind, from the fog settings, where NaN or a negative
+     *        one gives no wind
+     * @param dayTicks the day time in ticks with the partial tick, which sets the direction of the wind
      */
     public void update(double rainLevel, double thunderLevel, double snowVisibility, double blizzardVisibility,
-            double heightScale, double snowDecayLength, double blizzardDecayLength) {
+            double heightScale, double snowDecayLength, double blizzardDecayLength, double windLevel,
+            double windScale, double dayTicks) {
         double snowfall = clamp(countNaNAsZero(rainLevel) / FULL_LEVEL);
         double storm = Math.min(clamp(countNaNAsZero(thunderLevel) / FULL_LEVEL), snowfall);
         double snowExtinction = HeightFog.extinctionFromVisibility(snowVisibility);
@@ -65,6 +90,12 @@ public final class ClientMockWeather implements WeatherConditions {
         if (heightScale > 0.0) {
             this.heightScale = heightScale;
         }
+        if (Double.isNaN(windScale) || windScale < 0.0) {
+            this.windSpeed = 0.0;
+        } else {
+            this.windSpeed = clamp(countNaNAsZero(windLevel) / FULL_WIND_LEVEL) * windScale;
+        }
+        this.windDirection = windDirectionAt(dayTicks);
     }
 
     /**
@@ -106,6 +137,38 @@ public final class ClientMockWeather implements WeatherConditions {
     @Override
     public double decayLength() {
         return decayLength;
+    }
+
+    /**
+     * The wind speed of the last update in blocks per second, which is 0 before the first one.
+     */
+    @Override
+    public double windSpeed() {
+        return windSpeed;
+    }
+
+    /**
+     * The direction the wind of the last update blows toward in radians, which is 0 before the first one.
+     */
+    @Override
+    public double windDirection() {
+        return windDirection;
+    }
+
+    /**
+     * The direction the wind blows toward at a day time in ticks, which turns slowly and is the same for every player
+     * since the day time is synced.
+     * @param dayTicks the day time in ticks, with the partial tick of the frame
+     * @return the direction in radians, and the base direction for NaN
+     */
+    public static double windDirectionAt(double dayTicks) {
+        if (Double.isNaN(dayTicks)) {
+            return BASE_WIND_DIRECTION;
+        }
+        double firstTurn = 2.0 * Math.PI * dayTicks / FIRST_WIND_TICKS + FIRST_WIND_PHASE;
+        double secondTurn = 2.0 * Math.PI * dayTicks / SECOND_WIND_TICKS + SECOND_WIND_PHASE;
+        return BASE_WIND_DIRECTION + FIRST_WIND_WEIGHT * Math.sin(firstTurn)
+                + SECOND_WIND_WEIGHT * Math.sin(secondTurn);
     }
 
     private static double countNaNAsZero(double level) {

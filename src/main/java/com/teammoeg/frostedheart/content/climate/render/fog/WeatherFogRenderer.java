@@ -28,6 +28,7 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.logging.LogUtils;
 import com.teammoeg.frostedheart.FHMain;
 import com.teammoeg.frostedheart.bootstrap.client.FHShaders;
+import com.teammoeg.frostedheart.content.climate.ClientClimateData;
 import com.teammoeg.frostedheart.content.climate.render.sky.CalculatedSkyRenderer;
 import com.teammoeg.frostedheart.content.climate.render.sky.LightPillarSources;
 import com.teammoeg.frostedheart.content.climate.render.sky.SkyDrawTimer;
@@ -57,11 +58,13 @@ import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL12;
 import org.lwjgl.opengl.GL13;
 import org.lwjgl.opengl.GL14;
+import org.lwjgl.opengl.GL15;
 import org.lwjgl.opengl.GL20;
 import org.lwjgl.opengl.GL30;
 import org.slf4j.Logger;
 
 import javax.annotation.Nullable;
+import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.util.ArrayList;
@@ -97,13 +100,16 @@ public final class WeatherFogRenderer {
     private static final Logger LOGGER = LogUtils.getLogger();
     /**
      * The scene depth goes to texture unit 0 while the fog draws, the horizon colors to unit 1, the snow field to unit
-     * 2, the far heights to unit 3, and the share table to unit 4.
+     * 2, the far heights to unit 3, the share table to unit 4, the noise of the fog to unit 5, and the low-resolution
+     * target of the composite to unit 6.
      */
     private static final int SCENE_DEPTH_UNIT = 0;
     private static final int HORIZON_UNIT = 1;
     private static final int FIELD_UNIT = 2;
     private static final int HEIGHT_UNIT = 3;
     private static final int SHARE_TABLE_UNIT = 4;
+    private static final int NOISE_UNIT = 5;
+    private static final int LOW_RESOLUTION_UNIT = 6;
     /**
      * The texels around the horizon of the horizon color texture, which CalculatedSkyRenderer.horizonColors fills.
      */
@@ -134,11 +140,18 @@ public final class WeatherFogRenderer {
      * The tolerance on the walk counts of the self test, within which a column or a cell may differ by float ties.
      */
     private static final double SELF_TEST_WALK_TOLERANCE = 1.0e-3;
+    /**
+     * The share of the walked depth within which the self test's noisy rays must match the walk, since the filtered
+     * reads of the GPU round their weights.
+     */
+    private static final double SELF_TEST_NOISE_TOLERANCE_SHARE = 0.005;
 
     private static final ClientMockWeather mockWeather = new ClientMockWeather();
     private static final SkyDrawTimer timer = new SkyDrawTimer();
-    private static final SkyGlPass pass = new SkyGlPass(5);
+    private static final SkyGlPass pass = new SkyGlPass(7);
     private static final FogProgram fogPass = new FogProgram();
+    private static final UpsampleProgram upsamplePass = new UpsampleProgram();
+    private static final WeatherWind wind = new WeatherWind();
     private static final Matrix4f viewProjection = new Matrix4f();
     private static final Matrix4f inverseViewProjection = new Matrix4f();
     private static final Vector4f eyeColumn = new Vector4f();
@@ -167,8 +180,58 @@ public final class WeatherFogRenderer {
     private static ClientLevel keptFrameLevel;
     private static int horizonTexture;
     private static int shareTableTexture;
+    private static int noiseTexture;
     private static int selfTestTexture;
     private static int selfTestFramebuffer;
+    /**
+     * The noise texture's bytes, which are built once, and the buffer that uploads them.
+     */
+    private static final byte[] noiseTexels = new byte[SnowFogNoise.SIZE * SnowFogNoise.SIZE * SnowFogNoise.SIZE];
+    private static final ByteBuffer noiseBuffer = BufferUtils.createByteBuffer(noiseTexels.length);
+    /**
+     * The low-resolution target of the walk, its framebuffer, and the size it was made or last sized at.
+     */
+    private static int lowResolutionTexture;
+    private static int lowResolutionFramebuffer;
+    private static int lowResolutionWidth;
+    private static int lowResolutionHeight;
+    /**
+     * The queries that count the pixels of the fallback, used in turn, whether each has run, and the index of the query
+     * that the next frame writes.
+     */
+    private static final int[] fallbackQueries = new int[2];
+    private static final boolean[] fallbackQueryUsed = new boolean[2];
+    private static int nextFallbackQuery;
+    /**
+     * The share of the screen that fell back in the last frame, which is NaN before the first count, and whether the
+     * fallback is allowed.
+     */
+    private static double fallbackShare = Double.NaN;
+    private static boolean fallbackAllowed = true;
+    /**
+     * When the wind last advanced.
+     */
+    private static long lastFrameNanos;
+    /**
+     * The divisor of the resolution that the fog was walked at in the last frame, and the size of its low-resolution
+     * target.
+     */
+    private static int frameDivisor = 1;
+    private static int frameLowWidth;
+    private static int frameLowHeight;
+    /**
+     * The noise of this frame: its strength, the blocks per tile of each octave, and the tile coordinates of the eye for
+     * each octave.
+     */
+    private static double frameNoiseStrength;
+    private static double fineNoiseTileBlocks;
+    private static double coarseNoiseTileBlocks;
+    private static double fineNoiseEyeU;
+    private static double fineNoiseEyeV;
+    private static double fineNoiseEyeW;
+    private static double coarseNoiseEyeU;
+    private static double coarseNoiseEyeV;
+    private static double coarseNoiseEyeW;
     /**
      * The decay length of the last share table build, so that the table is built again only when the weather changes it.
      */
@@ -282,7 +345,8 @@ public final class WeatherFogRenderer {
         mockWeather.update(level.getRainLevel(partialTick), level.getThunderLevel(partialTick),
                 SkySetting.FOG_SNOW_VISIBILITY.get(), SkySetting.FOG_BLIZZARD_VISIBILITY.get(),
                 SkySetting.FOG_HEIGHT_SCALE.get(), SkySetting.FOG_SNOW_DECAY_LENGTH.get(),
-                SkySetting.FOG_BLIZZARD_DECAY_LENGTH.get());
+                SkySetting.FOG_BLIZZARD_DECAY_LENGTH.get(), ClientClimateData.getWind(),
+                SkySetting.FOG_WIND_SCALE.get(), level.getDayTime() + partialTick);
     }
 
     /**
@@ -563,6 +627,7 @@ public final class WeatherFogRenderer {
     private static void render(ClientLevel level, RenderLevelStageEvent event) {
         float partialTick = event.getPartialTick();
         updateWeather(level, partialTick);
+        advanceWind();
         WeatherConditions conditions = weather();
         if (!(conditions.referenceExtinction() > 0.0)) {
             return;
@@ -595,12 +660,16 @@ public final class WeatherFogRenderer {
         }
         updateSnowColor(level, partialTick);
         updateEye(eyeX, eyeY, eyeZ);
+        updateNoise(eyeX, eyeY, eyeZ);
         updateShareTable();
         updateFieldFade();
         updateRadius();
         frameHeightScale = conditions.heightScale();
         frameEyeY = eyeY;
         RenderTarget mainTarget = Minecraft.getInstance().getMainRenderTarget();
+        frameDivisor = FogUpsample.divisorOf(SkySetting.FOG_RESOLUTION_DIVISOR.get());
+        frameLowWidth = FogUpsample.lowResolutionSize(mainTarget.width, frameDivisor);
+        frameLowHeight = FogUpsample.lowResolutionSize(mainTarget.height, frameDivisor);
         timer.begin();
         try {
             draw(mainTarget);
@@ -609,6 +678,51 @@ public final class WeatherFogRenderer {
         }
         drawnThisFrame = true;
         keptFrameLevel = level;
+    }
+
+    /**
+     * Advances the wind by this frame's seconds, which the noise follows. It runs before the early returns of the
+     * frame, so that the displacement keeps moving while the fog is not drawn, and a paused game does not move it.
+     */
+    private static void advanceWind() {
+        long now = System.nanoTime();
+        double seconds = lastFrameNanos == 0L ? 0.0 : (now - lastFrameNanos) * 1.0e-9;
+        lastFrameNanos = now;
+        if (Minecraft.getInstance().isPaused()) {
+            seconds = 0.0;
+        }
+        wind.advance(seconds, weather().windSpeed(), weather().windDirection());
+    }
+
+    /**
+     * Keeps the noise of this frame: its strength and the blocks per tile of each octave from the settings, which are
+     * clamped to their ranges, and the tile coordinate of the eye for each octave with the wind's displacement on x and
+     * z, so that the two octaves drift downwind and the floats that go to the shader stay in [0, 1).
+     */
+    private static void updateNoise(double eyeX, double eyeY, double eyeZ) {
+        double strength = SkySetting.FOG_NOISE_STRENGTH.get();
+        if (!(strength > SkySetting.FOG_NOISE_STRENGTH.minimum())) {
+            strength = SkySetting.FOG_NOISE_STRENGTH.minimum();
+        } else if (strength > SkySetting.FOG_NOISE_STRENGTH.maximum()) {
+            strength = SkySetting.FOG_NOISE_STRENGTH.maximum();
+        }
+        double scale = SkySetting.FOG_NOISE_SCALE.get();
+        if (!(scale >= SkySetting.FOG_NOISE_SCALE.minimum())) {
+            scale = SkySetting.FOG_NOISE_SCALE.minimum();
+        } else if (scale > SkySetting.FOG_NOISE_SCALE.maximum()) {
+            scale = SkySetting.FOG_NOISE_SCALE.maximum();
+        }
+        frameNoiseStrength = strength;
+        fineNoiseTileBlocks = SnowFogNoise.SIZE * scale;
+        coarseNoiseTileBlocks = fineNoiseTileBlocks * SnowFogNoise.COARSE_TILE_FACTOR;
+        double displacementX = wind.displacementX();
+        double displacementZ = wind.displacementZ();
+        fineNoiseEyeU = SnowFogNoise.tileCoordinate(eyeX, displacementX, fineNoiseTileBlocks);
+        fineNoiseEyeV = SnowFogNoise.tileCoordinate(eyeY, 0.0, fineNoiseTileBlocks);
+        fineNoiseEyeW = SnowFogNoise.tileCoordinate(eyeZ, displacementZ, fineNoiseTileBlocks);
+        coarseNoiseEyeU = SnowFogNoise.tileCoordinate(eyeX, displacementX, coarseNoiseTileBlocks);
+        coarseNoiseEyeV = SnowFogNoise.tileCoordinate(eyeY, 0.0, coarseNoiseTileBlocks);
+        coarseNoiseEyeW = SnowFogNoise.tileCoordinate(eyeZ, displacementZ, coarseNoiseTileBlocks);
     }
 
     /**
@@ -735,9 +849,11 @@ public final class WeatherFogRenderer {
     }
 
     /**
-     * Draws the fog over the frame, reading the depth of the main target through a color only framebuffer so that the
-     * depth texture is not attached to what it draws to. Every piece of state the pass changes is set back after it, and
-     * the framebuffer holds no texture of the main target once it is released.
+     * Draws the fog over the frame in two passes: the walk into the low-resolution target, and the composite over the
+     * frame, whose second part walks the pixels that fall back at full resolution inside the query that counts them.
+     * The depth of the main target is read through a color only framebuffer, so that its depth texture is not attached
+     * to what it draws to. Every piece of state the pass changes is set back after it, and the framebuffer holds no
+     * texture of the main target once it is released.
      */
     private static void draw(RenderTarget mainTarget) {
         pass.begin();
@@ -750,23 +866,54 @@ public final class WeatherFogRenderer {
         int alphaEquation = GL11.glGetInteger(GL20.GL_BLEND_EQUATION_ALPHA);
         boolean culling = GL11.glIsEnabled(GL11.GL_CULL_FACE);
         boolean scissor = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
+        viewportBuffer.clear();
+        GL11.glGetIntegerv(GL11.GL_VIEWPORT, viewportBuffer);
+        int viewportX = viewportBuffer.get(0);
+        int viewportY = viewportBuffer.get(1);
+        int viewportWidth = viewportBuffer.get(2);
+        int viewportHeight = viewportBuffer.get(3);
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + FIELD_UNIT);
         int previousFieldTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + NOISE_UNIT);
+        int previousNoiseTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
         try {
             uploadHorizonColors();
-            bindColorFramebuffer(mainTarget);
+            updateNoiseTexture();
+            updateFallbackShare(mainTarget);
             RenderSystem.disableCull();
-            RenderSystem.enableBlend();
-            RenderSystem.blendEquation(GL14.GL_FUNC_ADD);
-            RenderSystem.blendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ZERO, GL11.GL_ONE);
+            RenderSystem.disableScissor();
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SCENE_DEPTH_UNIT);
             RenderSystem.bindTexture(mainTarget.getDepthTextureId());
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + HORIZON_UNIT);
             RenderSystem.bindTexture(horizonTexture);
             bindFieldTextures();
+            RenderSystem.disableBlend();
+            bindLowResolutionFramebuffer(mainTarget);
             fogPass.use();
             fogPass.setFrameUniforms(mainTarget);
             SkyGlPass.drawFullScreenQuad();
+            bindColorFramebuffer(mainTarget);
+            RenderSystem.viewport(viewportX, viewportY, viewportWidth, viewportHeight);
+            RenderSystem.enableBlend();
+            RenderSystem.blendEquation(GL14.GL_FUNC_ADD);
+            RenderSystem.blendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ZERO, GL11.GL_ONE);
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + LOW_RESOLUTION_UNIT);
+            RenderSystem.bindTexture(lowResolutionTexture);
+            upsamplePass.use();
+            upsamplePass.setFrameUniforms(mainTarget);
+            upsamplePass.setPart(0);
+            SkyGlPass.drawFullScreenQuad();
+            int queryIndex = nextFallbackQuery & 1;
+            int query = fallbackQuery(queryIndex);
+            GL15.glBeginQuery(GL15.GL_SAMPLES_PASSED, query);
+            try {
+                upsamplePass.setPart(1);
+                SkyGlPass.drawFullScreenQuad();
+            } finally {
+                GL15.glEndQuery(GL15.GL_SAMPLES_PASSED);
+            }
+            fallbackQueryUsed[queryIndex] = true;
+            nextFallbackQuery++;
         } finally {
             GL20.glBlendEquationSeparate(colorEquation, alphaEquation);
             RenderSystem.blendFuncSeparate(sourceColor, destinationColor, sourceAlpha, destinationAlpha);
@@ -782,15 +929,18 @@ public final class WeatherFogRenderer {
             }
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + FIELD_UNIT);
             GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousFieldTexture);
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + NOISE_UNIT);
+            GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousNoiseTexture);
+            RenderSystem.viewport(viewportX, viewportY, viewportWidth, viewportHeight);
             releaseColorFramebuffer(previousFramebuffer);
             pass.end();
         }
     }
 
     /**
-     * Binds the snow field to unit 2 as a 3D texture, and the far heights and the share table to units 3 and 4.
-     * SkyGlPass keeps only the 2D binding of each of its units, so the caller saves and restores the 3D binding of unit
-     * 2 itself.
+     * Binds the snow field to unit 2 as a 3D texture, the far heights and the share table to units 3 and 4, and the
+     * noise to unit 5. SkyGlPass keeps only the 2D binding of each of its units, so the caller saves and restores the
+     * 3D binding of units 2 and 5 itself.
      */
     private static void bindFieldTextures() {
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + FIELD_UNIT);
@@ -799,6 +949,112 @@ public final class WeatherFogRenderer {
         RenderSystem.bindTexture(ClientSnowField.heightTexture());
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SHARE_TABLE_UNIT);
         RenderSystem.bindTexture(shareTableTexture);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + NOISE_UNIT);
+        GL11.glBindTexture(GL12.GL_TEXTURE_3D, noiseTexture);
+    }
+
+    /**
+     * Builds the noise texture of SnowFogNoise.SEED and uploads it, making it once on first use. The texture bound
+     * before stays bound.
+     */
+    private static void updateNoiseTexture() {
+        if (noiseTexture != 0) {
+            return;
+        }
+        SnowFogNoise.build(SnowFogNoise.SEED, noiseTexels);
+        noiseBuffer.clear();
+        noiseBuffer.put(noiseTexels);
+        noiseBuffer.flip();
+        int target = GL11.glGenTextures();
+        int previousTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
+        try {
+            GlStateManager._pixelStore(GL11.GL_UNPACK_ROW_LENGTH, 0);
+            GlStateManager._pixelStore(GL12.GL_UNPACK_IMAGE_HEIGHT, 0);
+            GlStateManager._pixelStore(GL12.GL_UNPACK_SKIP_IMAGES, 0);
+            GlStateManager._pixelStore(GL11.GL_UNPACK_SKIP_ROWS, 0);
+            GlStateManager._pixelStore(GL11.GL_UNPACK_SKIP_PIXELS, 0);
+            GlStateManager._pixelStore(GL11.GL_UNPACK_ALIGNMENT, 1);
+            GL11.glBindTexture(GL12.GL_TEXTURE_3D, target);
+            GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_LINEAR);
+            GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_LINEAR);
+            GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_WRAP_S, GL11.GL_REPEAT);
+            GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_WRAP_T, GL11.GL_REPEAT);
+            GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL12.GL_TEXTURE_WRAP_R, GL11.GL_REPEAT);
+            GL12.glTexImage3D(GL12.GL_TEXTURE_3D, 0, GL30.GL_R8, SnowFogNoise.SIZE, SnowFogNoise.SIZE,
+                    SnowFogNoise.SIZE, 0, GL11.GL_RED, GL11.GL_UNSIGNED_BYTE, noiseBuffer);
+        } finally {
+            GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousTexture);
+        }
+        noiseTexture = target;
+    }
+
+    /**
+     * Reads the result of the query of the frame before, which counts the pixels that fell back, if it has one, and
+     * lets the fallback follow the cap from the share it gives. The read never blocks, since the result of the frame
+     * before is complete.
+     */
+    private static void updateFallbackShare(RenderTarget mainTarget) {
+        int readIndex = (nextFallbackQuery + 1) & 1;
+        if (!fallbackQueryUsed[readIndex]) {
+            return;
+        }
+        int query = fallbackQueries[readIndex];
+        if (GL15.glGetQueryObjecti(query, GL15.GL_QUERY_RESULT_AVAILABLE) == 0) {
+            return;
+        }
+        int samples = GL15.glGetQueryObjecti(query, GL15.GL_QUERY_RESULT);
+        fallbackShare = (double) samples / ((double) mainTarget.width * (double) mainTarget.height);
+        fallbackAllowed = FogUpsample.fallbackAllowed(fallbackAllowed, fallbackShare,
+                SkySetting.FOG_FALLBACK_CAP.get());
+    }
+
+    /**
+     * The query of the given index, made on first use.
+     */
+    private static int fallbackQuery(int index) {
+        if (fallbackQueries[index] == 0) {
+            fallbackQueries[index] = GL15.glGenQueries();
+        }
+        return fallbackQueries[index];
+    }
+
+    /**
+     * Binds the low-resolution target for drawing, making it first if needed and giving it the size of the frame when
+     * the frame or the divisor changed, and sets its viewport.
+     */
+    private static void bindLowResolutionFramebuffer(RenderTarget mainTarget) {
+        boolean allocate = lowResolutionFramebuffer == 0;
+        if (allocate) {
+            lowResolutionFramebuffer = GL30.glGenFramebuffers();
+            lowResolutionTexture = GL11.glGenTextures();
+        }
+        int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        try {
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, lowResolutionTexture);
+            if (allocate) {
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
+            }
+            if (allocate || lowResolutionWidth != frameLowWidth || lowResolutionHeight != frameLowHeight) {
+                GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_RG16F, frameLowWidth, frameLowHeight, 0, GL30.GL_RG,
+                        GL11.GL_FLOAT, (FloatBuffer) null);
+                lowResolutionWidth = frameLowWidth;
+                lowResolutionHeight = frameLowHeight;
+            }
+        } finally {
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, previousTexture);
+        }
+        GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, lowResolutionFramebuffer);
+        GL30.glFramebufferTexture2D(GL30.GL_DRAW_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, GL11.GL_TEXTURE_2D,
+                lowResolutionTexture, 0);
+        int status = GL30.glCheckFramebufferStatus(GL30.GL_DRAW_FRAMEBUFFER);
+        if (status != GL30.GL_FRAMEBUFFER_COMPLETE) {
+            throw new IllegalStateException("The weather fog low-resolution framebuffer is incomplete with status "
+                    + status);
+        }
+        RenderSystem.viewport(0, 0, frameLowWidth, frameLowHeight);
     }
 
     /**
@@ -969,6 +1225,16 @@ public final class WeatherFogRenderer {
                 debugMode = 0;
                 partMask = 0;
                 return "Fog timing mode analytic: both parts count as open air, which is the fog without the field";
+            case "transmittance":
+                debugMode = 3;
+                partMask = 3;
+                return "Fog debug mode transmittance: each pixel shows the transmittance of its fog as opaque gray, "
+                        + "white where nothing hides, with the pixels that fell back walked at full resolution";
+            case "fallback":
+                debugMode = 4;
+                partMask = 3;
+                return "Fog debug mode fallback: the normal fog, with the pixels that fell back drawn opaque red when "
+                        + "they walk at full resolution and orange when the cap takes the nearest sample instead";
             default:
                 debugMode = 0;
                 partMask = 3;
@@ -1005,13 +1271,25 @@ public final class WeatherFogRenderer {
                     SnowFieldTextures.shownMinY(), SnowFieldTextures.shownMaxY()), axisLag(eyeBlockZ, lagHalfWidth,
                     SnowFieldTextures.shownMinZ(), SnowFieldTextures.shownMaxZ())));
         }
+        String fallbackShareText = Double.isNaN(fallbackShare) ? "none"
+                : String.format(Locale.ROOT, "%.3f", fallbackShare);
+        double windDegrees = Math.toDegrees(wind.direction()) % 360.0;
+        if (windDegrees < 0.0) {
+            windDegrees += 360.0;
+        }
         return String.format(Locale.ROOT, "Weather fog %s in the last frame; %s; eye extinction %.5f per block, "
                         + "visibility %.1f blocks, fitted fog end %s; reference extinction %.5f per block, height "
                         + "scale %.1f blocks; %s, decay length %.2f blocks; R %.1f blocks, region half width %.1f "
-                        + "blocks, fade %.2f, %s, %d of the %d cells of the region cube inside it, lag %d blocks%s",
+                        + "blocks, fade %.2f, %s, %d of the %d cells of the region cube inside it, lag %d blocks; "
+                        + "divisor %d at %d by %d texels, fallback share %s %s; noise strength %.2f at %.2f blocks per "
+                        + "texel; wind %.1f blocks per second toward %.0f degrees, displacement (%.1f, %.1f) blocks%s",
                 drawn, timer.describe(), eyeExtinction, visibility, fittedEnd, weather().referenceExtinction(),
                 weather().heightScale(), describeEyeShare(), weather().decayLength(), frameRadius, frameHalfWidth,
-                frameFieldFade, hasShownBox ? "a shown box" : "no shown box", insideCells, regionCells, lag, stopped);
+                frameFieldFade, hasShownBox ? "a shown box" : "no shown box", insideCells, regionCells, lag,
+                frameDivisor, frameLowWidth, frameLowHeight, fallbackShareText,
+                fallbackAllowed ? "allowed" : "capped", frameNoiseStrength, fineNoiseTileBlocks / SnowFogNoise.SIZE,
+                wind.speed(),
+                windDegrees, wind.displacementX(), wind.displacementZ(), stopped);
     }
 
     /**
@@ -1147,6 +1425,9 @@ public final class WeatherFogRenderer {
         selfTestWalk.setFog(eyeExtinction, frameHeightScale);
         selfTestWalk.setRadius(frameRadius);
         selfTestWalk.setFieldFade(frameFieldFade);
+        selfTestWalk.setNoise(noiseTexels, frameNoiseStrength, fineNoiseTileBlocks, fineNoiseEyeU, fineNoiseEyeV,
+                fineNoiseEyeW, coarseNoiseEyeU, coarseNoiseEyeV, coarseNoiseEyeW);
+        boolean noiseOn = frameNoiseStrength > 0.0;
         int failedCount = 0;
         int walkDifferingCount = 0;
         double largestError = 0.0;
@@ -1159,6 +1440,9 @@ public final class WeatherFogRenderer {
             double walkDepth = selfTestWalk.opticalDepth(selfTestOffsets[ray * 3], selfTestOffsets[ray * 3 + 1],
                     selfTestOffsets[ray * 3 + 2]);
             double allowed = 1.0e-3 + 1.0e-3 * Math.abs(walkDepth);
+            if (noiseOn) {
+                allowed = Math.max(allowed, SELF_TEST_NOISE_TOLERANCE_SHARE * Math.abs(walkDepth));
+            }
             double error = Math.abs(gpuDepth - walkDepth);
             if (error > largestError) {
                 largestError = error;
@@ -1177,8 +1461,8 @@ public final class WeatherFogRenderer {
             }
         }
         lines.add(String.format(Locale.ROOT, "The self test compared %d rays, %d of them outside the tolerance on the "
-                        + "depth, the largest error %.6f at the ray %d", SELF_TEST_RAY_COUNT, failedCount, largestError,
-                largestErrorRay));
+                        + "depth, the largest error %.6f at the ray %d, %s", SELF_TEST_RAY_COUNT, failedCount,
+                largestError, largestErrorRay, noiseOn ? "with the noise on" : "with the noise off"));
         lines.add(String.format(Locale.ROOT, "%d rays differ in the cells walked, the columns walked or the far stop, "
                 + "which a float tie can change by one without failing", walkDifferingCount));
     }
@@ -1250,6 +1534,7 @@ public final class WeatherFogRenderer {
         int previousFieldTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
         try {
             uploadHorizonColors();
+            updateNoiseTexture();
             RenderSystem.disableScissor();
             RenderSystem.disableCull();
             GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, selfTestFramebuffer);
@@ -1335,10 +1620,11 @@ public final class WeatherFogRenderer {
     }
 
     /**
-     * The program of FHShaders.IMAGE_V and weather_fog.fsh, and the locations of the uniforms that draw sets every
-     * frame. It is made again when a resource reload replaced its stage, and its samplers are set once after it links.
+     * The locations of the uniforms of the scene and the walk that both fog programs share, the program itself, and the
+     * setting of them every frame. A program is made again when a resource reload replaced its stage, and its samplers
+     * are set once after it links.
      */
-    private static final class FogProgram {
+    private abstract static class FogProgramBase {
         @Nullable
         private ShaderProgram program;
         @Nullable
@@ -1347,8 +1633,6 @@ public final class WeatherFogRenderer {
         private int screenSizeUniform;
         private int eyeExtinctionUniform;
         private int heightScaleUniform;
-        private int snowColorUniform;
-        private int snowShareUniform;
         private int fieldMaskUniform;
         private int hasShownBoxUniform;
         private int shownMinUniform;
@@ -1357,16 +1641,32 @@ public final class WeatherFogRenderer {
         private int eyeFractionUniform;
         private int regionHalfWidthUniform;
         private int fieldFadeUniform;
-        private int debugModeUniform;
-        private int partMaskUniform;
-        private int selfTestUniform;
-        private int selfTestOffsetsUniform;
+        private int noiseStrengthUniform;
+        private int fineNoiseTileBlocksUniform;
+        private int fineNoiseEyeUniform;
+        private int coarseNoiseEyeUniform;
+        protected int partMaskUniform;
+
+        /**
+         * The fragment stage of this program, which FHShaders makes again after a resource reload.
+         */
+        protected abstract Shader loadFragment();
+
+        /**
+         * Sets the samplers of this program and looks up the locations of its own uniforms, once after it links.
+         */
+        protected abstract void onLinked(ShaderProgram linked);
+
+        /**
+         * Sets the uniforms that only this program has, once for each frame.
+         */
+        protected abstract void setOwnUniforms(RenderTarget mainTarget);
 
         /**
          * Uses the program, making it first if needed.
          */
-        private void use() {
-            Shader newFragment = FHShaders.getWeatherFog();
+        protected void use() {
+            Shader newFragment = loadFragment();
             if (program == null || fragment != newFragment) {
                 if (program != null) {
                     program.delete();
@@ -1382,17 +1682,11 @@ public final class WeatherFogRenderer {
                 program = created;
                 fragment = newFragment;
                 program.use();
-                GL20.glUniform1i(GL20.glGetUniformLocation(program.programId, "sceneDepth"), SCENE_DEPTH_UNIT);
-                GL20.glUniform1i(GL20.glGetUniformLocation(program.programId, "horizonColors"), HORIZON_UNIT);
-                GL20.glUniform1i(GL20.glGetUniformLocation(program.programId, "snowField"), FIELD_UNIT);
-                GL20.glUniform1i(GL20.glGetUniformLocation(program.programId, "farHeights"), HEIGHT_UNIT);
-                GL20.glUniform1i(GL20.glGetUniformLocation(program.programId, "shareTable"), SHARE_TABLE_UNIT);
+                onLinked(program);
                 inverseViewProjectionUniform = GL20.glGetUniformLocation(program.programId, "inverseViewProjection");
                 screenSizeUniform = GL20.glGetUniformLocation(program.programId, "screenSize");
                 eyeExtinctionUniform = GL20.glGetUniformLocation(program.programId, "eyeExtinction");
                 heightScaleUniform = GL20.glGetUniformLocation(program.programId, "heightScale");
-                snowColorUniform = GL20.glGetUniformLocation(program.programId, "snowColor");
-                snowShareUniform = GL20.glGetUniformLocation(program.programId, "snowShare");
                 fieldMaskUniform = GL20.glGetUniformLocation(program.programId, "fieldMask");
                 hasShownBoxUniform = GL20.glGetUniformLocation(program.programId, "hasShownBox");
                 shownMinUniform = GL20.glGetUniformLocation(program.programId, "shownMin");
@@ -1401,29 +1695,28 @@ public final class WeatherFogRenderer {
                 eyeFractionUniform = GL20.glGetUniformLocation(program.programId, "eyeFraction");
                 regionHalfWidthUniform = GL20.glGetUniformLocation(program.programId, "regionHalfWidth");
                 fieldFadeUniform = GL20.glGetUniformLocation(program.programId, "fieldFade");
-                debugModeUniform = GL20.glGetUniformLocation(program.programId, "debugMode");
                 partMaskUniform = GL20.glGetUniformLocation(program.programId, "partMask");
-                selfTestUniform = GL20.glGetUniformLocation(program.programId, "selfTest");
-                selfTestOffsetsUniform = GL20.glGetUniformLocation(program.programId, "selfTestOffsets");
+                noiseStrengthUniform = GL20.glGetUniformLocation(program.programId, "noiseStrength");
+                fineNoiseTileBlocksUniform = GL20.glGetUniformLocation(program.programId, "fineNoiseTileBlocks");
+                fineNoiseEyeUniform = GL20.glGetUniformLocation(program.programId, "fineNoiseEye");
+                coarseNoiseEyeUniform = GL20.glGetUniformLocation(program.programId, "coarseNoiseEye");
             }
             program.use();
         }
 
         /**
          * Sets the uniforms of this frame on the program in use: the inverse view projection, the size of the main
-         * target, the extinction at the eye and the fog's height scale, the snow fog color and its share, the field and
-         * its shown box, the eye as a block and a fraction, the region, the fade, and the debug and self test modes.
-         * The eye's block goes as three ints, so no world coordinate passes through a float.
+         * target, the extinction at the eye and the fog's height scale, the field and its shown box, the eye as a block
+         * and a fraction, the region, the fade, which parts of the walk run, and the noise. The eye's block goes as
+         * three ints, so no world coordinate passes through a float.
          */
-        private void setFrameUniforms(RenderTarget mainTarget) {
+        protected void setFrameUniforms(RenderTarget mainTarget) {
             SnowField field = ClientSnowField.field();
             inverseViewProjection.get(matrixBuffer);
             GL20.glUniformMatrix4fv(inverseViewProjectionUniform, false, matrixBuffer);
             GL20.glUniform2f(screenSizeUniform, (float) mainTarget.width, (float) mainTarget.height);
             GL20.glUniform1f(eyeExtinctionUniform, (float) eyeExtinction);
             GL20.glUniform1f(heightScaleUniform, (float) frameHeightScale);
-            GL20.glUniform3f(snowColorUniform, snowColor[0], snowColor[1], snowColor[2]);
-            GL20.glUniform1f(snowShareUniform, (float) weather().snowfallIntensity());
             GL20.glUniform1i(fieldMaskUniform, field != null ? field.size() - 1 : 0);
             GL20.glUniform1i(hasShownBoxUniform, SnowFieldTextures.hasShownBox() ? 1 : 0);
             GL20.glUniform3i(shownMinUniform, SnowFieldTextures.shownMinX(), SnowFieldTextures.shownMinY(),
@@ -1434,8 +1727,49 @@ public final class WeatherFogRenderer {
             GL20.glUniform3f(eyeFractionUniform, (float) eyeFractionX, (float) eyeFractionY, (float) eyeFractionZ);
             GL20.glUniform1f(regionHalfWidthUniform, (float) frameHalfWidth);
             GL20.glUniform1f(fieldFadeUniform, (float) frameFieldFade);
-            GL20.glUniform1i(debugModeUniform, debugMode);
             GL20.glUniform1i(partMaskUniform, partMask);
+            GL20.glUniform1f(noiseStrengthUniform, (float) frameNoiseStrength);
+            GL20.glUniform1f(fineNoiseTileBlocksUniform, (float) fineNoiseTileBlocks);
+            GL20.glUniform3f(fineNoiseEyeUniform, (float) fineNoiseEyeU, (float) fineNoiseEyeV,
+                    (float) fineNoiseEyeW);
+            GL20.glUniform3f(coarseNoiseEyeUniform, (float) coarseNoiseEyeU, (float) coarseNoiseEyeV,
+                    (float) coarseNoiseEyeW);
+            setOwnUniforms(mainTarget);
+        }
+    }
+
+    /**
+     * The program of the low-resolution walk, weather_fog.glsl followed by snow_walk.glsl and weather_fog.fsh, and the
+     * uniforms that only it has: the divisor, the size of the full-resolution target, and the self test.
+     */
+    private static final class FogProgram extends FogProgramBase {
+        private int divisorUniform;
+        private int fullSizeUniform;
+        private int selfTestUniform;
+        private int selfTestOffsetsUniform;
+
+        @Override
+        protected Shader loadFragment() {
+            return FHShaders.getWeatherFog();
+        }
+
+        @Override
+        protected void onLinked(ShaderProgram linked) {
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "sceneDepth"), SCENE_DEPTH_UNIT);
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "snowField"), FIELD_UNIT);
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "farHeights"), HEIGHT_UNIT);
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "shareTable"), SHARE_TABLE_UNIT);
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "fogNoise"), NOISE_UNIT);
+            divisorUniform = GL20.glGetUniformLocation(linked.programId, "divisor");
+            fullSizeUniform = GL20.glGetUniformLocation(linked.programId, "fullSize");
+            selfTestUniform = GL20.glGetUniformLocation(linked.programId, "selfTest");
+            selfTestOffsetsUniform = GL20.glGetUniformLocation(linked.programId, "selfTestOffsets");
+        }
+
+        @Override
+        protected void setOwnUniforms(RenderTarget mainTarget) {
+            GL20.glUniform1i(divisorUniform, frameDivisor);
+            GL20.glUniform2i(fullSizeUniform, mainTarget.width, mainTarget.height);
             GL20.glUniform1i(selfTestUniform, 0);
         }
 
@@ -1447,6 +1781,61 @@ public final class WeatherFogRenderer {
             GL20.glUniform1i(selfTestUniform, 1);
             GL20.glUniform1i(partMaskUniform, 3);
             GL20.glUniform3fv(selfTestOffsetsUniform, selfTestOffsetBuffer);
+        }
+    }
+
+    /**
+     * The program of the composite, weather_fog.glsl and snow_walk.glsl followed by weather_fog_upsample.fsh, and the
+     * uniforms that only it has: the snow fog color and its share, the debug view, the low-resolution target, and which
+     * part of the fog the draw covers.
+     */
+    private static final class UpsampleProgram extends FogProgramBase {
+        private int snowColorUniform;
+        private int snowShareUniform;
+        private int debugModeUniform;
+        private int lowSizeUniform;
+        private int divisorUniform;
+        private int compositePartUniform;
+        private int fallbackAllowedUniform;
+
+        @Override
+        protected Shader loadFragment() {
+            return FHShaders.getWeatherFogUpsample();
+        }
+
+        @Override
+        protected void onLinked(ShaderProgram linked) {
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "sceneDepth"), SCENE_DEPTH_UNIT);
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "horizonColors"), HORIZON_UNIT);
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "snowField"), FIELD_UNIT);
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "farHeights"), HEIGHT_UNIT);
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "shareTable"), SHARE_TABLE_UNIT);
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "fogNoise"), NOISE_UNIT);
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "lowResolution"), LOW_RESOLUTION_UNIT);
+            snowColorUniform = GL20.glGetUniformLocation(linked.programId, "snowColor");
+            snowShareUniform = GL20.glGetUniformLocation(linked.programId, "snowShare");
+            debugModeUniform = GL20.glGetUniformLocation(linked.programId, "debugMode");
+            lowSizeUniform = GL20.glGetUniformLocation(linked.programId, "lowSize");
+            divisorUniform = GL20.glGetUniformLocation(linked.programId, "divisor");
+            compositePartUniform = GL20.glGetUniformLocation(linked.programId, "compositePart");
+            fallbackAllowedUniform = GL20.glGetUniformLocation(linked.programId, "fallbackAllowed");
+        }
+
+        @Override
+        protected void setOwnUniforms(RenderTarget mainTarget) {
+            GL20.glUniform3f(snowColorUniform, snowColor[0], snowColor[1], snowColor[2]);
+            GL20.glUniform1f(snowShareUniform, (float) weather().snowfallIntensity());
+            GL20.glUniform1i(debugModeUniform, debugMode);
+            GL20.glUniform2i(lowSizeUniform, frameLowWidth, frameLowHeight);
+            GL20.glUniform1i(divisorUniform, frameDivisor);
+        }
+
+        /**
+         * Sets which part of the fog the following draw covers, and whether the fallback is allowed.
+         */
+        private void setPart(int part) {
+            GL20.glUniform1i(compositePartUniform, part);
+            GL20.glUniform1i(fallbackAllowedUniform, fallbackAllowed ? 1 : 0);
         }
     }
 }

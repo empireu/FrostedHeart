@@ -111,6 +111,26 @@ public final class SnowFogWalkGameTests {
     private static final double[] LAYOUT_DECAY_LENGTHS = {1.5, 4.0, 0.5, 4.3};
     private static final double[] LAYOUT_HEIGHT_SCALES = {0.0, 128.0, 0.0, 64.0};
     private static final int[][] LAYOUT_EYE_BLOCKS = {{0, 64, 0}, {-1000, 70, 333}, {5, 64, -7}, {1023, 61, 1024}};
+    private static final int NOISE_TEXEL_COUNT = SnowFogNoise.SIZE * SnowFogNoise.SIZE * SnowFogNoise.SIZE;
+    private static final int LOUD_TEXEL = 255;
+    private static final int QUIET_TEXEL = 51;
+    private static final double NOISE_STRENGTH = 1.5;
+    private static final double NOISE_FINE_TILE = 128.0;
+    private static final double COARSE_NOISE_FINE_TILE = 64.0;
+    private static final double NOISE_DISPLACEMENT_X = 13.7;
+    private static final double NOISE_DISPLACEMENT_Z = -4.2;
+    private static final double UNIFORM_EYE_U = 0.3;
+    private static final double UNIFORM_EYE_V = 0.6;
+    private static final double UNIFORM_EYE_W = 0.1;
+    private static final double UNIFORM_COARSE_EYE_U = 0.2;
+    private static final double UNIFORM_COARSE_EYE_V = 0.7;
+    private static final double UNIFORM_COARSE_EYE_W = 0.9;
+    private static final double NOISE_TOLERANCE = 1.0e-12;
+    private static final double NOISY_TRANSMITTANCE_TOLERANCE = 0.01;
+    private static final double COARSE_TRANSMITTANCE_TOLERANCE = 0.02;
+    private static final double RELATIVE_DEPTH_TOLERANCE = 0.02;
+    private static final double RELATIVE_DEPTH_LIMIT = 3.0;
+    private static final double PARAMETER_LENGTH = 100.0;
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void openFieldGivesTheAnalyticDepth(GameTestHelper helper) {
@@ -299,6 +319,103 @@ public final class SnowFogWalkGameTests {
     }
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void noiseOffKeepsEveryDepth(GameTestHelper helper) {
+        SnowFogWalk walk = setUpWalk(byteField(0), unknownHeights());
+        byte[] loudTexels = filledTexels(LOUD_TEXEL);
+        walk.setNoise(null, 1.0, NOISE_FINE_TILE, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assertDepthsWithoutNoise(helper, "the null noise array", walk);
+        walk.setNoise(loudTexels, 0.0, NOISE_FINE_TILE, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assertDepthsWithoutNoise(helper, "the noise of the strength 0", walk);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void uniformNoiseScalesTheDepth(GameTestHelper helper) {
+        byte[] loudTexels = filledTexels(LOUD_TEXEL);
+        SnowFogWalk walk = setUpWalk(byteField(0), unknownHeights());
+        setUniformNoise(walk, loudTexels, 1.0);
+        assertDepth(helper, "the open field of the noise that is 1 everywhere at the strength 1, which doubles the "
+                + "depth", walk, 2.0, 10.0, 0.0, 0.0);
+        assertDepth(helper, "the open field of the doubled depth", walk, 20.0, 100.0, 0.0, 0.0);
+        assertMarchSteps(helper, "the ray (100.0, 0.0, 0.0) of the doubled depth", walk, SnowFogWalk.FAR_MARCH_STEPS);
+        assertDepth(helper, "the open field of the doubled depth", walk, 2.6, 3.0, 4.0, 12.0);
+        assertDepth(helper, "the open field of the doubled depth", walk, 10.0, 0.0, -50.0, 0.0);
+        assertMarchSteps(helper, "the ray (0.0, -50.0, 0.0) of the doubled depth", walk, SnowFogWalk.FAR_MARCH_STEPS);
+        setUniformNoise(walk, filledTexels(QUIET_TEXEL), 2.5);
+        assertDepth(helper, "the open field of the noise that is 0.2 everywhere at the strength 2.5, which makes the "
+                + "depth 1.5 times", walk, 1.5, 10.0, 0.0, 0.0);
+        assertDepth(helper, "the open field of the depth that is 1.5 times", walk, 15.0, 100.0, 0.0, 0.0);
+        SnowFogWalk shelteredWalk = setUpWalk(byteField(SnowField.SHELTERED), filledHeights(SHELTERED_COLUMN_HEIGHT));
+        setUniformNoise(shelteredWalk, loudTexels, 1.0);
+        assertDepth(helper, "the sheltered field of the doubled far march", shelteredWalk, 7.7, 100.0, 0.0, 0.0);
+        assertDepth(helper, "the sheltered field of the ray inside the region", shelteredWalk, 0.0, 10.0, 0.0, 0.0);
+        SnowFogWalk deepWalk = setUpWalk(byteField(0), unknownHeights());
+        deepWalk.setFog(EYE_EXTINCTION, HEIGHT_SCALE);
+        setUniformNoise(deepWalk, loudTexels, 1.0);
+        double[][] rays = {{10.0, 0.0, 0.0}, {100.0, 0.0, 0.0}, {3.0, 4.0, 12.0}, {0.0, -50.0, 0.0},
+                {60.0, 30.0, 0.0}};
+        for (int rayIndex = 0; rayIndex < rays.length; rayIndex++) {
+            double offsetX = rays[rayIndex][0];
+            double offsetY = rays[rayIndex][1];
+            double offsetZ = rays[rayIndex][2];
+            double length = Math.sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
+            double expected = 2.0 * HeightFog.opticalDepth(EYE_EXTINCTION, length, offsetY, HEIGHT_SCALE);
+            assertDepth(helper, "the open field of the doubled depth at the height scale " + HEIGHT_SCALE, deepWalk,
+                    expected, offsetX, offsetY, offsetZ);
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void noiseAtReadsBothOctaves(GameTestHelper helper) {
+        byte[] texels = new byte[NOISE_TEXEL_COUNT];
+        texels[0] = (byte) LOUD_TEXEL;
+        SnowFogWalk walk = setUpWalk(byteField(0), unknownHeights());
+        double eye = 0.5 / SnowFogNoise.SIZE;
+        walk.setNoise(texels, 1.0, SnowFogNoise.SIZE, eye, eye, eye, eye, eye, eye);
+        assertNoise(helper, "the noise at the texel the eye stands in", walk, 1.0, 0.0, 0.0, 0.0);
+        assertNoise(helper, "the noise one block along, whose fine read lands on the empty texel 1 and whose coarse "
+                + "read is " + (1.0 / SnowFogNoise.COARSE_TILE_FACTOR) + " of a texel along", walk,
+                SnowFogNoise.COARSE_WEIGHT * (1.0 - 1.0 / SnowFogNoise.COARSE_TILE_FACTOR), 1.0, 0.0, 0.0);
+        assertNoise(helper, "the noise half a block back, whose fine read is halfway between the texels 63 and 0", walk,
+                SnowFogNoise.FINE_WEIGHT * 0.5
+                        + SnowFogNoise.COARSE_WEIGHT * (1.0 - 0.5 / SnowFogNoise.COARSE_TILE_FACTOR),
+                -0.5, 0.0, 0.0);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void parameterAtDepthInvertsTheFog(GameTestHelper helper) {
+        assertParameter(helper, "the parameter of the depth 2 of the fog of the extinction 0.1 without a height scale",
+                SnowFogWalk.parameterAtDepth(EYE_EXTINCTION, PARAMETER_LENGTH, 0.0, 0.0, 2.0), 0.2, NOISE_TOLERANCE);
+        assertParameter(helper, "the parameter of the depth 0",
+                SnowFogWalk.parameterAtDepth(EYE_EXTINCTION, PARAMETER_LENGTH, 0.0, 0.0, 0.0), 0.0, NOISE_TOLERANCE);
+        assertParameter(helper, "the parameter of the depth -1",
+                SnowFogWalk.parameterAtDepth(EYE_EXTINCTION, PARAMETER_LENGTH, 0.0, 0.0, -1.0), 0.0, NOISE_TOLERANCE);
+        assertParameter(helper, "the parameter of the depth 50, past the end of the segment",
+                SnowFogWalk.parameterAtDepth(EYE_EXTINCTION, PARAMETER_LENGTH, 0.0, 0.0, 50.0), 1.0, NOISE_TOLERANCE);
+        double[] verticalOffsets = {-100.0, -0.01, 0.0, 50.0, 100.0, 1.28};
+        double[] parameters = {0.1, 0.5, 0.9};
+        for (int offsetIndex = 0; offsetIndex < verticalOffsets.length; offsetIndex++) {
+            double verticalOffset = verticalOffsets[offsetIndex];
+            for (int parameterIndex = 0; parameterIndex < parameters.length; parameterIndex++) {
+                double parameter = parameters[parameterIndex];
+                double depth = HeightFog.opticalDepth(EYE_EXTINCTION, parameter * PARAMETER_LENGTH,
+                        parameter * verticalOffset, HEIGHT_SCALE);
+                double inverted = SnowFogWalk.parameterAtDepth(EYE_EXTINCTION, PARAMETER_LENGTH, verticalOffset,
+                        HEIGHT_SCALE, depth);
+                assertParameter(helper, "the round trip of the vertical offset " + verticalOffset + " at the "
+                        + "parameter " + parameter + ", whose depth is " + depth, inverted, parameter,
+                        DEPTH_TOLERANCE);
+            }
+        }
+        assertParameter(helper, "the parameter of the depth 20 past the asymptote of the vertical offset 100",
+                SnowFogWalk.parameterAtDepth(EYE_EXTINCTION, PARAMETER_LENGTH, 100.0, HEIGHT_SCALE, 20.0), 1.0,
+                NOISE_TOLERANCE);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void walkMatchesAFineStepReference(GameTestHelper helper) {
         ReferenceLayout[] layouts = buildLayouts();
         double largestError = 0.0;
@@ -326,6 +443,16 @@ public final class SnowFogWalkGameTests {
         }
         LOGGER.info("The walk matches the fine step reference on " + rayCount + " rays, the largest error "
                 + largestError + " at " + largestErrorCase);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void noisyWalkMatchesAFineStepReference(GameTestHelper helper) {
+        byte[] texels = new byte[NOISE_TEXEL_COUNT];
+        SnowFogNoise.build(SnowFogNoise.SEED, texels);
+        ReferenceLayout[] layouts = buildLayouts();
+        assertNoisyWalk(helper, layouts, texels, NOISE_FINE_TILE, NOISY_TRANSMITTANCE_TOLERANCE, true);
+        assertNoisyWalk(helper, layouts, texels, COARSE_NOISE_FINE_TILE, COARSE_TRANSMITTANCE_TOLERANCE, false);
         helper.succeed();
     }
 
@@ -374,7 +501,9 @@ public final class SnowFogWalkGameTests {
         ReferenceLayout layout = buildLayouts()[0];
         float[] table = new float[SnowFogWalk.TABLE_SIZE];
         SnowFogWalk.buildTable(layout.decayLength, table);
-        warmOperations(layout, table, ALLOCATION_WARMUP_CALLS);
+        byte[] texels = new byte[NOISE_TEXEL_COUNT];
+        SnowFogNoise.build(SnowFogNoise.SEED, texels);
+        warmOperations(layout, table, texels, ALLOCATION_WARMUP_CALLS);
         ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
         if (!(threadBean instanceof com.sun.management.ThreadMXBean allocationBean)) {
             LOGGER.info("The thread bean is not a com.sun.management.ThreadMXBean, so the allocation of the warm walk "
@@ -399,20 +528,20 @@ public final class SnowFogWalkGameTests {
             allocationBean.getThreadAllocatedBytes(threadId);
         }
         long before = allocationBean.getThreadAllocatedBytes(threadId);
-        double sum = warmOperations(layout, table, ALLOCATION_DEPTH_CALLS);
+        double sum = warmOperations(layout, table, texels, ALLOCATION_DEPTH_CALLS);
         long allocated = allocationBean.getThreadAllocatedBytes(threadId) - before;
         LOGGER.info("The warm snow fog walk allocated " + allocated + " bytes with a sum of " + sum);
-        helper.assertTrue(allocated == 0, "The " + ALLOCATION_DEPTH_CALLS + " warm optical depths, the "
-                + ALLOCATION_TABLE_CALLS + " warm tables and the setters allocate " + allocated
+        helper.assertTrue(allocated == 0, "The " + ALLOCATION_DEPTH_CALLS + " warm optical depths of the noisy walk, "
+                + "the " + ALLOCATION_TABLE_CALLS + " warm tables and the setters allocate " + allocated
                 + " bytes instead of 0");
         helper.succeed();
     }
 
     /**
-     * The work of the allocation test: the optical depths of the rays of the first layout, the tables into the same
-     * array and the setters, without an assertion or a message of its own, so that it can be measured.
+     * The work of the allocation test: the optical depths of the rays of the first layout with the noise on, the tables
+     * into the same array and the setters, without an assertion or a message of its own, so that it can be measured.
      */
-    private static double warmOperations(ReferenceLayout layout, float[] table, int depthCalls) {
+    private static double warmOperations(ReferenceLayout layout, float[] table, byte[] texels, int depthCalls) {
         SnowFogWalk walk = layout.walk;
         double sum = 0.0;
         walk.setField(layout.distances, FIELD_SIZE);
@@ -425,6 +554,7 @@ public final class SnowFogWalkGameTests {
         walk.setFog(layout.eyeExtinction, layout.heightScale);
         walk.setRadius(layout.radius);
         walk.setFieldFade(layout.fieldFade);
+        setLayoutNoise(layout, texels, NOISE_STRENGTH, NOISE_FINE_TILE);
         for (int call = 0; call < depthCalls; call++) {
             double[] ray = layout.rays[call % layout.rays.length];
             sum += walk.opticalDepth(ray[0], ray[1], ray[2]);
@@ -546,6 +676,16 @@ public final class SnowFogWalkGameTests {
      */
     private static ReferenceDepth referenceDepth(ReferenceLayout layout, double offsetX, double offsetY,
             double offsetZ) {
+        return referenceDepth(layout, offsetX, offsetY, offsetZ, null, 0.0);
+    }
+
+    /**
+     * The optical depth of a ray by midpoint samples at a step of 1/1024 of a block, with the share of every sample
+     * computed pointwise from the field and the far rule, and with the largest depth of one step of the same sampling.
+     * With a walk, the extinction of each step is multiplied by the noise of the walk at the step's midpoint.
+     */
+    private static ReferenceDepth referenceDepth(ReferenceLayout layout, double offsetX, double offsetY,
+            double offsetZ, SnowFogWalk noiseWalk, double noiseStrength) {
         double length = Math.sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
         int stepCount = Math.max(1, (int) Math.ceil(length * STEPS_PER_BLOCK));
         double[] stepShares = new double[stepCount];
@@ -585,7 +725,13 @@ public final class SnowFogWalkGameTests {
             double segmentDepth = HeightFog.opticalDepth(layout.eyeExtinction, parameter * length,
                     parameter * offsetY, layout.heightScale);
             double stepDepth = Math.max(0.0, segmentDepth - previousDepth);
-            depth += stepShares[stepIndex] * stepDepth;
+            double noiseFactor = 1.0;
+            if (noiseWalk != null) {
+                double midpoint = (stepIndex + 0.5) / stepCount;
+                noiseFactor = 1.0 + noiseStrength * noiseWalk.noiseAt(midpoint * offsetX, midpoint * offsetY,
+                        midpoint * offsetZ);
+            }
+            depth += stepShares[stepIndex] * stepDepth * noiseFactor;
             largestStepDepth = Math.max(largestStepDepth, stepDepth);
             previousDepth = segmentDepth;
         }
@@ -799,6 +945,140 @@ public final class SnowFogWalkGameTests {
         double difference = Math.abs(value - expected);
         helper.assertTrue(difference <= TABLE_TOLERANCE, "In " + step + ", the table entry " + entry + " is " + value
                 + " instead of " + expected + ", a difference of " + difference + " above " + TABLE_TOLERANCE);
+    }
+
+    /**
+     * Checks the noisy walk of the layouts against the fine step reference at the given fine tile, where the
+     * transmittance of each ray stays within its tolerance and, when asked, the depth of each ray below
+     * RELATIVE_DEPTH_LIMIT stays within RELATIVE_DEPTH_TOLERANCE of the reference.
+     */
+    private static void assertNoisyWalk(GameTestHelper helper, ReferenceLayout[] layouts, byte[] texels,
+            double fineTile, double transmittanceTolerance, boolean checkRelative) {
+        double largestTransmittanceError = 0.0;
+        String largestErrorCase = "none";
+        double largestRelativeError = 0.0;
+        String largestRelativeCase = "none";
+        int rayCount = 0;
+        for (int layoutIndex = 0; layoutIndex < layouts.length; layoutIndex++) {
+            ReferenceLayout layout = layouts[layoutIndex];
+            setLayoutNoise(layout, texels, NOISE_STRENGTH, fineTile);
+            for (int rayIndex = 0; rayIndex < layout.rays.length; rayIndex++) {
+                double[] ray = layout.rays[rayIndex];
+                ReferenceDepth reference = referenceDepth(layout, ray[0], ray[1], ray[2], layout.walk,
+                        NOISE_STRENGTH);
+                double depth = layout.walk.opticalDepth(ray[0], ray[1], ray[2]);
+                double transmittance = Math.exp(-depth);
+                double referenceTransmittance = Math.exp(-reference.depth);
+                double transmittanceError = Math.abs(transmittance - referenceTransmittance);
+                if (transmittanceError > largestTransmittanceError) {
+                    largestTransmittanceError = transmittanceError;
+                    largestErrorCase = "the layout " + layoutIndex + " and the ray " + describeRay(ray);
+                }
+                helper.assertTrue(transmittanceError <= transmittanceTolerance, "At the fine tile " + fineTile
+                        + ", the layout " + layoutIndex + " gives the ray " + describeRay(ray) + " the depth " + depth
+                        + " where the fine step reference gives " + reference.depth + ", whose transmittances "
+                        + transmittance + " and " + referenceTransmittance + " differ by " + transmittanceError
+                        + " above " + transmittanceTolerance);
+                if (checkRelative && reference.depth > 0.0 && reference.depth < RELATIVE_DEPTH_LIMIT) {
+                    double relativeError = Math.abs(depth - reference.depth) / reference.depth;
+                    if (relativeError > largestRelativeError) {
+                        largestRelativeError = relativeError;
+                        largestRelativeCase = "the layout " + layoutIndex + " and the ray " + describeRay(ray);
+                    }
+                    helper.assertTrue(relativeError <= RELATIVE_DEPTH_TOLERANCE, "At the fine tile " + fineTile
+                            + ", the layout " + layoutIndex + " gives the ray " + describeRay(ray) + " the depth "
+                            + depth + " where the fine step reference gives " + reference.depth + ", a relative error "
+                            + "of " + relativeError + " above " + RELATIVE_DEPTH_TOLERANCE);
+                }
+                rayCount++;
+            }
+        }
+        LOGGER.info("The noisy walk at the fine tile " + fineTile + " matches the fine step reference on " + rayCount
+                + " rays, the largest transmittance error " + largestTransmittanceError + " at " + largestErrorCase
+                + " and the largest relative depth error " + largestRelativeError + " at " + largestRelativeCase);
+    }
+
+    /**
+     * Sets the noise of a layout's walk from the built texture, at the eye's tile coordinate of each octave with the
+     * displacement of the wind.
+     */
+    private static void setLayoutNoise(ReferenceLayout layout, byte[] texels, double strength, double fineTile) {
+        double eyeX = layout.eyeBlockX + layout.eyeFractionX;
+        double eyeY = layout.eyeBlockY + layout.eyeFractionY;
+        double eyeZ = layout.eyeBlockZ + layout.eyeFractionZ;
+        double coarseTile = fineTile * SnowFogNoise.COARSE_TILE_FACTOR;
+        layout.walk.setNoise(texels, strength, fineTile,
+                SnowFogNoise.tileCoordinate(eyeX, NOISE_DISPLACEMENT_X, fineTile),
+                SnowFogNoise.tileCoordinate(eyeY, 0.0, fineTile),
+                SnowFogNoise.tileCoordinate(eyeZ, NOISE_DISPLACEMENT_Z, fineTile),
+                SnowFogNoise.tileCoordinate(eyeX, NOISE_DISPLACEMENT_X, coarseTile),
+                SnowFogNoise.tileCoordinate(eyeY, 0.0, coarseTile),
+                SnowFogNoise.tileCoordinate(eyeZ, NOISE_DISPLACEMENT_Z, coarseTile));
+    }
+
+    /**
+     * Sets a noise that is the same at every coordinate, whose two eye coordinates only keep the reads in the texture.
+     */
+    private static void setUniformNoise(SnowFogWalk walk, byte[] texels, double strength) {
+        walk.setNoise(texels, strength, NOISE_FINE_TILE, UNIFORM_EYE_U, UNIFORM_EYE_V, UNIFORM_EYE_W,
+                UNIFORM_COARSE_EYE_U, UNIFORM_COARSE_EYE_V, UNIFORM_COARSE_EYE_W);
+    }
+
+    /**
+     * A noise texture of the given byte everywhere.
+     */
+    private static byte[] filledTexels(int value) {
+        byte[] texels = new byte[NOISE_TEXEL_COUNT];
+        Arrays.fill(texels, (byte) value);
+        return texels;
+    }
+
+    /**
+     * Checks the depths of the open field, their march steps and the noise at an offset while the noise is off.
+     */
+    private static void assertDepthsWithoutNoise(GameTestHelper helper, String step, SnowFogWalk walk) {
+        assertDepth(helper, "the open field of " + step, walk, 1.0, 10.0, 0.0, 0.0);
+        assertMarchSteps(helper, "the ray (10.0, 0.0, 0.0) of " + step, walk, 0);
+        assertDepth(helper, "the open field of " + step, walk, 10.0, 100.0, 0.0, 0.0);
+        assertMarchSteps(helper, "the ray (100.0, 0.0, 0.0) of " + step, walk, 0);
+        assertDepth(helper, "the open field of " + step, walk, 1.3, 3.0, 4.0, 12.0);
+        assertMarchSteps(helper, "the ray (3.0, 4.0, 12.0) of " + step, walk, 0);
+        assertDepth(helper, "the open field of " + step, walk, 5.0, 0.0, -50.0, 0.0);
+        assertMarchSteps(helper, "the ray (0.0, -50.0, 0.0) of " + step, walk, 0);
+        double noise = walk.noiseAt(1.0, 2.0, 3.0);
+        helper.assertTrue(noise == 0.0, "The noise at (1.0, 2.0, 3.0) of " + step + " is " + noise
+                + " instead of exactly 0.0 while the noise is off");
+    }
+
+    /**
+     * Checks the far march steps of the last ray against the expected count.
+     */
+    private static void assertMarchSteps(GameTestHelper helper, String step, SnowFogWalk walk, int expectedSteps) {
+        int marchSteps = walk.lastMarchSteps();
+        helper.assertTrue(marchSteps == expectedSteps, "In " + step + ", the far march walks " + marchSteps
+                + " steps instead of " + expectedSteps);
+    }
+
+    /**
+     * Checks the noise at an offset from the eye against its expected value within NOISE_TOLERANCE.
+     */
+    private static void assertNoise(GameTestHelper helper, String step, SnowFogWalk walk, double expected,
+            double offsetX, double offsetY, double offsetZ) {
+        double noise = walk.noiseAt(offsetX, offsetY, offsetZ);
+        double difference = Math.abs(noise - expected);
+        helper.assertTrue(difference <= NOISE_TOLERANCE, "The noise of " + step + " at (" + offsetX + ", " + offsetY
+                + ", " + offsetZ + ") is " + noise + " instead of " + expected + ", a difference of " + difference
+                + " above " + NOISE_TOLERANCE);
+    }
+
+    /**
+     * Checks a parameter of a segment against its expected value within the given tolerance.
+     */
+    private static void assertParameter(GameTestHelper helper, String step, double actual, double expected,
+            double tolerance) {
+        double difference = Math.abs(actual - expected);
+        helper.assertTrue(difference <= tolerance, "The value of " + step + " is " + actual + " instead of " + expected
+                + ", a difference of " + difference + " above " + tolerance);
     }
 
     /**

@@ -151,7 +151,20 @@ public enum SkySetting {
             + "under cover.", Rebuilds.NOTHING, 4.0, 0.25, 4.3),
     FOG_FIELD_RADIUS("fogFieldRadius", "Distance in blocks around the eye within which the fog follows every block of "
             + "shelter. Beyond it, the fog follows the height of the highest block of each column. More costs GPU "
-            + "time.", Rebuilds.NOTHING, 32.0, 12.0, 40.0);
+            + "time.", Rebuilds.NOTHING, 32.0, 12.0, 40.0),
+    FOG_RESOLUTION_DIVISOR("fogResolutionDivisor", "Divisor of the resolution that the fog is walked at, where 1 "
+            + "walks every pixel, 2 one pixel of each two by two block and 4 one of each four by four, and the "
+            + "others take their depth from the walked ones.", Rebuilds.NOTHING, 2.0, 1.0, 4.0),
+    FOG_FALLBACK_CAP("fogFallbackCap", "Share of the screen that may walk at full resolution where the fog of its "
+            + "neighbors disagrees, above which such pixels take the nearest neighbor's fog instead. Larger keeps "
+            + "the fog of thin geometry and costs GPU time.", Rebuilds.NOTHING, 0.25, 0.0, 1.0),
+    FOG_NOISE_STRENGTH("fogNoiseStrength", "How much the moving noise thickens the fog, where 0 draws fog of an even "
+            + "density and 1 doubles its extinction where the noise is at its peak.", Rebuilds.NOTHING, 0.8, 0.0, 4.0),
+    FOG_NOISE_SCALE("fogNoiseScale", "Size in blocks of one texel of the fine octave of the moving noise, so its tile "
+            + "is 64 times this in blocks and its wisps are about 8 times this wide. The coarse octave is 4.3 times "
+            + "larger.", Rebuilds.NOTHING, 2.0, 1.0, 8.0),
+    FOG_WIND_SCALE("fogWindScale", "Wind speed in blocks per second at the wind level 100, which sets how fast the "
+            + "moving noise drifts along the fog.", Rebuilds.NOTHING, 12.0, 0.0, 40.0);
 
     /**
      * What a build does again when a setting changes. The views are built again with either part.
