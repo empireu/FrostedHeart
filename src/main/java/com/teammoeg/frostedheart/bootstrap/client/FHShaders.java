@@ -75,6 +75,8 @@ public class FHShaders extends Shaders {
     private static boolean weatherFogUnloadOnReload;
     private static Shader WEATHER_FOG_UPSAMPLE;
     private static boolean weatherFogUpsampleUnloadOnReload;
+    private static Shader WEATHER_FOG_SHARE;
+    private static boolean weatherFogShareUnloadOnReload;
     public static Shader getCalculatedSky() {
         if (CALCULATED_SKY == null) {
             runAndAddReloadListener(() -> CALCULATED_SKY = load(Shader.ShaderType.FRAGMENT, FHMain.rl("calculated_sky")));
@@ -262,6 +264,35 @@ public class FHShaders extends Shaders {
         if (WEATHER_FOG_UPSAMPLE != null) {
             WEATHER_FOG_UPSAMPLE.deleteShader();
             WEATHER_FOG_UPSAMPLE = null;
+        }
+    }
+
+    /**
+     * The fragment stage of the pass that fills the share volume of the weather fog, weather_fog.glsl followed by
+     * snow_walk.glsl and weather_fog_share.fsh in one source, which is compiled on first use.
+     */
+    public static Shader getWeatherFogShare() {
+        if (!weatherFogShareUnloadOnReload) {
+            addReloadListener(FHShaders::unloadWeatherFogShare);
+            weatherFogShareUnloadOnReload = true;
+        }
+        if (WEATHER_FOG_SHARE == null) {
+            String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/snow_walk.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/weather_fog_share.fsh"));
+            WEATHER_FOG_SHARE = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
+        }
+        return WEATHER_FOG_SHARE;
+    }
+
+    /**
+     * Deletes the share volume stage of the weather fog after a resource reload, so the next use compiles it from the new
+     * resources.
+     */
+    private static void unloadWeatherFogShare() {
+        if (WEATHER_FOG_SHARE != null) {
+            WEATHER_FOG_SHARE.deleteShader();
+            WEATHER_FOG_SHARE = null;
         }
     }
 

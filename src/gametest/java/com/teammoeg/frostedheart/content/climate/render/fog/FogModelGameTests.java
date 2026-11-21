@@ -25,13 +25,16 @@ import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
 
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
 import java.util.Random;
 
 /**
  * Checks the math of the height fog: the optical depth against a numeric integral of the extinction, the height factor
- * on both sides of its series switch, the edges of the optical depth, the culling distance against a brute force
- * search, the positions the culling distance hides, the culling distance below the highest surface of a blizzard, the
- * rounding of the fog end, and the mock weather.
+ * on both sides of its series switch, the edges of the optical depth, the optical depth of the sky and the tail that
+ * follows a start on the same ray, the culling distance against a brute force search, the positions the culling
+ * distance hides, the culling distance below the highest surface of a blizzard, the rounding of the fog end, the mock
+ * weather, and the color of a white face at full sky light.
  */
 @GameTestHolder("frostedheart_weather")
 @PrefixGameTestTemplate(false)
@@ -67,6 +70,49 @@ public final class FogModelGameTests {
     private static final double WIND_DIRECTION_TURN = 2.0e-4;
     private static final double WIND_DIRECTION_LONGEST_TICKS = 200000.0;
     private static final double WIND_DIRECTION_TICK_STEP = 1000.0;
+    private static final double STRUCTURE_SNOW_SHARE = 0.3;
+    private static final double STRUCTURE_BLIZZARD_SHARE = 0.75;
+    private static final double CLEAR_AIR_EXTINCTION = 0.05;
+    private static final double CLEAR_AIR_EYE_HEIGHT = 64.0;
+    private static final double CLEAR_AIR_MINIMUM_HEIGHT = 0.0;
+    private static final double CLEAR_AIR_MAXIMUM_HEIGHT = 64.0;
+    private static final double CLEAR_AIR_MAXIMUM_DISTANCE = 1000.0;
+    private static final double CLEAR_AIR_DISTANCE_TOLERANCE = 1.0e-5;
+    private static final double BLIZZARD_MAXIMUM_DISTANCE = 512.0;
+    /**
+     * The extinction of the blizzard's fog at the eye, which is the visibility optical depth over its visibility of 80
+     * blocks.
+     */
+    private static final double SKY_EYE_EXTINCTION = HeightFog.VISIBILITY_OPTICAL_DEPTH / BLIZZARD_VISIBILITY;
+    private static final double SKY_HEIGHT_SCALE = 128.0;
+    /**
+     * The optical depth of the sky at the direction 1.0, which is SKY_EYE_EXTINCTION * SKY_HEIGHT_SCALE.
+     */
+    private static final double FULL_SKY_OPTICAL_DEPTH = 6.2592;
+    private static final double HALF_SKY_OPTICAL_DEPTH = 12.5184;
+    private static final double GRAZING_SKY_DIRECTION = 0.01;
+    private static final double GRAZING_SKY_OPTICAL_DEPTH = 625.92;
+    private static final double SKY_TAIL_START = 96.0;
+    private static final double SKY_TAIL_OPTICAL_DEPTH = 2.956636726916559;
+    /**
+     * The optical depth of the 96 block segment along the direction 1.0, which the tail from its end completes.
+     */
+    private static final double SKY_SEGMENT_OPTICAL_DEPTH = 3.302563273083441;
+    private static final double FAR_SKY_TAIL_START = 1.0e6;
+    private static final int WHITE_FACE_SKY_FOURTEEN = 0xFFB0A090;
+    private static final int WHITE_FACE_SKY_FIFTEEN = 0xFFC0B0A0;
+    private static final int TRANSPARENT_SKY_FOURTEEN = 0x00B0A090;
+    private static final int TRANSPARENT_SKY_FIFTEEN = 0x12C0B0A0;
+    private static final int WHITE_LIGHTMAP_PIXEL = 0xFFFFFFFF;
+    private static final int BLACK_LIGHTMAP_PIXEL = 0xFF000000;
+    private static final double WHITE_FACE_RED = 0.596078431372549;
+    private static final double WHITE_FACE_GREEN = 0.6588235294117647;
+    private static final double WHITE_FACE_BLUE = 0.7215686274509804;
+    private static final double COLOR_TOLERANCE = 1.0e-6;
+    private static final int COLOR_CHANNEL_COUNT = 3;
+    private static final int ALLOCATION_WARMUP_CALLS = 20000;
+    private static final int ALLOCATION_CALLS = 1000;
+    private static final int ALLOCATION_BEAN_WARMUPS = 20;
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void opticalDepthMatchesANumericIntegral(GameTestHelper helper) {
@@ -279,7 +325,7 @@ public final class FogModelGameTests {
         ClientMockWeather weather = new ClientMockWeather();
         for (int weatherIndex = 0; weatherIndex < weatherNames.length; weatherIndex++) {
             weather.update(rainLevels[weatherIndex], thunderLevels[weatherIndex], snowVisibility, blizzardVisibility,
-                    heightScale, snowDecayLength, blizzardDecayLength, 50.0, 12.0, 0.0);
+                    heightScale, snowDecayLength, blizzardDecayLength, 50.0, 12.0, 0.0, 0.3, 0.75);
             String weatherName = weatherNames[weatherIndex];
             assertClose(helper, "the snowfall of " + weatherName, weather.snowfallIntensity(),
                     snowfalls[weatherIndex]);
@@ -290,31 +336,31 @@ public final class FogModelGameTests {
                     snowDecayLength + (blizzardDecayLength - snowDecayLength) * weather.stormIntensity());
         }
         weather.update(0.4, 0.4, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
-                blizzardDecayLength, 50.0, 12.0, 0.0);
+                blizzardDecayLength, 50.0, 12.0, 0.0, 0.3, 0.75);
         assertClose(helper, "the snowfall at rain 0.4", weather.snowfallIntensity(), 0.5);
         assertClose(helper, "the storm at thunder 0.4", weather.stormIntensity(), 0.5);
         assertClose(helper, "the extinction at rain and thunder 0.4", weather.referenceExtinction(),
                 0.5 * (snowExtinction + blizzardExtinction) / 2.0);
         assertClose(helper, "the decay length at thunder 0.4", weather.decayLength(), 1.5 + 2.5 * 0.5);
         weather.update(0.2, 0.8, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
-                blizzardDecayLength, 50.0, 12.0, 0.0);
+                blizzardDecayLength, 50.0, 12.0, 0.0, 0.3, 0.75);
         assertClose(helper, "the storm at rain 0.2 and thunder 0.8", weather.stormIntensity(), 0.25);
         assertClose(helper, "the snowfall at rain 0.2", weather.snowfallIntensity(), 0.25);
         assertClose(helper, "the decay length at thunder 0.8", weather.decayLength(), 1.5 + 2.5 * 0.25);
         weather.update(Double.NaN, Double.NaN, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
-                blizzardDecayLength, 50.0, 12.0, 0.0);
+                blizzardDecayLength, 50.0, 12.0, 0.0, 0.3, 0.75);
         assertClose(helper, "the snowfall at a NaN rain level", weather.snowfallIntensity(), 0.0);
         assertClose(helper, "the storm at a NaN thunder level", weather.stormIntensity(), 0.0);
         assertClose(helper, "the extinction at NaN levels", weather.referenceExtinction(), 0.0);
         assertClose(helper, "the decay length at NaN levels", weather.decayLength(), 1.5);
         weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, 0.0, snowDecayLength, blizzardDecayLength, 50.0,
-                12.0, 0.0);
+                12.0, 0.0, 0.3, 0.75);
         assertClose(helper, "the height scale after 0", weather.heightScale(), 128.0);
         weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, Double.NaN, snowDecayLength,
-                blizzardDecayLength, 50.0, 12.0, 0.0);
+                blizzardDecayLength, 50.0, 12.0, 0.0, 0.3, 0.75);
         assertClose(helper, "the height scale after NaN", weather.heightScale(), 128.0);
         weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, Double.NaN, Double.NaN, 50.0, 12.0,
-                0.0);
+                0.0, 0.3, 0.75);
         assertClose(helper, "the decay length after NaN lengths", weather.decayLength(), 1.5);
         ClientMockWeather freshWeather = new ClientMockWeather();
         assertClose(helper, "the snowfall before the first update", freshWeather.snowfallIntensity(), 0.0);
@@ -337,27 +383,27 @@ public final class FogModelGameTests {
         assertClose(helper, "the wind direction before the first update", freshWeather.windDirection(), 0.0);
         ClientMockWeather weather = new ClientMockWeather();
         weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
-                blizzardDecayLength, 50.0, 12.0, 0.0);
+                blizzardDecayLength, 50.0, 12.0, 0.0, 0.3, 0.75);
         assertClose(helper, "the wind speed at the wind level 50 and the wind scale 12", weather.windSpeed(), 6.0);
         assertClose(helper, "the wind direction at the day time 0", weather.windDirection(),
                 ClientMockWeather.windDirectionAt(0.0));
         weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
-                blizzardDecayLength, 150.0, 12.0, 0.0);
+                blizzardDecayLength, 150.0, 12.0, 0.0, 0.3, 0.75);
         assertClose(helper, "the wind speed at the wind level 150, which counts as full", weather.windSpeed(), 12.0);
         weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
-                blizzardDecayLength, -5.0, 12.0, 0.0);
+                blizzardDecayLength, -5.0, 12.0, 0.0, 0.3, 0.75);
         assertClose(helper, "the wind speed at the wind level -5", weather.windSpeed(), 0.0);
         weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
-                blizzardDecayLength, Double.NaN, 12.0, 0.0);
+                blizzardDecayLength, Double.NaN, 12.0, 0.0, 0.3, 0.75);
         assertClose(helper, "the wind speed at a NaN wind level", weather.windSpeed(), 0.0);
         weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
-                blizzardDecayLength, 50.0, Double.NaN, 0.0);
+                blizzardDecayLength, 50.0, Double.NaN, 0.0, 0.3, 0.75);
         assertClose(helper, "the wind speed at a NaN wind scale", weather.windSpeed(), 0.0);
         weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
-                blizzardDecayLength, 50.0, -1.0, 0.0);
+                blizzardDecayLength, 50.0, -1.0, 0.0, 0.3, 0.75);
         assertClose(helper, "the wind speed at the wind scale -1", weather.windSpeed(), 0.0);
         weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
-                blizzardDecayLength, 50.0, 12.0, 12345.5);
+                blizzardDecayLength, 50.0, 12.0, 12345.5, 0.3, 0.75);
         assertClose(helper, "the wind direction at the day time 12345.5", weather.windDirection(),
                 ClientMockWeather.windDirectionAt(12345.5));
         assertClose(helper, "the wind direction at the day time 0", ClientMockWeather.windDirectionAt(0.0),
@@ -372,6 +418,258 @@ public final class FogModelGameTests {
                     + "after " + ticks + ", above the " + WIND_DIRECTION_TURN + " that keeps it slow");
         }
         helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void mockWeatherGivesTheStructureShare(GameTestHelper helper) {
+        double snowVisibility = 60.0;
+        double blizzardVisibility = 20.0;
+        double heightScale = 128.0;
+        double snowDecayLength = 1.5;
+        double blizzardDecayLength = 4.0;
+        ClientMockWeather freshWeather = new ClientMockWeather();
+        assertClose(helper, "the structure share before the first update", freshWeather.structureShare(), 0.0);
+        ClientMockWeather weather = new ClientMockWeather();
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, 50.0, 12.0, 0.0, STRUCTURE_SNOW_SHARE, STRUCTURE_BLIZZARD_SHARE);
+        assertClose(helper, "the structure share at the rain 0.8 and the thunder 0", weather.structureShare(), 0.3);
+        weather.update(0.8, 0.4, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, 50.0, 12.0, 0.0, STRUCTURE_SNOW_SHARE, STRUCTURE_BLIZZARD_SHARE);
+        assertClose(helper, "the structure share at the thunder 0.4, which is halfway to the blizzard",
+                weather.structureShare(), 0.525);
+        weather.update(0.8, 0.8, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, 50.0, 12.0, 0.0, STRUCTURE_SNOW_SHARE, STRUCTURE_BLIZZARD_SHARE);
+        assertClose(helper, "the structure share at the thunder 0.8, which is the blizzard", weather.structureShare(),
+                0.75);
+        weather.update(0.4, 0.8, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, 50.0, 12.0, 0.0, STRUCTURE_SNOW_SHARE, STRUCTURE_BLIZZARD_SHARE);
+        assertClose(helper, "the structure share at the rain 0.4 and the thunder 0.8, whose storm is at most the "
+                + "snowfall of 0.5", weather.structureShare(), 0.525);
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, 50.0, 12.0, 0.0, Double.NaN, STRUCTURE_BLIZZARD_SHARE);
+        assertClose(helper, "the structure share at a NaN snow share without a storm", weather.structureShare(), 0.0);
+        weather.update(0.8, 0.8, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, 50.0, 12.0, 0.0, Double.NaN, STRUCTURE_BLIZZARD_SHARE);
+        assertClose(helper, "the structure share at a NaN snow share and the thunder 0.8", weather.structureShare(),
+                0.75);
+        weather.update(0.8, 0.8, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, 50.0, 12.0, 0.0, STRUCTURE_SNOW_SHARE, 1.5);
+        assertClose(helper, "the structure share at the blizzard share 1.5, clamped to 1", weather.structureShare(),
+                1.0);
+        weather.update(0.8, 0.0, snowVisibility, blizzardVisibility, heightScale, snowDecayLength,
+                blizzardDecayLength, 50.0, 12.0, 0.0, -0.2, STRUCTURE_BLIZZARD_SHARE);
+        assertClose(helper, "the structure share at the snow share -0.2 without a storm", weather.structureShare(),
+                0.0);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void clearAirLengthensTheCullingDistance(GameTestHelper helper) {
+        assertDistance(helper, "the six-argument distance of the uniform fog", FogCullingDistance.opaqueDistance(
+                CLEAR_AIR_EXTINCTION, CLEAR_AIR_EYE_HEIGHT, 0.0, CLEAR_AIR_MINIMUM_HEIGHT, CLEAR_AIR_MAXIMUM_HEIGHT,
+                CLEAR_AIR_MAXIMUM_DISTANCE), 124.68821451436742);
+        assertClearAirDistance(helper, "the clear air 1 and the range 96", 124.68821451436742, 1.0, 96.0);
+        assertClearAirDistance(helper, "the clear air 0.25 and the range 96", 196.68821451436742, 0.25, 96.0);
+        assertClearAirDistance(helper, "the clear air 0 and the range 96", 220.68821451436742, 0.0, 96.0);
+        assertClearAirDistance(helper, "the clear air 0.5 and the range 400, whose clear stretch is the whole "
+                + "distance", 249.37642902873484, 0.5, 400.0);
+        assertClearAirDistance(helper, "a NaN clear air and the range 96, whose clear air counts as 1",
+                124.68821451436742, Double.NaN, 96.0);
+        assertClearAirDistance(helper, "the clear air 0.25 and the range 0, which has no clear stretch",
+                124.68821451436742, 0.25, 0.0);
+        double blizzardExtinction = HeightFog.VISIBILITY_OPTICAL_DEPTH / BLIZZARD_VISIBILITY;
+        double blizzardDistance = FogCullingDistance.opaqueDistance(blizzardExtinction, BLIZZARD_EYE_HEIGHT,
+                BLIZZARD_HEIGHT_SCALE, LOWEST_HEIGHT, HIGHEST_SURFACE, BLIZZARD_MAXIMUM_DISTANCE);
+        double blizzardClearAirDistance = FogCullingDistance.opaqueDistance(blizzardExtinction, BLIZZARD_EYE_HEIGHT,
+                BLIZZARD_HEIGHT_SCALE, LOWEST_HEIGHT, HIGHEST_SURFACE, BLIZZARD_MAXIMUM_DISTANCE, 1.0, 0.0);
+        helper.assertTrue(blizzardClearAirDistance == blizzardDistance, "The eight-argument distance of the blizzard "
+                + "with the clear air 1 and the range 0 is " + blizzardClearAirDistance + " instead of the "
+                + blizzardDistance + " of the six-argument one");
+        double blizzardStructuredDistance = FogCullingDistance.opaqueDistance(blizzardExtinction, BLIZZARD_EYE_HEIGHT,
+                BLIZZARD_HEIGHT_SCALE, LOWEST_HEIGHT, HIGHEST_SURFACE, BLIZZARD_MAXIMUM_DISTANCE, 0.25, 96.0);
+        helper.assertTrue(blizzardStructuredDistance >= blizzardDistance, "The eight-argument distance of the "
+                + "blizzard with the clear air 0.25 and the range 96 is " + blizzardStructuredDistance
+                + ", shorter than the " + blizzardDistance + " without clear air");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void skyOpticalDepthFollowsTheFormula(GameTestHelper helper) {
+        double fullDepth = HeightFog.skyOpticalDepth(SKY_EYE_EXTINCTION, 1.0, SKY_HEIGHT_SCALE);
+        assertClose(helper, "the sky depth of the direction 1.0 at the height scale " + SKY_HEIGHT_SCALE, fullDepth,
+                FULL_SKY_OPTICAL_DEPTH);
+        double halfDepth = HeightFog.skyOpticalDepth(SKY_EYE_EXTINCTION, 0.5, SKY_HEIGHT_SCALE);
+        assertClose(helper, "the sky depth of the direction 0.5 at the height scale " + SKY_HEIGHT_SCALE, halfDepth,
+                HALF_SKY_OPTICAL_DEPTH);
+        double grazingDepth = HeightFog.skyOpticalDepth(SKY_EYE_EXTINCTION, GRAZING_SKY_DIRECTION, SKY_HEIGHT_SCALE);
+        assertClose(helper, "the sky depth of the direction " + GRAZING_SKY_DIRECTION + ", whose formula gives "
+                + GRAZING_SKY_OPTICAL_DEPTH + ", at the height scale " + SKY_HEIGHT_SCALE, grazingDepth,
+                HeightFog.MAXIMUM_OPTICAL_DEPTH);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void skyOpticalDepthHandlesEdges(GameTestHelper helper) {
+        double[] levelDirections = {0.0, -0.1, Double.NaN};
+        for (int directionIndex = 0; directionIndex < levelDirections.length; directionIndex++) {
+            double depth = HeightFog.skyOpticalDepth(SKY_EYE_EXTINCTION, levelDirections[directionIndex],
+                    SKY_HEIGHT_SCALE);
+            assertClose(helper, "the sky depth of the direction " + levelDirections[directionIndex] + " at the height "
+                    + "scale " + SKY_HEIGHT_SCALE, depth, HeightFog.MAXIMUM_OPTICAL_DEPTH);
+        }
+        double[] badHeightScales = {0.0, -1.0, Double.NaN};
+        for (int scaleIndex = 0; scaleIndex < badHeightScales.length; scaleIndex++) {
+            double depth = HeightFog.skyOpticalDepth(SKY_EYE_EXTINCTION, 1.0, badHeightScales[scaleIndex]);
+            assertClose(helper, "the sky depth of the direction 1.0 at the height scale "
+                    + badHeightScales[scaleIndex], depth, HeightFog.MAXIMUM_OPTICAL_DEPTH);
+        }
+        double[] badExtinctions = {0.0, -1.0, Double.NaN};
+        for (int extinctionIndex = 0; extinctionIndex < badExtinctions.length; extinctionIndex++) {
+            double upwardDepth = HeightFog.skyOpticalDepth(badExtinctions[extinctionIndex], 1.0, SKY_HEIGHT_SCALE);
+            assertClose(helper, "the sky depth at the extinction " + badExtinctions[extinctionIndex]
+                    + " of the direction 1.0", upwardDepth, 0.0);
+            double downwardDepth = HeightFog.skyOpticalDepth(badExtinctions[extinctionIndex], -1.0, SKY_HEIGHT_SCALE);
+            assertClose(helper, "the sky depth at the extinction " + badExtinctions[extinctionIndex]
+                    + " of the direction -1.0", downwardDepth, 0.0);
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void skyTailOpticalDepthCompletesTheWalkedSegment(GameTestHelper helper) {
+        double tail = HeightFog.skyTailOpticalDepth(SKY_EYE_EXTINCTION, SKY_TAIL_START, 1.0, SKY_HEIGHT_SCALE);
+        assertClose(helper, "the sky tail from " + SKY_TAIL_START + " blocks along the direction 1.0 at the height "
+                + "scale " + SKY_HEIGHT_SCALE, tail, SKY_TAIL_OPTICAL_DEPTH);
+        double segment = HeightFog.opticalDepth(SKY_EYE_EXTINCTION, SKY_TAIL_START, SKY_TAIL_START, SKY_HEIGHT_SCALE);
+        assertClose(helper, "the walked depth to " + SKY_TAIL_START + " blocks along the direction 1.0 at the height "
+                + "scale " + SKY_HEIGHT_SCALE, segment, SKY_SEGMENT_OPTICAL_DEPTH);
+        assertClose(helper, "the walked depth to " + SKY_TAIL_START + " blocks plus the sky tail from there, along "
+                + "the direction 1.0 at the height scale " + SKY_HEIGHT_SCALE, segment + tail, FULL_SKY_OPTICAL_DEPTH);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void skyTailOpticalDepthHandlesEdges(GameTestHelper helper) {
+        double fullDepth = HeightFog.skyOpticalDepth(SKY_EYE_EXTINCTION, 1.0, SKY_HEIGHT_SCALE);
+        double zeroStartTail = HeightFog.skyTailOpticalDepth(SKY_EYE_EXTINCTION, 0.0, 1.0, SKY_HEIGHT_SCALE);
+        assertClose(helper, "the sky tail from 0 blocks along the direction 1.0", zeroStartTail, fullDepth);
+        double negativeStartTail = HeightFog.skyTailOpticalDepth(SKY_EYE_EXTINCTION, -5.0, 1.0, SKY_HEIGHT_SCALE);
+        assertClose(helper, "the sky tail from -5 blocks, which counts as 0, along the direction 1.0",
+                negativeStartTail, fullDepth);
+        double nanStartTail = HeightFog.skyTailOpticalDepth(SKY_EYE_EXTINCTION, Double.NaN, 1.0, SKY_HEIGHT_SCALE);
+        assertClose(helper, "the sky tail from a NaN start, which counts as 0, along the direction 1.0", nanStartTail,
+                fullDepth);
+        double farTail = HeightFog.skyTailOpticalDepth(SKY_EYE_EXTINCTION, FAR_SKY_TAIL_START, 1.0, SKY_HEIGHT_SCALE);
+        assertClose(helper, "the sky tail from " + FAR_SKY_TAIL_START + " blocks along the direction 1.0, whose "
+                + "exponent passes " + HeightFog.MAXIMUM_EXPONENT, farTail, 0.0);
+        double[] levelDirections = {0.0, -0.1};
+        for (int directionIndex = 0; directionIndex < levelDirections.length; directionIndex++) {
+            double tail = HeightFog.skyTailOpticalDepth(SKY_EYE_EXTINCTION, SKY_TAIL_START,
+                    levelDirections[directionIndex], SKY_HEIGHT_SCALE);
+            assertClose(helper, "the sky tail from " + SKY_TAIL_START + " blocks along the direction "
+                    + levelDirections[directionIndex], tail, HeightFog.MAXIMUM_OPTICAL_DEPTH);
+        }
+        double[] badHeightScales = {0.0, -1.0, Double.NaN};
+        for (int scaleIndex = 0; scaleIndex < badHeightScales.length; scaleIndex++) {
+            double tail = HeightFog.skyTailOpticalDepth(SKY_EYE_EXTINCTION, SKY_TAIL_START, 1.0,
+                    badHeightScales[scaleIndex]);
+            assertClose(helper, "the sky tail from " + SKY_TAIL_START + " blocks along the direction 1.0 at the "
+                    + "height scale " + badHeightScales[scaleIndex], tail, HeightFog.MAXIMUM_OPTICAL_DEPTH);
+        }
+        double[] badExtinctions = {0.0, -1.0, Double.NaN};
+        for (int extinctionIndex = 0; extinctionIndex < badExtinctions.length; extinctionIndex++) {
+            double upwardTail = HeightFog.skyTailOpticalDepth(badExtinctions[extinctionIndex], SKY_TAIL_START, 1.0,
+                    SKY_HEIGHT_SCALE);
+            assertClose(helper, "the sky tail at the extinction " + badExtinctions[extinctionIndex]
+                    + " of the direction 1.0", upwardTail, 0.0);
+            double downwardTail = HeightFog.skyTailOpticalDepth(badExtinctions[extinctionIndex], SKY_TAIL_START, -1.0,
+                    SKY_HEIGHT_SCALE);
+            assertClose(helper, "the sky tail at the extinction " + badExtinctions[extinctionIndex]
+                    + " of the direction -1.0", downwardTail, 0.0);
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void whiteFaceColorAveragesTwoLightmapPixels(GameTestHelper helper) {
+        float[] result = new float[COLOR_CHANNEL_COUNT];
+        FogLight.whiteFaceColor(WHITE_FACE_SKY_FOURTEEN, WHITE_FACE_SKY_FIFTEEN, result);
+        assertColor(helper, "the mean of the lightmap pixels 0xFFB0A090 and 0xFFC0B0A0", result, WHITE_FACE_RED,
+                WHITE_FACE_GREEN, WHITE_FACE_BLUE);
+        float[] transparentResult = new float[COLOR_CHANNEL_COUNT];
+        FogLight.whiteFaceColor(TRANSPARENT_SKY_FOURTEEN, TRANSPARENT_SKY_FIFTEEN, transparentResult);
+        assertColor(helper, "the mean of the pixels 0x00B0A090 and 0x12C0B0A0 of the other alpha bytes",
+                transparentResult, WHITE_FACE_RED, WHITE_FACE_GREEN, WHITE_FACE_BLUE);
+        FogLight.whiteFaceColor(WHITE_LIGHTMAP_PIXEL, WHITE_LIGHTMAP_PIXEL, result);
+        assertColor(helper, "the mean of two 0xFFFFFFFF pixels", result, 1.0, 1.0, 1.0);
+        FogLight.whiteFaceColor(BLACK_LIGHTMAP_PIXEL, BLACK_LIGHTMAP_PIXEL, result);
+        assertColor(helper, "the mean of two 0xFF000000 pixels", result, 0.0, 0.0, 0.0);
+        float[] longResult = {0.25F, 0.25F, 0.25F, 0.75F};
+        FogLight.whiteFaceColor(WHITE_FACE_SKY_FOURTEEN, WHITE_FACE_SKY_FIFTEEN, longResult);
+        assertColor(helper, "the mean of the lightmap pixels 0xFFB0A090 and 0xFFC0B0A0 in a result of length 4",
+                longResult, WHITE_FACE_RED, WHITE_FACE_GREEN, WHITE_FACE_BLUE);
+        helper.assertTrue(longResult[3] == 0.75F, "The result of length 4 holds " + longResult[3] + " in its fourth "
+                + "entry instead of the 0.75 it held before the call");
+        helper.assertTrue(rejectsShortResult(), "The white face color of a result of length 2 does not throw an "
+                + "IllegalArgumentException");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void whiteFaceColorAllocatesNothing(GameTestHelper helper) {
+        float[] result = new float[COLOR_CHANNEL_COUNT];
+        warmWhiteFaceColor(result, ALLOCATION_WARMUP_CALLS);
+        ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
+        if (!(threadBean instanceof com.sun.management.ThreadMXBean allocationBean)) {
+            LogUtils.getLogger().info("The thread bean is not a com.sun.management.ThreadMXBean, so the allocation of "
+                    + "the warm white face color is not measured");
+            helper.succeed();
+            return;
+        }
+        if (!allocationBean.isThreadAllocatedMemoryEnabled()) {
+            try {
+                allocationBean.setThreadAllocatedMemoryEnabled(true);
+            } catch (UnsupportedOperationException unsupported) {
+                LogUtils.getLogger().info("Thread allocated memory cannot be turned on", unsupported);
+            }
+        }
+        if (!allocationBean.isThreadAllocatedMemoryEnabled()) {
+            LogUtils.getLogger().info("Thread allocated memory is not enabled, so the allocation of the warm white "
+                    + "face color is not measured");
+            helper.succeed();
+            return;
+        }
+        long threadId = Thread.currentThread().getId();
+        for (int warmup = 0; warmup < ALLOCATION_BEAN_WARMUPS; warmup++) {
+            allocationBean.getThreadAllocatedBytes(threadId);
+        }
+        long before = allocationBean.getThreadAllocatedBytes(threadId);
+        float sum = warmWhiteFaceColor(result, ALLOCATION_CALLS);
+        long allocated = allocationBean.getThreadAllocatedBytes(threadId) - before;
+        LogUtils.getLogger().info("The warm white face color allocated " + allocated + " bytes with a sum of " + sum);
+        helper.assertTrue(allocated == 0, "The " + ALLOCATION_CALLS + " warm white face colors allocate " + allocated
+                + " bytes instead of 0");
+        helper.succeed();
+    }
+
+    /**
+     * Checks the distance of the uniform fog with the given clear air and clear range against its expected value.
+     */
+    private static void assertClearAirDistance(GameTestHelper helper, String step, double expected,
+            double clearAirDensity, double clearRange) {
+        assertDistance(helper, step, FogCullingDistance.opaqueDistance(CLEAR_AIR_EXTINCTION, CLEAR_AIR_EYE_HEIGHT,
+                0.0, CLEAR_AIR_MINIMUM_HEIGHT, CLEAR_AIR_MAXIMUM_HEIGHT, CLEAR_AIR_MAXIMUM_DISTANCE, clearAirDensity,
+                clearRange), expected);
+    }
+
+    /**
+     * Checks a culling distance against its expected value, which the search keeps at or above, within
+     * CLEAR_AIR_DISTANCE_TOLERANCE.
+     */
+    private static void assertDistance(GameTestHelper helper, String step, double actual, double expected) {
+        helper.assertTrue(actual >= expected - 1.0e-9 && actual <= expected + CLEAR_AIR_DISTANCE_TOLERANCE, "The "
+                + "culling distance of " + step + " is " + actual + " instead of one from " + expected + " to "
+                + (expected + CLEAR_AIR_DISTANCE_TOLERANCE));
     }
 
     /**
@@ -481,6 +779,47 @@ public final class FogModelGameTests {
         double difference = Math.abs(actual - expected);
         helper.assertTrue(difference <= VALUE_TOLERANCE, "The value of " + caseName + " is " + actual
                 + " instead of " + expected + ", a difference of " + difference + " above " + VALUE_TOLERANCE);
+    }
+
+    /**
+     * Checks the red, green and blue of a white face color against their expected values within COLOR_TOLERANCE.
+     */
+    private static void assertColor(GameTestHelper helper, String step, float[] result, double expectedRed,
+            double expectedGreen, double expectedBlue) {
+        double[] expectedChannels = {expectedRed, expectedGreen, expectedBlue};
+        String[] channelNames = {"red", "green", "blue"};
+        for (int channel = 0; channel < COLOR_CHANNEL_COUNT; channel++) {
+            double difference = Math.abs(result[channel] - expectedChannels[channel]);
+            helper.assertTrue(difference <= COLOR_TOLERANCE, "In " + step + ", the " + channelNames[channel]
+                    + " channel is " + result[channel] + " instead of " + expectedChannels[channel]
+                    + ", a difference of " + difference + " above " + COLOR_TOLERANCE);
+        }
+    }
+
+    /**
+     * Whether the white face color of a result of length 2 is rejected with an IllegalArgumentException.
+     */
+    private static boolean rejectsShortResult() {
+        try {
+            FogLight.whiteFaceColor(WHITE_FACE_SKY_FOURTEEN, WHITE_FACE_SKY_FIFTEEN, new float[2]);
+        } catch (IllegalArgumentException expectedException) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * The work of the allocation test: the colors of changing lightmap pixels, without an assertion or a message of
+     * its own, so that it can be measured.
+     */
+    private static float warmWhiteFaceColor(float[] result, int calls) {
+        float sum = 0.0F;
+        for (int call = 0; call < calls; call++) {
+            FogLight.whiteFaceColor(WHITE_FACE_SKY_FOURTEEN - (call & 0xF), WHITE_FACE_SKY_FIFTEEN + (call & 0xF),
+                    result);
+            sum += result[0] + result[1] + result[2];
+        }
+        return sum;
     }
 
 }

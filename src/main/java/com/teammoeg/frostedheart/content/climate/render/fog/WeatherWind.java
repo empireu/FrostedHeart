@@ -20,11 +20,13 @@
 package com.teammoeg.frostedheart.content.climate.render.fog;
 
 /**
- * The displacement of the wind, which the fog's noise follows, accumulated from the speed and direction of each frame.
+ * The displacement of the wind, which the structures of the fog follow, accumulated from the speed and direction of
+ * each frame.
  */
 public final class WeatherWind {
     /**
-     * The longest step in seconds that advance takes, so that a frame that stalled does not jump the noise.
+     * The longest step in seconds that advance takes, so that a frame that stalled does not jump the structures of the
+     * fog.
      */
     public static final double MAXIMUM_STEP_SECONDS = 0.25;
     /**

@@ -34,3 +34,42 @@ float fogOpticalDepth(float eyeExtinction, float segmentLength, float verticalOf
     }
     return min(FOG_MAXIMUM_OPTICAL_DEPTH, rayOpticalDepth);
 }
+
+// The optical depth from the eye to infinity along a unit direction whose upward component is directionY, as
+// HeightFog.skyOpticalDepth: eyeExtinction * heightScale / directionY, since the extinction at the point at distance s
+// is eyeExtinction * exp(-s * directionY / heightScale). A ray that never leaves the fog is opaque:
+float fogSkyOpticalDepth(float eyeExtinction, float directionY, float heightScale) {
+    if (!(eyeExtinction > 0.0)) {
+        return 0.0;
+    }
+    if (!(directionY > 0.0) || !(heightScale > 0.0)) {
+        return FOG_MAXIMUM_OPTICAL_DEPTH;
+    }
+    float skyDepth = eyeExtinction * heightScale / directionY;
+    if (isnan(skyDepth)) {
+        return FOG_MAXIMUM_OPTICAL_DEPTH;
+    }
+    return min(FOG_MAXIMUM_OPTICAL_DEPTH, skyDepth);
+}
+
+// The optical depth from the point at distance start along the same ray to infinity, as HeightFog.skyTailOpticalDepth:
+// eyeExtinction * heightScale * exp(-start * directionY / heightScale) / directionY. A start that is negative or NaN
+// counts as 0, and an exponent past FOG_MAXIMUM_EXPONENT leaves no fog to add:
+float fogSkyTailOpticalDepth(float eyeExtinction, float start, float directionY, float heightScale) {
+    if (!(eyeExtinction > 0.0)) {
+        return 0.0;
+    }
+    if (!(directionY > 0.0) || !(heightScale > 0.0)) {
+        return FOG_MAXIMUM_OPTICAL_DEPTH;
+    }
+    float clampedStart = start > 0.0 ? start : 0.0;
+    float exponent = clampedStart * directionY / heightScale;
+    if (exponent > FOG_MAXIMUM_EXPONENT) {
+        return 0.0;
+    }
+    float tailDepth = eyeExtinction * heightScale * exp(-exponent) / directionY;
+    if (isnan(tailDepth)) {
+        return FOG_MAXIMUM_OPTICAL_DEPTH;
+    }
+    return min(FOG_MAXIMUM_OPTICAL_DEPTH, tailDepth);
+}

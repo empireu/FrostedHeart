@@ -86,7 +86,8 @@ public final class CalculatedSkyClientCommand {
                         .then(literal("debug").then(fogDebugMode("off")).then(fogDebugMode("field"))
                                 .then(fogDebugMode("cells")).then(fogDebugMode("noregion"))
                                 .then(fogDebugMode("nofar")).then(fogDebugMode("analytic"))
-                                .then(fogDebugMode("transmittance")).then(fogDebugMode("fallback"))))
+                                .then(fogDebugMode("transmittance")).then(fogDebugMode("fallback"))
+                                .then(fogDebugMode("structure"))))
                 .then(set);
         CalculatedSkyScreenshots.addCommands(command);
         registerCommand(event.getDispatcher(), command);

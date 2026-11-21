@@ -57,8 +57,13 @@ public final class FogSettingsGameTests {
         checkNumberSetting(helper, SkySetting.FOG_FIELD_RADIUS, "fogFieldRadius", 32.0, 12.0, 40.0);
         checkNumberSetting(helper, SkySetting.FOG_RESOLUTION_DIVISOR, "fogResolutionDivisor", 2.0, 1.0, 4.0);
         checkNumberSetting(helper, SkySetting.FOG_FALLBACK_CAP, "fogFallbackCap", 0.25, 0.0, 1.0);
-        checkNumberSetting(helper, SkySetting.FOG_NOISE_STRENGTH, "fogNoiseStrength", 0.8, 0.0, 4.0);
-        checkNumberSetting(helper, SkySetting.FOG_NOISE_SCALE, "fogNoiseScale", 2.0, 1.0, 8.0);
+        checkNumberSetting(helper, SkySetting.FOG_SNOW_STRUCTURE_SHARE, "fogSnowStructureShare", 0.5, 0.0, 1.0);
+        checkNumberSetting(helper, SkySetting.FOG_BLIZZARD_STRUCTURE_SHARE, "fogBlizzardStructureShare", 0.75, 0.0, 1.0);
+        checkNumberSetting(helper, SkySetting.FOG_STRUCTURE_COVERAGE, "fogStructureCoverage", 0.25, 0.05, 1.0);
+        checkNumberSetting(helper, SkySetting.FOG_STRUCTURE_SIZE, "fogStructureSize", 16.0, 16.0, 512.0);
+        checkNumberSetting(helper, SkySetting.FOG_STRUCTURE_STRETCH, "fogStructureStretch", 1.5, 1.0, 6.0);
+        checkNumberSetting(helper, SkySetting.FOG_STRUCTURE_EROSION, "fogStructureErosion", 0.5, 0.0, 0.9);
+        checkNumberSetting(helper, SkySetting.FOG_STRUCTURE_RANGE, "fogStructureRange", 96.0, 32.0, 160.0);
         checkNumberSetting(helper, SkySetting.FOG_WIND_SCALE, "fogWindScale", 12.0, 0.0, 40.0);
 
         double snowVisibility = SkySetting.FOG_SNOW_VISIBILITY.defaultValue();
@@ -66,38 +71,24 @@ public final class FogSettingsGameTests {
         helper.assertTrue(blizzardVisibility < snowVisibility, "fogBlizzardVisibility has the default "
                 + blizzardVisibility + ", not below the " + snowVisibility + " of fogSnowVisibility");
 
+        SkySetting[] fogSettings = {SkySetting.FOG_ENABLED, SkySetting.FOG_SNOW_VISIBILITY,
+                SkySetting.FOG_BLIZZARD_VISIBILITY, SkySetting.FOG_HEIGHT_SCALE, SkySetting.FOG_LEAF_POROSITY,
+                SkySetting.FOG_FIELD_BUDGET_MICROS, SkySetting.FOG_SNOW_DECAY_LENGTH,
+                SkySetting.FOG_BLIZZARD_DECAY_LENGTH, SkySetting.FOG_FIELD_RADIUS, SkySetting.FOG_RESOLUTION_DIVISOR,
+                SkySetting.FOG_FALLBACK_CAP, SkySetting.FOG_SNOW_STRUCTURE_SHARE,
+                SkySetting.FOG_BLIZZARD_STRUCTURE_SHARE, SkySetting.FOG_STRUCTURE_COVERAGE,
+                SkySetting.FOG_STRUCTURE_SIZE, SkySetting.FOG_STRUCTURE_STRETCH, SkySetting.FOG_STRUCTURE_EROSION,
+                SkySetting.FOG_STRUCTURE_RANGE, SkySetting.FOG_WIND_SCALE};
         SkySetting[] settings = SkySetting.values();
         int lastIndex = settings.length - 1;
-        helper.assertTrue(lastIndex >= 13, "SkySetting has " + settings.length + " settings, fewer than the 14 fog "
-                + "settings");
-        helper.assertTrue(settings[lastIndex - 13] == SkySetting.FOG_ENABLED, "SkySetting has "
-                + settings[lastIndex - 13] + " fourteenth from the end instead of FOG_ENABLED");
-        helper.assertTrue(settings[lastIndex - 12] == SkySetting.FOG_SNOW_VISIBILITY, "SkySetting has "
-                + settings[lastIndex - 12] + " thirteenth from the end instead of FOG_SNOW_VISIBILITY");
-        helper.assertTrue(settings[lastIndex - 11] == SkySetting.FOG_BLIZZARD_VISIBILITY, "SkySetting has "
-                + settings[lastIndex - 11] + " twelfth from the end instead of FOG_BLIZZARD_VISIBILITY");
-        helper.assertTrue(settings[lastIndex - 10] == SkySetting.FOG_HEIGHT_SCALE, "SkySetting has "
-                + settings[lastIndex - 10] + " eleventh from the end instead of FOG_HEIGHT_SCALE");
-        helper.assertTrue(settings[lastIndex - 9] == SkySetting.FOG_LEAF_POROSITY, "SkySetting has "
-                + settings[lastIndex - 9] + " tenth from the end instead of FOG_LEAF_POROSITY");
-        helper.assertTrue(settings[lastIndex - 8] == SkySetting.FOG_FIELD_BUDGET_MICROS, "SkySetting has "
-                + settings[lastIndex - 8] + " ninth from the end instead of FOG_FIELD_BUDGET_MICROS");
-        helper.assertTrue(settings[lastIndex - 7] == SkySetting.FOG_SNOW_DECAY_LENGTH, "SkySetting has "
-                + settings[lastIndex - 7] + " eighth from the end instead of FOG_SNOW_DECAY_LENGTH");
-        helper.assertTrue(settings[lastIndex - 6] == SkySetting.FOG_BLIZZARD_DECAY_LENGTH, "SkySetting has "
-                + settings[lastIndex - 6] + " seventh from the end instead of FOG_BLIZZARD_DECAY_LENGTH");
-        helper.assertTrue(settings[lastIndex - 5] == SkySetting.FOG_FIELD_RADIUS, "SkySetting has "
-                + settings[lastIndex - 5] + " sixth from the end instead of FOG_FIELD_RADIUS");
-        helper.assertTrue(settings[lastIndex - 4] == SkySetting.FOG_RESOLUTION_DIVISOR, "SkySetting has "
-                + settings[lastIndex - 4] + " fifth from the end instead of FOG_RESOLUTION_DIVISOR");
-        helper.assertTrue(settings[lastIndex - 3] == SkySetting.FOG_FALLBACK_CAP, "SkySetting has "
-                + settings[lastIndex - 3] + " fourth from the end instead of FOG_FALLBACK_CAP");
-        helper.assertTrue(settings[lastIndex - 2] == SkySetting.FOG_NOISE_STRENGTH, "SkySetting has "
-                + settings[lastIndex - 2] + " third from the end instead of FOG_NOISE_STRENGTH");
-        helper.assertTrue(settings[lastIndex - 1] == SkySetting.FOG_NOISE_SCALE, "SkySetting has "
-                + settings[lastIndex - 1] + " second from the end instead of FOG_NOISE_SCALE");
-        helper.assertTrue(settings[lastIndex] == SkySetting.FOG_WIND_SCALE, "SkySetting ends with "
-                + settings[lastIndex] + " instead of FOG_WIND_SCALE");
+        helper.assertTrue(lastIndex + 1 >= fogSettings.length, "SkySetting has " + settings.length + " settings, fewer "
+                + "than the " + fogSettings.length + " fog settings");
+        for (int settingIndex = 0; settingIndex < fogSettings.length; settingIndex++) {
+            int distanceFromEnd = fogSettings.length - 1 - settingIndex;
+            helper.assertTrue(settings[lastIndex - distanceFromEnd] == fogSettings[settingIndex], "SkySetting has "
+                    + settings[lastIndex - distanceFromEnd] + " " + (distanceFromEnd + 1) + " from the end instead of "
+                    + fogSettings[settingIndex]);
+        }
 
         helper.succeed();
     }

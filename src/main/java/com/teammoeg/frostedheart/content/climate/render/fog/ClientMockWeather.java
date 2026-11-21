@@ -57,6 +57,7 @@ public final class ClientMockWeather implements WeatherConditions {
     private double decayLength = DEFAULT_DECAY_LENGTH;
     private double windSpeed;
     private double windDirection;
+    private double structureShare;
 
     /**
      * Takes the weather of this frame, which replaces the weather of the frame before.
@@ -74,10 +75,14 @@ public final class ClientMockWeather implements WeatherConditions {
      * @param windScale the speed in blocks per second of a full wind, from the fog settings, where NaN or a negative
      *        one gives no wind
      * @param dayTicks the day time in ticks with the partial tick, which sets the direction of the wind
+     * @param snowStructureShare the share of the fog of plain snowfall that sits in the structures, where NaN counts
+     *        as 0
+     * @param blizzardStructureShare the share of the fog of a full blizzard that sits in the structures, where NaN
+     *        counts as 0
      */
     public void update(double rainLevel, double thunderLevel, double snowVisibility, double blizzardVisibility,
             double heightScale, double snowDecayLength, double blizzardDecayLength, double windLevel,
-            double windScale, double dayTicks) {
+            double windScale, double dayTicks, double snowStructureShare, double blizzardStructureShare) {
         double snowfall = clamp(countNaNAsZero(rainLevel) / FULL_LEVEL);
         double storm = Math.min(clamp(countNaNAsZero(thunderLevel) / FULL_LEVEL), snowfall);
         double snowExtinction = HeightFog.extinctionFromVisibility(snowVisibility);
@@ -87,6 +92,9 @@ public final class ClientMockWeather implements WeatherConditions {
         this.referenceExtinction = snowfall * (snowExtinction + (blizzardExtinction - snowExtinction) * storm);
         double updatedDecayLength = snowDecayLength + (blizzardDecayLength - snowDecayLength) * storm;
         this.decayLength = Double.isNaN(updatedDecayLength) ? DEFAULT_DECAY_LENGTH : updatedDecayLength;
+        double snowStructure = countNaNAsZero(snowStructureShare);
+        double blizzardStructure = countNaNAsZero(blizzardStructureShare);
+        this.structureShare = clamp(snowStructure + (blizzardStructure - snowStructure) * storm);
         if (heightScale > 0.0) {
             this.heightScale = heightScale;
         }
@@ -153,6 +161,14 @@ public final class ClientMockWeather implements WeatherConditions {
     @Override
     public double windDirection() {
         return windDirection;
+    }
+
+    /**
+     * The share of the fog of the last update that sits in the moving structures, which is 0 before the first one.
+     */
+    @Override
+    public double structureShare() {
+        return structureShare;
     }
 
     /**

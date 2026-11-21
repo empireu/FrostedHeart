@@ -216,6 +216,32 @@ public final class FogUpsample {
     }
 
     /**
+     * The ratio a sky pixel takes from its four low-resolution samples, which is the weighted mean of the ratios of the
+     * samples that lie in the sky, with the weights renormalized over those samples. A sky pixel never walks at full
+     * resolution, so it is never a fallback candidate. Allocates nothing.
+     * @param distances the distances of the four samples, in the order of footprint, negative for a sample of the sky
+     * @param ratios the ratios of the four samples, in the same order
+     * @param weights the bilinear weights of the four samples, in the same order
+     * @return the ratio, 1 when no sample lies in the sky or when the sum of their weights is not above
+     *         MINIMUM_WEIGHT_SUM
+     */
+    public static double resolveSky(double[] distances, double[] ratios, double[] weights) {
+        double skyWeightSum = 0.0;
+        double skyRatioSum = 0.0;
+        for (int sample = 0; sample < SAMPLE_COUNT; sample++) {
+            if (!(distances[sample] < 0.0)) {
+                continue;
+            }
+            skyWeightSum += weights[sample];
+            skyRatioSum += weights[sample] * ratios[sample];
+        }
+        if (!(skyWeightSum > MINIMUM_WEIGHT_SUM)) {
+            return 1.0;
+        }
+        return skyRatioSum / skyWeightSum;
+    }
+
+    /**
      * Whether the fallback may run, which stays on while the share stays at or below the cap and comes back on only
      * below a lower share, so that the count of the fallback does not toggle.
      * @param allowedBefore whether it was allowed in the frame before

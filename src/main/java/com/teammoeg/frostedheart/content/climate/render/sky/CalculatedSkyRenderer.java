@@ -59,10 +59,6 @@ public final class CalculatedSkyRenderer {
     private static final int VIEW_SLOTS = SkyViewSet.VIEW_COUNT;
     private static final int HALO_SLOTS = SkyState.HALO_COUNT;
     /**
-     * The texels around the horizon that horizonColors fills.
-     */
-    private static final int HORIZON_TEXELS = 64;
-    /**
      * GlStateManager caches the bindings of 12 texture units, so the sky must not use more.
      */
     private static final int TEXTURE_UNITS = 12;
@@ -79,7 +75,6 @@ public final class CalculatedSkyRenderer {
     private static final Matrix4f inverseViewProjection = new Matrix4f();
     private static final FloatBuffer matrixBuffer = BufferUtils.createFloatBuffer(16);
     private static final float[] reusedFogColor = new float[CHANNELS];
-    private static final float[] reusedHorizonColor = new float[CHANNELS];
     private static final double[] reusedLightScale = new double[CHANNELS];
     private static final int[] drawnTextures = new int[TEXTURE_UNITS];
     private static final float[] moonColor = new float[CHANNELS];
@@ -261,36 +256,6 @@ public final class CalculatedSkyRenderer {
             fail("computing the fog color", exception);
             return null;
         }
-    }
-
-    /**
-     * Fills the displayed horizon colors of the calculated sky into the result, one per azimuth around the horizon:
-     * texel i, from 0 up to 63, holds the red, green and blue of the azimuth -PI + (i + 0.5) * 2 PI / 64 at result[3 i]
-     * to result[3 i + 2], as horizonDisplayColor gives them for a horizontal fraction of 1. Returns false and leaves the
-     * result unchanged when the calculated sky is not drawn.
-     * @param result the array to fill, which needs 192 entries for the display sRGB colors from 0 to 1
-     */
-    public static boolean horizonColors(ClientLevel level, float partialTick, float[] result) {
-        SkyState current = builder.state();
-        if (current == null || !isAllowed(level)) {
-            return false;
-        }
-        SkyFrame frame = SkyFrame.current(level, partialTick);
-        double exposure = exposure(current, frame);
-        float sunWeight = viewBlend(current, frame);
-        double depthWeight = depthBlend(current, frame);
-        double[] lightScale = lightScale(current, frame);
-        float side = frame.light().side();
-        for (int texel = 0; texel < HORIZON_TEXELS; texel++) {
-            double phi = -Math.PI + (texel + 0.5) * 2.0 * Math.PI / HORIZON_TEXELS;
-            double azimuth = Math.atan2(Math.sin(phi), Math.cos(phi) * side);
-            current.views().horizonDisplayColor(sunWeight, depthWeight, azimuth, 1.0, exposure, lightScale,
-                    frame.nightFloor(), frame.rainLevel(), frame.thunderLevel(), reusedHorizonColor);
-            result[3 * texel] = reusedHorizonColor[0];
-            result[3 * texel + 1] = reusedHorizonColor[1];
-            result[3 * texel + 2] = reusedHorizonColor[2];
-        }
-        return true;
     }
 
     /**

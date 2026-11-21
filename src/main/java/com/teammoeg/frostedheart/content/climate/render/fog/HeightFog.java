@@ -131,6 +131,63 @@ public final class HeightFog {
     }
 
     /**
+     * The optical depth from the eye to infinity along a unit direction whose upward component is directionY, which is
+     * eyeExtinction * heightScale / directionY, since the extinction at the point at distance s is
+     * eyeExtinction * exp(-s * directionY / heightScale).
+     * @param eyeExtinction the extinction per block at the eye's height, in optical depths per block
+     * @param directionY the upward component of the unit direction of the ray
+     * @param heightScale the height scale of the fog in blocks, positive
+     * @return the optical depth, 0 when eyeExtinction is not positive, which includes NaN. It is MAXIMUM_OPTICAL_DEPTH
+     *         when directionY or heightScale is not positive, which includes NaN, since such a ray never leaves the fog,
+     *         and it is at most MAXIMUM_OPTICAL_DEPTH otherwise, which also covers a NaN result.
+     */
+    public static double skyOpticalDepth(double eyeExtinction, double directionY, double heightScale) {
+        if (!(eyeExtinction > 0.0)) {
+            return 0.0;
+        }
+        if (!(directionY > 0.0) || !(heightScale > 0.0)) {
+            return MAXIMUM_OPTICAL_DEPTH;
+        }
+        double skyOpticalDepth = eyeExtinction * heightScale / directionY;
+        if (Double.isNaN(skyOpticalDepth)) {
+            return MAXIMUM_OPTICAL_DEPTH;
+        }
+        return Math.min(MAXIMUM_OPTICAL_DEPTH, skyOpticalDepth);
+    }
+
+    /**
+     * The optical depth from the point at distance start along a unit direction to infinity, which is
+     * eyeExtinction * heightScale * exp(-start * directionY / heightScale) / directionY.
+     * @param eyeExtinction the extinction per block at the eye's height, in optical depths per block
+     * @param start the distance in blocks from the eye to the point, where a negative or NaN start counts as 0
+     * @param directionY the upward component of the unit direction of the ray
+     * @param heightScale the height scale of the fog in blocks, positive
+     * @return the optical depth, 0 when eyeExtinction is not positive or when the exponent start * directionY /
+     *         heightScale passes MAXIMUM_EXPONENT, which includes NaN. It is MAXIMUM_OPTICAL_DEPTH when directionY or
+     *         heightScale is not positive, which includes NaN, since such a ray never leaves the fog, and it is at most
+     *         MAXIMUM_OPTICAL_DEPTH otherwise.
+     */
+    public static double skyTailOpticalDepth(double eyeExtinction, double start, double directionY,
+            double heightScale) {
+        if (!(eyeExtinction > 0.0)) {
+            return 0.0;
+        }
+        if (!(directionY > 0.0) || !(heightScale > 0.0)) {
+            return MAXIMUM_OPTICAL_DEPTH;
+        }
+        double clampedStart = start > 0.0 ? start : 0.0;
+        double exponent = clampedStart * directionY / heightScale;
+        if (exponent > MAXIMUM_EXPONENT) {
+            return 0.0;
+        }
+        double tailOpticalDepth = eyeExtinction * heightScale * Math.exp(-exponent) / directionY;
+        if (Double.isNaN(tailOpticalDepth)) {
+            return MAXIMUM_OPTICAL_DEPTH;
+        }
+        return Math.min(MAXIMUM_OPTICAL_DEPTH, tailOpticalDepth);
+    }
+
+    /**
      * The share of the light that reaches the eye through the given optical depth, which is exp(-opticalDepth).
      * @param opticalDepth the optical depth along a segment, which the fog methods return in the range 0 to
      *        MAXIMUM_OPTICAL_DEPTH

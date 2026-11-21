@@ -3,7 +3,9 @@
 // divisor by divisor pixels of the main target, from which it keeps the minimum depth or the maximum one in a
 // checkerboard, so that thin geometry survives in one of the two. It writes the ratio of the walked optical depth of
 // that ray to the analytic optical depth of the same ray, and the distance of the ray, and weather_fog_upsample.fsh
-// fills each pixel of the frame in from four of these.
+// fills each pixel of the frame in from four of these. A texel of the sky writes SKY_DISTANCE as its distance and the
+// ratio of its sky walk to the analytic depth of the height fog to infinity along its ray, since the sky has no scene
+// point whose distance the fog could agree on.
 // The share of the snow along the segment is the snow field's near the eye and the height of each column's highest
 // block beyond it, as snow_walk.glsl walks them, so a room stays clear where the whole segment from the eye to the scene
 // point stays under its roof, and a porch holds the fog back by the first open air under it.
@@ -18,7 +20,7 @@ uniform int partMask;
 uniform int divisor;
 uniform ivec2 fullSize;
 // Whether to answer the self test instead of drawing, and the offsets of its rays, one per texel of its 64 texel wide
-// target:
+// target. Mode 1 walks the ray to its scene point and mode 2 walks its sky:
 uniform int selfTest;
 uniform vec3 selfTestOffsets[64];
 out vec4 fragColor;
@@ -36,14 +38,48 @@ float fogUpsampleRatio(float walkedDepth, float analyticDepth) {
     return walkedDepth / analyticDepth;
 }
 
+// Writes the sky texel of a pixel: the distance of the sky and the ratio of its sky walk to the analytic depth of the
+// height fog to infinity along its ray, whose direction comes from the far plane of the pixel as the structure debug
+// view rebuilds it. A ray whose analytic depth is at the cap is opaque, so its ratio is 1, and a far plane that gives no
+// direction writes the ratio 1 without walking.
+void writeSkyRatio(ivec2 pixel) {
+    vec3 ndc = vec3((vec2(pixel) + vec2(0.5)) / screenSize * 2.0 - 1.0, 1.0);
+    vec4 position = inverseViewProjection * vec4(ndc, 1.0);
+    vec3 farOffset = position.xyz / position.w;
+    float farLength = length(farOffset);
+    if (!(farLength > 0.0) || isnan(farLength) || isinf(farLength)) {
+        fragColor = vec4(1.0, SKY_DISTANCE, 0.0, 1.0);
+        return;
+    }
+    vec3 direction = farOffset / farLength;
+    float analyticDepth = fogSkyOpticalDepth(eyeExtinction, direction.y, heightScale);
+    if (analyticDepth >= FOG_MAXIMUM_OPTICAL_DEPTH) {
+        fragColor = vec4(1.0, SKY_DISTANCE, 0.0, 1.0);
+        return;
+    }
+    int cellsWalked;
+    int columnsWalked;
+    int coarseSteps;
+    float farStop;
+    float walkedDepth = snowWalkSkyOpticalDepth(direction, structureRange, partMask, cellsWalked, columnsWalked,
+            farStop, coarseSteps);
+    fragColor = vec4(fogUpsampleRatio(walkedDepth, analyticDepth), SKY_DISTANCE, 0.0, 1.0);
+}
+
 void main() {
     if (selfTest != 0) {
         int cellsWalked;
         int columnsWalked;
-        int marchSteps;
+        int coarseSteps;
         float farStop;
-        float tau = snowWalkOpticalDepth(selfTestOffsets[int(gl_FragCoord.x)], partMask, cellsWalked, columnsWalked,
-                farStop, marchSteps);
+        float tau;
+        if (selfTest == 2) {
+            tau = snowWalkSkyOpticalDepth(normalize(selfTestOffsets[int(gl_FragCoord.x)]), structureRange, partMask,
+                    cellsWalked, columnsWalked, farStop, coarseSteps);
+        } else {
+            tau = snowWalkOpticalDepth(selfTestOffsets[int(gl_FragCoord.x)], partMask, cellsWalked, columnsWalked,
+                    farStop, coarseSteps);
+        }
         fragColor = vec4(tau, float(cellsWalked), float(columnsWalked), farStop);
         return;
     }
@@ -64,7 +100,7 @@ void main() {
         }
     }
     if (keptDepth >= 1.0) {
-        fragColor = vec4(1.0, SKY_DISTANCE, 0.0, 1.0);
+        writeSkyRatio(keptPixel);
         return;
     }
     vec3 ndc = vec3((vec2(keptPixel) + vec2(0.5)) / screenSize * 2.0 - 1.0, keptDepth * 2.0 - 1.0);
@@ -79,8 +115,8 @@ void main() {
     float analyticDepth = fogOpticalDepth(eyeExtinction, offsetLength, offset.y, heightScale);
     int cellsWalked;
     int columnsWalked;
-    int marchSteps;
+    int coarseSteps;
     float farStop;
-    float walkedDepth = snowWalkOpticalDepth(offset, partMask, cellsWalked, columnsWalked, farStop, marchSteps);
+    float walkedDepth = snowWalkOpticalDepth(offset, partMask, cellsWalked, columnsWalked, farStop, coarseSteps);
     fragColor = vec4(fogUpsampleRatio(walkedDepth, analyticDepth), offsetLength, 0.0, 1.0);
 }

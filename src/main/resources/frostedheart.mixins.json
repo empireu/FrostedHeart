@@ -125,6 +125,7 @@
     "client.IngameGuiAccess",
     "client.LevelRendererMixin",
     "client.LightEngineAccessor_LightPillars",
+    "client.LightTextureAccessor_WeatherFog",
     "client.LivingEntityRendererMixin",
     "client.MixinClientEvents",
     "client.MixinLightTexture",

@@ -33,6 +33,10 @@ package com.teammoeg.frostedheart.content.climate.render.fog;
  * lies under cover, which the backward walk over the columns under the segment finds and which gets 0.
  * A cell's share is the field's distance byte through the table of buildTable, or its column's height share when the
  * cell has no field value.
+ * While the structures of FogStructure are on, each part of the segment is multiplied by their density at its middle.
+ * The parts inside the region are the cells, and the far part up to the range of the structures is walked through a
+ * coarser grid of COARSE_CELL blocks, which keeps its boundaries fixed in the world. Beyond the range the density is 1,
+ * which the rest of the far part takes in closed form.
  * The parts are computed on cell offsets from the eye's block, in doubles, so that no world position passes through a
  * float. Not thread safe, and it allocates nothing after the constructor.
  */
@@ -83,15 +87,14 @@ public final class SnowFogWalk {
      */
     public static final double MAXIMUM_RADIUS = 40.0;
     /**
-     * The steps that the far part of the segment is marched in while the noise is on, whose depths telescope so that a
-     * uniform noise factor stays exact.
+     * The side in blocks of the world-aligned cells that the far part of the segment is walked in while the structures
+     * are on, whose parts stay fixed in the world while the eye moves.
      */
-    public static final int FAR_MARCH_STEPS = 24;
+    public static final double COARSE_CELL = 4.0;
     /**
-     * The depth in optical depths of the far part that the march covers step by step, beyond which the rest of the far
-     * part takes the noise of the last step.
+     * The most parts that the coarse walk visits, after which the rest of the far part counts as the mean fog.
      */
-    public static final double FAR_MARCH_DEPTH = HeightFog.VISIBILITY_OPTICAL_DEPTH;
+    public static final int COARSE_MAXIMUM_STEPS = 64;
 
     /**
      * The radius in blocks of the region before setRadius, which is the default of fogFieldRadius.
@@ -124,18 +127,10 @@ public final class SnowFogWalk {
     private double heightScale;
     private double halfWidth = DEFAULT_RADIUS - REGION_MARGIN;
     private double fieldFade = 1.0;
-    private byte[] noiseTexels;
-    private double noiseStrength;
-    private double fineNoiseTileBlocks;
-    private double fineNoiseEyeU;
-    private double fineNoiseEyeV;
-    private double fineNoiseEyeW;
-    private double coarseNoiseEyeU;
-    private double coarseNoiseEyeV;
-    private double coarseNoiseEyeW;
+    private FogStructure structure;
     private int lastCellSteps;
     private int lastColumnSteps;
-    private int lastMarchSteps;
+    private int lastCoarseSteps;
     private double lastRegionEnd = 1.0;
     private double lastFarStop = 1.0;
     /**
@@ -315,9 +310,10 @@ public final class SnowFogWalk {
      * depths for the fog of setFog, at most HeightFog.MAXIMUM_OPTICAL_DEPTH.
      * The segment runs from the parameter 0 at the eye to 1 at the scene point, and its optical depth from the eye up
      * to the parameter s is HeightFog.opticalDepth(eyeExtinction, s * |offset|, s * offsetY, heightScale). The region
-     * part is walked cell by cell and the far part is walked column by column, and each part adds its share times the
-     * closed form of the optical depth between its ends.
-     * The four last getters record what this call walked. Allocates nothing.
+     * part is walked cell by cell and the far part is walked through the grid of the structures, and each part adds its
+     * share times the density of the structures at its middle times the closed form of the optical depth between its
+     * ends.
+     * The five last getters record what this call walked. Allocates nothing.
      * @param offsetX the offset of the scene point from the eye in x, in blocks
      * @param offsetY the offset of the scene point from the eye in y, in blocks
      * @param offsetZ the offset of the scene point from the eye in z, in blocks
@@ -327,7 +323,7 @@ public final class SnowFogWalk {
     public double opticalDepth(double offsetX, double offsetY, double offsetZ) {
         lastCellSteps = 0;
         lastColumnSteps = 0;
-        lastMarchSteps = 0;
+        lastCoarseSteps = 0;
         lastRegionEnd = 1.0;
         lastFarStop = 1.0;
         if (!(eyeExtinction > 0.0) || !Double.isFinite(offsetX) || !Double.isFinite(offsetY)
@@ -346,7 +342,7 @@ public final class SnowFogWalk {
         double farDepth = 0.0;
         if (regionEnd < 1.0) {
             farStop = findFarStop(offsetX, offsetY, offsetZ, regionEnd);
-            farDepth = farPartDepth(offsetX, offsetY, offsetZ, segmentLength, farStop);
+            farDepth = farPartDepth(offsetX, offsetY, offsetZ, segmentLength, regionEnd, farStop);
         }
         lastFarStop = farStop;
         double total = regionDepth + farDepth;
@@ -357,32 +353,152 @@ public final class SnowFogWalk {
     }
 
     /**
-     * The optical depth of the far part of the segment, from the region's end to where the covered stretch begins, in
-     * optical depths. Without the noise it is the closed form of the height fog between the two, and with the noise it
-     * is a march of FAR_MARCH_STEPS steps of equal base depth up to FAR_MARCH_DEPTH, whose rest takes the noise of the
-     * last step. Allocates nothing.
+     * The optical depth of the snow fog from the eye to infinity along a direction, which is the walk to walkDistance
+     * and the tail past it while the walk ends in the open. The walk follows the ray of the unit direction out to the
+     * point at walkDistance, with the cells, the far columns, the structures and the coarse walk of a scene point there,
+     * and the tail is the height fog from that point to infinity at the snow share 1 and the density 1, which the
+     * structures leave past their range. The five last getters record what that walk walked, and a direction or a
+     * distance that the guards reject leaves them as a zero-length opticalDepth call does. Allocates nothing.
+     * @param directionX the x of the direction of the ray, which need not be a unit vector
+     * @param directionY the y of the direction of the ray, whose sign decides whether the ray leaves the fog
+     * @param directionZ the z of the direction of the ray
+     * @param walkDistance the distance in blocks from the eye at which the tail begins, the range of the structures
+     * @return the optical depth to infinity, at most HeightFog.MAXIMUM_OPTICAL_DEPTH, which is 0 for a direction of
+     *         zero length and for a direction, a distance or an eye extinction that is not positive or not finite
      */
-    private double farPartDepth(double offsetX, double offsetY, double offsetZ, double segmentLength,
-            double farStop) {
-        double baseDepth = Math.max(0.0, tauAt(farStop, segmentLength, offsetY) - regionEndDepth);
-        if (!isNoiseOn()) {
-            return baseDepth;
+    public double skyOpticalDepth(double directionX, double directionY, double directionZ, double walkDistance) {
+        double directionLength = Math.sqrt(directionX * directionX + directionY * directionY
+                + directionZ * directionZ);
+        if (!(directionLength > 0.0) || !Double.isFinite(directionLength) || !(walkDistance > 0.0)
+                || !Double.isFinite(walkDistance)) {
+            return opticalDepth(0.0, 0.0, 0.0);
         }
-        if (!(baseDepth > 0.0)) {
+        double unitX = directionX / directionLength;
+        double unitY = directionY / directionLength;
+        double unitZ = directionZ / directionLength;
+        double walkedDepth = opticalDepth(unitX * walkDistance, unitY * walkDistance, unitZ * walkDistance);
+        if (lastFarStop < 1.0) {
+            return walkedDepth;
+        }
+        double tailDepth = HeightFog.skyTailOpticalDepth(eyeExtinction, walkDistance, unitY, heightScale);
+        double totalDepth = walkedDepth + tailDepth;
+        if (!(totalDepth > 0.0)) {
             return 0.0;
         }
-        double marchedDepth = Math.min(baseDepth, FAR_MARCH_DEPTH);
-        double stepDepth = marchedDepth / FAR_MARCH_STEPS;
-        double depth = 0.0;
-        double lastNoise = 0.0;
-        for (int step = 0; step < FAR_MARCH_STEPS; step++) {
-            double parameter = parameterAtDepth(eyeExtinction, segmentLength, offsetY, heightScale,
-                    regionEndDepth + (step + 0.5) * stepDepth);
-            lastNoise = noiseAt(parameter * offsetX, parameter * offsetY, parameter * offsetZ);
-            depth += stepDepth * (1.0 + noiseStrength * lastNoise);
+        return Math.min(HeightFog.MAXIMUM_OPTICAL_DEPTH, totalDepth);
+    }
+
+    /**
+     * The optical depth of the far part of the segment, from the region's end to where the covered stretch begins, in
+     * optical depths. Without the structures it is the closed form of the height fog between the two. With them, the
+     * part up to the range of the structures is walked through their grid, and the rest keeps the mean density in closed
+     * form. Allocates nothing.
+     */
+    private double farPartDepth(double offsetX, double offsetY, double offsetZ, double segmentLength,
+            double regionEnd, double farStop) {
+        FogStructure currentStructure = structure;
+        boolean structureOn = currentStructure != null && currentStructure.isOn();
+        if (!structureOn) {
+            return Math.max(0.0, tauAt(farStop, segmentLength, offsetY) - regionEndDepth);
         }
-        depth += (baseDepth - marchedDepth) * (1.0 + noiseStrength * lastNoise);
-        lastMarchSteps = FAR_MARCH_STEPS;
+        double coarseEnd = Math.min(farStop, Math.min(1.0, currentStructure.range() / segmentLength));
+        if (!(coarseEnd > regionEnd)) {
+            return Math.max(0.0, tauAt(farStop, segmentLength, offsetY) - regionEndDepth);
+        }
+        double depth = coarseDepth(offsetX, offsetY, offsetZ, segmentLength, regionEnd, coarseEnd);
+        depth += Math.max(0.0, tauAt(farStop, segmentLength, offsetY) - tauAt(coarseEnd, segmentLength, offsetY));
+        return depth;
+    }
+
+    /**
+     * The optical depth of the structures along the part of the segment from the start to the end parameter, which is
+     * walked through the world-aligned grid of COARSE_CELL blocks, so that its parts stay fixed in the world while the
+     * eye moves. Each part adds the density at its middle times the closed form of the optical depth between its ends.
+     * A walk that runs out of steps adds the rest at the mean density. Counts its parts, allocates nothing.
+     */
+    private double coarseDepth(double offsetX, double offsetY, double offsetZ, double segmentLength,
+            double startParameter, double endParameter) {
+        double localX = (eyeBlockX & 3) + eyeFractionX;
+        double localY = (eyeBlockY & 3) + eyeFractionY;
+        double localZ = (eyeBlockZ & 3) + eyeFractionZ;
+        double startX = localX + startParameter * offsetX;
+        double startY = localY + startParameter * offsetY;
+        double startZ = localZ + startParameter * offsetZ;
+        int cellX = (int) Math.floor(startX / COARSE_CELL);
+        int cellY = (int) Math.floor(startY / COARSE_CELL);
+        int cellZ = (int) Math.floor(startZ / COARSE_CELL);
+        int stepX = 0;
+        int stepY = 0;
+        int stepZ = 0;
+        double nextBoundaryX = NO_BOUNDARY;
+        double nextBoundaryY = NO_BOUNDARY;
+        double nextBoundaryZ = NO_BOUNDARY;
+        double boundaryStepX = NO_BOUNDARY;
+        double boundaryStepY = NO_BOUNDARY;
+        double boundaryStepZ = NO_BOUNDARY;
+        if (offsetX > 0.0) {
+            stepX = 1;
+            nextBoundaryX = startParameter + ((cellX + 1) * COARSE_CELL - startX) / offsetX;
+            boundaryStepX = COARSE_CELL / offsetX;
+        } else if (offsetX < 0.0) {
+            stepX = -1;
+            nextBoundaryX = startParameter + (cellX * COARSE_CELL - startX) / offsetX;
+            boundaryStepX = COARSE_CELL / -offsetX;
+        }
+        if (offsetY > 0.0) {
+            stepY = 1;
+            nextBoundaryY = startParameter + ((cellY + 1) * COARSE_CELL - startY) / offsetY;
+            boundaryStepY = COARSE_CELL / offsetY;
+        } else if (offsetY < 0.0) {
+            stepY = -1;
+            nextBoundaryY = startParameter + (cellY * COARSE_CELL - startY) / offsetY;
+            boundaryStepY = COARSE_CELL / -offsetY;
+        }
+        if (offsetZ > 0.0) {
+            stepZ = 1;
+            nextBoundaryZ = startParameter + ((cellZ + 1) * COARSE_CELL - startZ) / offsetZ;
+            boundaryStepZ = COARSE_CELL / offsetZ;
+        } else if (offsetZ < 0.0) {
+            stepZ = -1;
+            nextBoundaryZ = startParameter + (cellZ * COARSE_CELL - startZ) / offsetZ;
+            boundaryStepZ = COARSE_CELL / -offsetZ;
+        }
+        FogStructure currentStructure = structure;
+        double depth = 0.0;
+        double enterDepth = tauAt(startParameter, segmentLength, offsetY);
+        double enter = startParameter;
+        boolean reachedEnd = false;
+        for (int coarseStep = 0; coarseStep < COARSE_MAXIMUM_STEPS; coarseStep++) {
+            lastCoarseSteps = coarseStep + 1;
+            double exit = Math.min(Math.min(nextBoundaryX, nextBoundaryY), Math.min(nextBoundaryZ, endParameter));
+            double exitDepth = tauAt(exit, segmentLength, offsetY);
+            double middle = (enter + exit) * 0.5;
+            depth += currentStructure.densityAt(middle * offsetX, middle * offsetY, middle * offsetZ)
+                    * Math.max(0.0, exitDepth - enterDepth);
+            enter = exit;
+            enterDepth = exitDepth;
+            if (!(exit < endParameter)) {
+                reachedEnd = true;
+                break;
+            }
+            double smallestBoundary = Math.min(nextBoundaryX, Math.min(nextBoundaryY, nextBoundaryZ));
+            // Ties step every tied axis, as the cell walk does.
+            if (nextBoundaryX <= smallestBoundary) {
+                cellX += stepX;
+                nextBoundaryX += boundaryStepX;
+            }
+            if (nextBoundaryY <= smallestBoundary) {
+                cellY += stepY;
+                nextBoundaryY += boundaryStepY;
+            }
+            if (nextBoundaryZ <= smallestBoundary) {
+                cellZ += stepZ;
+                nextBoundaryZ += boundaryStepZ;
+            }
+        }
+        if (!reachedEnd) {
+            depth += Math.max(0.0, tauAt(endParameter, segmentLength, offsetY) - enterDepth);
+        }
         return depth;
     }
 
@@ -478,114 +594,27 @@ public final class SnowFogWalk {
     }
 
     /**
-     * Keeps the noise that the walk reads while it integrates, which it does not copy. A null texture or a strength
-     * that is not positive turns the noise off, and then every depth is the depth of the fog without it.
-     * @param texels the array of SnowFogNoise.SIZE cubed bytes of the texture, or null
-     * @param strength how much the noise multiplies the extinction at its peak
-     * @param fineTileBlocks the blocks per tile of the fine octave, which is the setting's blocks per texel times
-     *        SnowFogNoise.SIZE
-     * @param fineEyeU the tile coordinate of the eye of the fine octave along x
-     * @param fineEyeV the tile coordinate of the eye of the fine octave along y
-     * @param fineEyeW the tile coordinate of the eye of the fine octave along z
-     * @param coarseEyeU the tile coordinate of the eye of the coarse octave along x
-     * @param coarseEyeV the tile coordinate of the eye of the coarse octave along y
-     * @param coarseEyeW the tile coordinate of the eye of the coarse octave along z
+     * Keeps the fog structure that the walk reads, which it does not copy. A null structure turns the structures off,
+     * and then every depth stays the depth of the fog without them.
+     * @param structure the structure that shapes the fog, or null
      */
-    public void setNoise(byte[] texels, double strength, double fineTileBlocks, double fineEyeU, double fineEyeV,
-            double fineEyeW, double coarseEyeU, double coarseEyeV, double coarseEyeW) {
-        if (texels == null || !(strength > 0.0)) {
-            this.noiseTexels = null;
-            this.noiseStrength = 0.0;
-            return;
-        }
-        this.noiseTexels = texels;
-        this.noiseStrength = strength;
-        this.fineNoiseTileBlocks = fineTileBlocks;
-        this.fineNoiseEyeU = fineEyeU;
-        this.fineNoiseEyeV = fineEyeV;
-        this.fineNoiseEyeW = fineEyeW;
-        this.coarseNoiseEyeU = coarseEyeU;
-        this.coarseNoiseEyeV = coarseEyeV;
-        this.coarseNoiseEyeW = coarseEyeW;
+    public void setStructure(FogStructure structure) {
+        this.structure = structure;
     }
 
     /**
-     * The noise at a point given as an offset from the eye's continuous position, which weights the two octaves of the
-     * texture. Allocates nothing.
-     * @param offsetX the offset of the point from the eye in x, in blocks
-     * @param offsetY the offset of the point from the eye in y, in blocks
-     * @param offsetZ the offset of the point from the eye in z, in blocks
-     * @return the noise from 0 to 1, and 0 while the noise is off
+     * The parts that the coarse walk of the last opticalDepth visited, which is 0 while the structures are off or when
+     * the segment ends before the far part begins.
+     * @return the parts walked, from 0 to COARSE_MAXIMUM_STEPS
      */
-    public double noiseAt(double offsetX, double offsetY, double offsetZ) {
-        byte[] texels = noiseTexels;
-        if (texels == null || !(noiseStrength > 0.0) || !(fineNoiseTileBlocks > 0.0)) {
-            return 0.0;
-        }
-        double coarseTileBlocks = fineNoiseTileBlocks * SnowFogNoise.COARSE_TILE_FACTOR;
-        double fine = SnowFogNoise.sample(texels, fineNoiseEyeU + offsetX / fineNoiseTileBlocks,
-                fineNoiseEyeV + offsetY / fineNoiseTileBlocks, fineNoiseEyeW + offsetZ / fineNoiseTileBlocks);
-        double coarse = SnowFogNoise.sample(texels, coarseNoiseEyeU + offsetX / coarseTileBlocks,
-                coarseNoiseEyeV + offsetY / coarseTileBlocks, coarseNoiseEyeW + offsetZ / coarseTileBlocks);
-        return SnowFogNoise.FINE_WEIGHT * fine + SnowFogNoise.COARSE_WEIGHT * coarse;
+    public int lastCoarseSteps() {
+        return lastCoarseSteps;
     }
 
     /**
-     * The parameter of the segment at which the fog of setFog reaches the given optical depth, which inverts
-     * HeightFog.opticalDepth along a ray from the eye. Allocates nothing.
-     * @param eyeExtinction the extinction per block at the eye's height
-     * @param length the length of the segment in blocks
-     * @param verticalOffset the height in blocks of the segment end above the eye
-     * @param heightScale the height scale of the fog in blocks, where 0 or less means fog that is uniform in height
-     * @param depth the optical depth to find the parameter of
-     * @return the parameter from 0 to 1, which is 0 when the depth or the extinction is not positive
-     */
-    public static double parameterAtDepth(double eyeExtinction, double length, double verticalOffset,
-            double heightScale, double depth) {
-        double rayDepth = eyeExtinction * length;
-        if (!(depth > 0.0) || !(rayDepth > 0.0)) {
-            return 0.0;
-        }
-        double parameter;
-        if (!(heightScale > 0.0)) {
-            parameter = depth / rayDepth;
-        } else {
-            double scaledOffset = verticalOffset / heightScale;
-            double exponent = depth * scaledOffset / rayDepth;
-            if (Math.abs(exponent) < HeightFog.SERIES_LIMIT) {
-                parameter = (depth / rayDepth) * (1.0 + exponent / 2.0 + exponent * exponent / 3.0);
-            } else if (1.0 - exponent > 0.0) {
-                parameter = -Math.log(1.0 - exponent) / scaledOffset;
-            } else {
-                parameter = 1.0;
-            }
-        }
-        if (!(parameter > 0.0)) {
-            return 0.0;
-        }
-        return Math.min(1.0, parameter);
-    }
-
-    /**
-     * The steps that the far march of the last opticalDepth walked, which is 0 while the noise is off or when the
-     * segment ends before the far part begins.
-     * @return the steps walked, from 0 to FAR_MARCH_STEPS
-     */
-    public int lastMarchSteps() {
-        return lastMarchSteps;
-    }
-
-    /**
-     * Whether the walk multiplies the fog by the noise, which needs a texture and a positive strength.
-     */
-    private boolean isNoiseOn() {
-        return noiseTexels != null && noiseStrength > 0.0;
-    }
-
-    /**
-     * Walks the part of the segment inside the region cell by cell, adding the share of each cell times the optical
-     * depth between its two ends, and counts the cells. A walk that runs out of steps counts the rest of the region as
-     * open, which errs toward fog.
+     * Walks the part of the segment inside the region cell by cell, adding the share of each cell times the density of
+     * the structures at its middle times the optical depth between its two ends, and counts the cells. A walk that runs
+     * out of steps counts the rest of the region as open, which errs toward fog.
      */
     private double walkCells(double offsetX, double offsetY, double offsetZ, double segmentLength, double regionEnd) {
         int cellX = 0;
@@ -631,16 +660,17 @@ public final class SnowFogWalk {
         double enterDepth = 0.0;
         double enter = 0.0;
         boolean reachedRegionEnd = false;
-        boolean noiseOn = isNoiseOn();
+        FogStructure currentStructure = structure;
+        boolean structureOn = currentStructure != null && currentStructure.isOn();
         for (int cellStep = 0; cellStep < MAXIMUM_CELL_STEPS; cellStep++) {
             lastCellSteps = cellStep + 1;
             double exit = Math.min(Math.min(nextBoundaryX, nextBoundaryY), Math.min(nextBoundaryZ, regionEnd));
             double exitDepth = tauAt(exit, segmentLength, offsetY);
             double share = cellShare(cellX, cellY, cellZ);
             double partDepth = Math.max(0.0, exitDepth - enterDepth);
-            if (noiseOn && share > 0.0) {
+            if (structureOn && share > 0.0) {
                 double middle = (enter + exit) * 0.5;
-                partDepth *= 1.0 + noiseStrength * noiseAt(middle * offsetX, middle * offsetY, middle * offsetZ);
+                partDepth *= currentStructure.densityAt(middle * offsetX, middle * offsetY, middle * offsetZ);
             }
             depth += share * partDepth;
             enterDepth = exitDepth;

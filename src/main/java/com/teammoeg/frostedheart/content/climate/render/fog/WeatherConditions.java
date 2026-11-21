@@ -57,7 +57,7 @@ public interface WeatherConditions {
     double decayLength();
 
     /**
-     * The speed of the wind, which moves the noise of the fog.
+     * The speed of the wind, which carries the structures of the fog.
      * @return the wind speed in blocks per second, not negative
      */
     double windSpeed();
@@ -67,4 +67,10 @@ public interface WeatherConditions {
      * @return the wind direction in radians
      */
     double windDirection();
+
+    /**
+     * The share of the fog that sits in the moving structures, with the rest spread thin as clear air between them.
+     * @return the structure share from 0 for fog of an even density to 1 for fog that all sits in the structures
+     */
+    double structureShare();
 }

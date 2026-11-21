@@ -33,8 +33,8 @@ import java.util.Arrays;
 /**
  * Checks the rules that fill the fog of a full-resolution pixel in from four pixels walked at a lower resolution: the
  * divisor, the low size, the checkerboard of the two depths and the ratio, the texels and weights of a pixel's
- * footprint, the ratio a pixel resolves to with and without the fallback, the hysteresis of the fallback, and that the
- * warm rules allocate nothing.
+ * footprint, the ratio a pixel resolves to with and without the fallback, the ratio a sky pixel takes from its sky
+ * samples, the hysteresis of the fallback, and that the warm rules allocate nothing.
  */
 @GameTestHolder("frostedheart_weather")
 @PrefixGameTestTemplate(false)
@@ -54,6 +54,9 @@ public final class FogUpsampleGameTests {
     private static final int ALLOCATION_BEAN_WARMUPS = 20;
     private static final double WARM_NEAREST_DISTANCE = 8.0;
     private static final int WARM_DISTANCE_SPAN = 5;
+    private static final double WARM_LIGHTEST_WEIGHT = 0.25;
+    private static final double WARM_WEIGHT_STEP = 0.01;
+    private static final int WARM_WEIGHT_STEPS = 10;
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void divisorAndSizes(GameTestHelper helper) {
@@ -213,6 +216,71 @@ public final class FogUpsampleGameTests {
         helper.succeed();
     }
 
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void resolveSkyFollowsTheRules(GameTestHelper helper) {
+        assertSkyRatio(helper, "the three sky samples of the distances -1, -1, 10 and -1 with the weights 0.1, 0.2, "
+                + "0.3 and 0.4, whose terrain sample is left out and whose weights renormalize over 0.7",
+                new double[] {-1.0, -1.0, 10.0, -1.0}, new double[] {0.8, 1.2, 5.0, 1.0},
+                new double[] {0.1, 0.2, 0.3, 0.4}, 1.0285714285714285);
+        assertSkyRatio(helper, "the four sky samples of the ratios 0.5, 1.5, 1.0 and 1.0",
+                new double[] {FogUpsample.SKY_DISTANCE, FogUpsample.SKY_DISTANCE, FogUpsample.SKY_DISTANCE,
+                        FogUpsample.SKY_DISTANCE}, new double[] {0.5, 1.5, 1.0, 1.0},
+                new double[] {0.25, 0.25, 0.25, 0.25}, 1.0);
+        assertSkyRatio(helper, "no sky sample of the distances 5, 6, 7 and 8", new double[] {5.0, 6.0, 7.0, 8.0},
+                new double[] {0.8, 1.2, 5.0, 1.0}, new double[] {0.25, 0.25, 0.25, 0.25}, 1.0);
+        assertSkyRatio(helper, "the sky sample of the weight 0 and the three terrain samples of the distance 10",
+                new double[] {FogUpsample.SKY_DISTANCE, 10.0, 10.0, 10.0}, new double[] {0.8, 1.2, 5.0, 1.0},
+                new double[] {0.0, 0.5, 0.25, 0.25}, 1.0);
+        assertSkyRatio(helper, "the same samples of the distances -1, -1, 10 and -1 with FogUpsample.SKY_DISTANCE as "
+                + "the sky distance", new double[] {FogUpsample.SKY_DISTANCE, FogUpsample.SKY_DISTANCE, 10.0,
+                        FogUpsample.SKY_DISTANCE}, new double[] {0.8, 1.2, 5.0, 1.0},
+                new double[] {0.1, 0.2, 0.3, 0.4}, 1.0285714285714285);
+        assertSkyRatio(helper, "the terrain sample of the distance 0 and the three sky samples", new double[] {0.0,
+                FogUpsample.SKY_DISTANCE, FogUpsample.SKY_DISTANCE, FogUpsample.SKY_DISTANCE},
+                new double[] {5.0, 1.5, 1.0, 1.0}, new double[] {0.4, 0.2, 0.2, 0.2}, 1.1666666666666667);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void resolveSkyAllocatesNothing(GameTestHelper helper) {
+        double[] distances = {FogUpsample.SKY_DISTANCE, 12.0, FogUpsample.SKY_DISTANCE, 9.5};
+        double[] ratios = {0.5, 1.0, 1.5, 0.75};
+        double[] weights = new double[WEIGHT_COUNT];
+        Arrays.fill(weights, WARM_LIGHTEST_WEIGHT);
+        warmResolveSky(distances, ratios, weights, ALLOCATION_WARMUP_CALLS);
+        ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
+        if (!(threadBean instanceof com.sun.management.ThreadMXBean allocationBean)) {
+            LOGGER.info("The thread bean is not a com.sun.management.ThreadMXBean, so the allocation of the warm sky "
+                    + "resolve is not measured");
+            helper.succeed();
+            return;
+        }
+        if (!allocationBean.isThreadAllocatedMemoryEnabled()) {
+            try {
+                allocationBean.setThreadAllocatedMemoryEnabled(true);
+            } catch (UnsupportedOperationException unsupported) {
+                LOGGER.info("Thread allocated memory cannot be turned on", unsupported);
+            }
+        }
+        if (!allocationBean.isThreadAllocatedMemoryEnabled()) {
+            LOGGER.info("Thread allocated memory is not enabled, so the allocation of the warm sky resolve is not "
+                    + "measured");
+            helper.succeed();
+            return;
+        }
+        long threadId = Thread.currentThread().getId();
+        for (int warmup = 0; warmup < ALLOCATION_BEAN_WARMUPS; warmup++) {
+            allocationBean.getThreadAllocatedBytes(threadId);
+        }
+        long before = allocationBean.getThreadAllocatedBytes(threadId);
+        double sum = warmResolveSky(distances, ratios, weights, ALLOCATION_CALLS);
+        long allocated = allocationBean.getThreadAllocatedBytes(threadId) - before;
+        LOGGER.info("The warm fog upsample sky allocated " + allocated + " bytes with a sum of " + sum);
+        helper.assertTrue(allocated == 0, "The " + ALLOCATION_CALLS + " warm sky resolves allocate " + allocated
+                + " bytes instead of 0");
+        helper.succeed();
+    }
+
     /**
      * Checks a divisor of the setting against its expected divisor.
      */
@@ -311,6 +379,30 @@ public final class FogUpsampleGameTests {
             double nearestDistance = WARM_NEAREST_DISTANCE + call % WARM_DISTANCE_SPAN;
             double ratio = FogUpsample.resolve(nearestDistance, distances, ratios, weights, (call & 1) == 0);
             sum += ratio + texelX[0] + texelY[0] + weights[0];
+        }
+        return sum;
+    }
+
+    /**
+     * Checks the ratio of a sky pixel against its expected ratio within TOLERANCE.
+     */
+    private static void assertSkyRatio(GameTestHelper helper, String step, double[] distances, double[] ratios,
+            double[] weights, double expected) {
+        double skyRatio = FogUpsample.resolveSky(distances, ratios, weights);
+        double difference = Math.abs(skyRatio - expected);
+        helper.assertTrue(difference <= TOLERANCE, "The sky ratio of " + step + " is " + skyRatio + " instead of "
+                + expected + ", a difference of " + difference + " above " + TOLERANCE);
+    }
+
+    /**
+     * The work of the sky allocation test: the sky ratios of changing weights, without an assertion or a message of
+     * its own, so that it can be measured.
+     */
+    private static double warmResolveSky(double[] distances, double[] ratios, double[] weights, int calls) {
+        double sum = 0.0;
+        for (int call = 0; call < calls; call++) {
+            weights[call % WEIGHT_COUNT] = WARM_LIGHTEST_WEIGHT + WARM_WEIGHT_STEP * (call % WARM_WEIGHT_STEPS);
+            sum += FogUpsample.resolveSky(distances, ratios, weights);
         }
         return sum;
     }

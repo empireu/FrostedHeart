@@ -32,11 +32,11 @@ import java.util.Arrays;
 import java.util.Random;
 
 /**
- * Checks the walk of the fog along a ray through the snow field: the analytic depth of an open field and of a sheltered
- * one, the heightmap crossfade near the edge of the region, the fade of a fill and the shown box, the share table of
- * each decay length, the guarded zero, level, vertical and edge rays, the backward walk under a porch, the whole walk
- * against a fine step reference on random layouts, the share of a cell against the same reference, and that the warm
- * walk allocates nothing.
+ * Checks the walk of the fog along a ray through the snow field: the analytic depth of an open field and of a
+ * sheltered one, the heightmap crossfade near the edge of the region, the fade of a fill and the shown box, the share
+ * table of each decay length, the guarded zero, level, vertical and edge rays, the backward walk under a porch, the
+ * whole walk against a fine step reference on random layouts, the share of a cell against the same reference, the walk
+ * to the sky with the tail past it, and that the warm walks allocate nothing.
  */
 @GameTestHolder("frostedheart_weather")
 @PrefixGameTestTemplate(false)
@@ -94,7 +94,7 @@ public final class SnowFogWalkGameTests {
     private static final int CELL_REFERENCE_X = 40;
     private static final int CELL_REFERENCE_Y = 10;
     private static final int CELL_REFERENCE_Z = 40;
-    private static final int ALLOCATION_WARMUP_CALLS = 100;
+    private static final int ALLOCATION_WARMUP_CALLS = 20000;
     private static final int ALLOCATION_DEPTH_CALLS = 1000;
     private static final int ALLOCATION_TABLE_CALLS = 10;
     private static final double ALLOCATION_TABLE_STEP = 0.1;
@@ -111,26 +111,60 @@ public final class SnowFogWalkGameTests {
     private static final double[] LAYOUT_DECAY_LENGTHS = {1.5, 4.0, 0.5, 4.3};
     private static final double[] LAYOUT_HEIGHT_SCALES = {0.0, 128.0, 0.0, 64.0};
     private static final int[][] LAYOUT_EYE_BLOCKS = {{0, 64, 0}, {-1000, 70, 333}, {5, 64, -7}, {1023, 61, 1024}};
-    private static final int NOISE_TEXEL_COUNT = SnowFogNoise.SIZE * SnowFogNoise.SIZE * SnowFogNoise.SIZE;
-    private static final int LOUD_TEXEL = 255;
-    private static final int QUIET_TEXEL = 51;
-    private static final double NOISE_STRENGTH = 1.5;
-    private static final double NOISE_FINE_TILE = 128.0;
-    private static final double COARSE_NOISE_FINE_TILE = 64.0;
-    private static final double NOISE_DISPLACEMENT_X = 13.7;
-    private static final double NOISE_DISPLACEMENT_Z = -4.2;
-    private static final double UNIFORM_EYE_U = 0.3;
-    private static final double UNIFORM_EYE_V = 0.6;
-    private static final double UNIFORM_EYE_W = 0.1;
-    private static final double UNIFORM_COARSE_EYE_U = 0.2;
-    private static final double UNIFORM_COARSE_EYE_V = 0.7;
-    private static final double UNIFORM_COARSE_EYE_W = 0.9;
-    private static final double NOISE_TOLERANCE = 1.0e-12;
-    private static final double NOISY_TRANSMITTANCE_TOLERANCE = 0.01;
-    private static final double COARSE_TRANSMITTANCE_TOLERANCE = 0.02;
-    private static final double RELATIVE_DEPTH_TOLERANCE = 0.02;
+    private static final int STRUCTURE_TEXEL_COUNT = FogStructure.SIZE * FogStructure.SIZE * FogStructure.SIZE
+            * FogStructure.CHANNELS;
+    private static final int STRUCTURE_SHAPE_BYTE = 153;
+    private static final double STRUCTURE_MEAN_SHAPE = 0.176;
+    private static final double STRUCTURE_SHARE = 0.75;
+    private static final double UNIFORM_STRUCTURE_COVERAGE = 0.5;
+    private static final double WALK_STRUCTURE_COVERAGE = 0.35;
+    private static final double STRUCTURE_EROSION = 0.5;
+    private static final double STRUCTURE_RANGE = 96.0;
+    private static final double UNIFORM_STRUCTURE_RANGE = 1000.0;
+    private static final double SHORT_STRUCTURE_RANGE = 40.0;
+    private static final double UNIFORM_STRUCTURE_DENSITY = 1.75;
+    private static final double STRUCTURE_SIZE = 96.0;
+    private static final double SMALL_STRUCTURE_SIZE = 48.0;
+    private static final double STRUCTURE_STRETCH = 2.0;
+    private static final double STRUCTURE_DISPLACEMENT_X = 13.7;
+    private static final double STRUCTURE_DISPLACEMENT_Z = -4.2;
+    private static final double STRUCTURE_DIRECTION = 0.8;
+    private static final double STRUCTURE_TRANSMITTANCE_TOLERANCE = 0.03;
+    private static final double SMALL_STRUCTURE_TRANSMITTANCE_TOLERANCE = 0.06;
+    private static final double STRUCTURE_RELATIVE_DEPTH_TOLERANCE = 0.05;
     private static final double RELATIVE_DEPTH_LIMIT = 3.0;
-    private static final double PARAMETER_LENGTH = 100.0;
+    /**
+     * The fog of the sky tests at the eye, which is the extinction the blizzard of the visibility 80 has, and the
+     * height scale, the radius and the directions they walk.
+     */
+    private static final double SKY_EYE_EXTINCTION = 0.05;
+    private static final double SKY_HEIGHT_SCALE = 128.0;
+    private static final double SKY_RADIUS = 12.0;
+    private static final double SKY_WALK_DISTANCE = 96.0;
+    private static final double SKY_SHORT_WALK_DISTANCE = 40.0;
+    private static final double SKY_DIRECTION_X = 0.8;
+    private static final double SKY_DIRECTION_Y = 0.6;
+    private static final double UNNORMALIZED_DIRECTION_SCALE = 10.0;
+    /**
+     * The optical depth of the sky from the eye to infinity along the direction (0.8, 0.6, 0.0), which the extinction
+     * 0.05 and the height scale 128 give, whatever the walk distance is.
+     */
+    private static final double SKY_TOTAL_DEPTH = 10.666666666666668;
+    private static final double SKY_RELATIVE_TOLERANCE = 1.0e-6;
+    private static final double SKY_STRUCTURE_RELATIVE_TOLERANCE = 1.0e-9;
+    /**
+     * A height of every column far above the eye, so that the columns cover every point of a ray that rises.
+     */
+    private static final int SKY_COVER_HEIGHT = 1000;
+    private static final double SKY_COVERED_DIRECTION_X = 1.0;
+    private static final double SKY_COVERED_DIRECTION_Y = 0.05;
+    private static final double SKY_COVERED_WALK_DISTANCE = 40.0;
+    /**
+     * The directions of the sky allocation test: one that rises, one that is level, one that descends, one that rises
+     * slowly and one that the guard rejects.
+     */
+    private static final double[][] SKY_WARM_DIRECTIONS = {{0.8, 0.6, 0.0}, {1.0, 0.0, 0.0}, {0.3, -0.2, 0.9},
+            {0.0, 0.05, 1.0}, {0.0, 0.0, 0.0}};
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void openFieldGivesTheAnalyticDepth(GameTestHelper helper) {
@@ -319,39 +353,43 @@ public final class SnowFogWalkGameTests {
     }
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
-    public static void noiseOffKeepsEveryDepth(GameTestHelper helper) {
+    public static void structureOffKeepsEveryDepth(GameTestHelper helper) {
         SnowFogWalk walk = setUpWalk(byteField(0), unknownHeights());
-        byte[] loudTexels = filledTexels(LOUD_TEXEL);
-        walk.setNoise(null, 1.0, NOISE_FINE_TILE, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        assertDepthsWithoutNoise(helper, "the null noise array", walk);
-        walk.setNoise(loudTexels, 0.0, NOISE_FINE_TILE, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        assertDepthsWithoutNoise(helper, "the noise of the strength 0", walk);
+        walk.setStructure(null);
+        assertDepthsWithoutStructure(helper, "the null structure", walk);
+        FogStructure sharelessStructure = setUpStructure(filledStructureTexels(STRUCTURE_SHAPE_BYTE, 0), 0.0,
+                UNIFORM_STRUCTURE_COVERAGE, 0.0, UNIFORM_STRUCTURE_RANGE, STRUCTURE_MEAN_SHAPE);
+        walk.setStructure(sharelessStructure);
+        assertDepthsWithoutStructure(helper, "the structure of the share 0", walk);
+        FogStructure untexturedStructure = new FogStructure();
+        untexturedStructure.setDensityWithMeans(STRUCTURE_SHARE, UNIFORM_STRUCTURE_COVERAGE, 0.0,
+                UNIFORM_STRUCTURE_RANGE, STRUCTURE_MEAN_SHAPE, STRUCTURE_MEAN_SHAPE);
+        walk.setStructure(untexturedStructure);
+        assertDepthsWithoutStructure(helper, "the structure without a texture", walk);
         helper.succeed();
     }
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
-    public static void uniformNoiseScalesTheDepth(GameTestHelper helper) {
-        byte[] loudTexels = filledTexels(LOUD_TEXEL);
+    public static void uniformStructureScalesTheDepth(GameTestHelper helper) {
+        FogStructure structure = setUpStructure(filledStructureTexels(STRUCTURE_SHAPE_BYTE, 0), STRUCTURE_SHARE,
+                UNIFORM_STRUCTURE_COVERAGE, 0.0, UNIFORM_STRUCTURE_RANGE, STRUCTURE_MEAN_SHAPE);
         SnowFogWalk walk = setUpWalk(byteField(0), unknownHeights());
-        setUniformNoise(walk, loudTexels, 1.0);
-        assertDepth(helper, "the open field of the noise that is 1 everywhere at the strength 1, which doubles the "
-                + "depth", walk, 2.0, 10.0, 0.0, 0.0);
-        assertDepth(helper, "the open field of the doubled depth", walk, 20.0, 100.0, 0.0, 0.0);
-        assertMarchSteps(helper, "the ray (100.0, 0.0, 0.0) of the doubled depth", walk, SnowFogWalk.FAR_MARCH_STEPS);
-        assertDepth(helper, "the open field of the doubled depth", walk, 2.6, 3.0, 4.0, 12.0);
-        assertDepth(helper, "the open field of the doubled depth", walk, 10.0, 0.0, -50.0, 0.0);
-        assertMarchSteps(helper, "the ray (0.0, -50.0, 0.0) of the doubled depth", walk, SnowFogWalk.FAR_MARCH_STEPS);
-        setUniformNoise(walk, filledTexels(QUIET_TEXEL), 2.5);
-        assertDepth(helper, "the open field of the noise that is 0.2 everywhere at the strength 2.5, which makes the "
-                + "depth 1.5 times", walk, 1.5, 10.0, 0.0, 0.0);
-        assertDepth(helper, "the open field of the depth that is 1.5 times", walk, 15.0, 100.0, 0.0, 0.0);
-        SnowFogWalk shelteredWalk = setUpWalk(byteField(SnowField.SHELTERED), filledHeights(SHELTERED_COLUMN_HEIGHT));
-        setUniformNoise(shelteredWalk, loudTexels, 1.0);
-        assertDepth(helper, "the sheltered field of the doubled far march", shelteredWalk, 7.7, 100.0, 0.0, 0.0);
-        assertDepth(helper, "the sheltered field of the ray inside the region", shelteredWalk, 0.0, 10.0, 0.0, 0.0);
-        SnowFogWalk deepWalk = setUpWalk(byteField(0), unknownHeights());
-        deepWalk.setFog(EYE_EXTINCTION, HEIGHT_SCALE);
-        setUniformNoise(deepWalk, loudTexels, 1.0);
+        walk.setStructure(structure);
+        assertDepth(helper, "the open field of the uniform structure, which multiplies the mean fog by "
+                + UNIFORM_STRUCTURE_DENSITY, walk, UNIFORM_STRUCTURE_DENSITY, 10.0, 0.0, 0.0);
+        assertCoarseSteps(helper, "the ray (10.0, 0.0, 0.0) of the uniform structure, which ends inside the region",
+                walk, 0);
+        assertDepth(helper, "the open field of the uniform structure", walk, UNIFORM_STRUCTURE_DENSITY * 10.0, 100.0,
+                0.0, 0.0);
+        assertCoarseSteps(helper, "the ray (100.0, 0.0, 0.0) of the uniform structure, which walks the grid from "
+                + "30.5 to 100.5", walk, 19);
+        assertDepth(helper, "the open field of the uniform structure", walk, UNIFORM_STRUCTURE_DENSITY * 1.3, 3.0, 4.0,
+                12.0);
+        assertDepth(helper, "the open field of the uniform structure", walk, UNIFORM_STRUCTURE_DENSITY * 5.0, 0.0,
+                -50.0, 0.0);
+        assertCoarseSteps(helper, "the ray (0.0, -50.0, 0.0) of the uniform structure, which walks the cells -8 to "
+                + "-13 in y", walk, 6);
+        walk.setFog(EYE_EXTINCTION, HEIGHT_SCALE);
         double[][] rays = {{10.0, 0.0, 0.0}, {100.0, 0.0, 0.0}, {3.0, 4.0, 12.0}, {0.0, -50.0, 0.0},
                 {60.0, 30.0, 0.0}};
         for (int rayIndex = 0; rayIndex < rays.length; rayIndex++) {
@@ -359,59 +397,29 @@ public final class SnowFogWalkGameTests {
             double offsetY = rays[rayIndex][1];
             double offsetZ = rays[rayIndex][2];
             double length = Math.sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
-            double expected = 2.0 * HeightFog.opticalDepth(EYE_EXTINCTION, length, offsetY, HEIGHT_SCALE);
-            assertDepth(helper, "the open field of the doubled depth at the height scale " + HEIGHT_SCALE, deepWalk,
-                    expected, offsetX, offsetY, offsetZ);
+            double expected = UNIFORM_STRUCTURE_DENSITY
+                    * HeightFog.opticalDepth(EYE_EXTINCTION, length, offsetY, HEIGHT_SCALE);
+            assertDepth(helper, "the open field of the uniform structure at the height scale " + HEIGHT_SCALE
+                    + ", whose parts telescope", walk, expected, offsetX, offsetY, offsetZ);
         }
-        helper.succeed();
-    }
-
-    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
-    public static void noiseAtReadsBothOctaves(GameTestHelper helper) {
-        byte[] texels = new byte[NOISE_TEXEL_COUNT];
-        texels[0] = (byte) LOUD_TEXEL;
-        SnowFogWalk walk = setUpWalk(byteField(0), unknownHeights());
-        double eye = 0.5 / SnowFogNoise.SIZE;
-        walk.setNoise(texels, 1.0, SnowFogNoise.SIZE, eye, eye, eye, eye, eye, eye);
-        assertNoise(helper, "the noise at the texel the eye stands in", walk, 1.0, 0.0, 0.0, 0.0);
-        assertNoise(helper, "the noise one block along, whose fine read lands on the empty texel 1 and whose coarse "
-                + "read is " + (1.0 / SnowFogNoise.COARSE_TILE_FACTOR) + " of a texel along", walk,
-                SnowFogNoise.COARSE_WEIGHT * (1.0 - 1.0 / SnowFogNoise.COARSE_TILE_FACTOR), 1.0, 0.0, 0.0);
-        assertNoise(helper, "the noise half a block back, whose fine read is halfway between the texels 63 and 0", walk,
-                SnowFogNoise.FINE_WEIGHT * 0.5
-                        + SnowFogNoise.COARSE_WEIGHT * (1.0 - 0.5 / SnowFogNoise.COARSE_TILE_FACTOR),
-                -0.5, 0.0, 0.0);
-        helper.succeed();
-    }
-
-    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
-    public static void parameterAtDepthInvertsTheFog(GameTestHelper helper) {
-        assertParameter(helper, "the parameter of the depth 2 of the fog of the extinction 0.1 without a height scale",
-                SnowFogWalk.parameterAtDepth(EYE_EXTINCTION, PARAMETER_LENGTH, 0.0, 0.0, 2.0), 0.2, NOISE_TOLERANCE);
-        assertParameter(helper, "the parameter of the depth 0",
-                SnowFogWalk.parameterAtDepth(EYE_EXTINCTION, PARAMETER_LENGTH, 0.0, 0.0, 0.0), 0.0, NOISE_TOLERANCE);
-        assertParameter(helper, "the parameter of the depth -1",
-                SnowFogWalk.parameterAtDepth(EYE_EXTINCTION, PARAMETER_LENGTH, 0.0, 0.0, -1.0), 0.0, NOISE_TOLERANCE);
-        assertParameter(helper, "the parameter of the depth 50, past the end of the segment",
-                SnowFogWalk.parameterAtDepth(EYE_EXTINCTION, PARAMETER_LENGTH, 0.0, 0.0, 50.0), 1.0, NOISE_TOLERANCE);
-        double[] verticalOffsets = {-100.0, -0.01, 0.0, 50.0, 100.0, 1.28};
-        double[] parameters = {0.1, 0.5, 0.9};
-        for (int offsetIndex = 0; offsetIndex < verticalOffsets.length; offsetIndex++) {
-            double verticalOffset = verticalOffsets[offsetIndex];
-            for (int parameterIndex = 0; parameterIndex < parameters.length; parameterIndex++) {
-                double parameter = parameters[parameterIndex];
-                double depth = HeightFog.opticalDepth(EYE_EXTINCTION, parameter * PARAMETER_LENGTH,
-                        parameter * verticalOffset, HEIGHT_SCALE);
-                double inverted = SnowFogWalk.parameterAtDepth(EYE_EXTINCTION, PARAMETER_LENGTH, verticalOffset,
-                        HEIGHT_SCALE, depth);
-                assertParameter(helper, "the round trip of the vertical offset " + verticalOffset + " at the "
-                        + "parameter " + parameter + ", whose depth is " + depth, inverted, parameter,
-                        DEPTH_TOLERANCE);
-            }
-        }
-        assertParameter(helper, "the parameter of the depth 20 past the asymptote of the vertical offset 100",
-                SnowFogWalk.parameterAtDepth(EYE_EXTINCTION, PARAMETER_LENGTH, 100.0, HEIGHT_SCALE, 20.0), 1.0,
-                NOISE_TOLERANCE);
+        SnowFogWalk shelteredWalk = setUpWalk(byteField(SnowField.SHELTERED), filledHeights(SHELTERED_COLUMN_HEIGHT));
+        shelteredWalk.setStructure(structure);
+        assertDepth(helper, "the sheltered field of the uniform structure, which multiplies its 3.85 by "
+                + UNIFORM_STRUCTURE_DENSITY, shelteredWalk, UNIFORM_STRUCTURE_DENSITY * 3.85, 100.0, 0.0, 0.0);
+        assertCoarseSteps(helper, "the ray (100.0, 0.0, 0.0) of the sheltered field, which walks the grid from 30.5 to "
+                + "69", shelteredWalk, 11);
+        assertDepth(helper, "the sheltered field of the uniform structure", shelteredWalk, 0.0, 10.0, 0.0, 0.0);
+        // The region from 0 to 30 blocks adds 1.75 times its 3.0. The coarse parts from 30 to 31.5, 31.5 to 35.5,
+        // 35.5 to 39.5 and 39.5 to 40 blocks take the range weights 0.925, 0.65, 0.25 and 0.025 at their midpoints and
+        // add 0.2540625, 0.595, 0.475 and 0.0509375. The mean fog from 40 to 100 blocks adds 6.0.
+        FogStructure shortRangeStructure = setUpStructure(filledStructureTexels(STRUCTURE_SHAPE_BYTE, 0),
+                STRUCTURE_SHARE, UNIFORM_STRUCTURE_COVERAGE, 0.0, SHORT_STRUCTURE_RANGE, STRUCTURE_MEAN_SHAPE);
+        SnowFogWalk shortRangeWalk = setUpWalk(byteField(0), unknownHeights());
+        shortRangeWalk.setStructure(shortRangeStructure);
+        assertDepth(helper, "the open field of the uniform structure of the range " + SHORT_STRUCTURE_RANGE,
+                shortRangeWalk, 12.625, 100.0, 0.0, 0.0);
+        assertCoarseSteps(helper, "the ray (100.0, 0.0, 0.0) of the range " + SHORT_STRUCTURE_RANGE
+                + ", which walks the grid from 30.5 to 40.5", shortRangeWalk, 4);
         helper.succeed();
     }
 
@@ -447,12 +455,13 @@ public final class SnowFogWalkGameTests {
     }
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
-    public static void noisyWalkMatchesAFineStepReference(GameTestHelper helper) {
-        byte[] texels = new byte[NOISE_TEXEL_COUNT];
-        SnowFogNoise.build(SnowFogNoise.SEED, texels);
+    public static void structuredWalkMatchesAFineStepReference(GameTestHelper helper) {
+        byte[] texels = new byte[STRUCTURE_TEXEL_COUNT];
+        FogStructure.build(FogStructure.SEED, texels);
         ReferenceLayout[] layouts = buildLayouts();
-        assertNoisyWalk(helper, layouts, texels, NOISE_FINE_TILE, NOISY_TRANSMITTANCE_TOLERANCE, true);
-        assertNoisyWalk(helper, layouts, texels, COARSE_NOISE_FINE_TILE, COARSE_TRANSMITTANCE_TOLERANCE, false);
+        assertStructuredWalk(helper, layouts, texels, STRUCTURE_SIZE, STRUCTURE_TRANSMITTANCE_TOLERANCE, true);
+        assertStructuredWalk(helper, layouts, texels, SMALL_STRUCTURE_SIZE, SMALL_STRUCTURE_TRANSMITTANCE_TOLERANCE,
+                false);
         helper.succeed();
     }
 
@@ -501,9 +510,15 @@ public final class SnowFogWalkGameTests {
         ReferenceLayout layout = buildLayouts()[0];
         float[] table = new float[SnowFogWalk.TABLE_SIZE];
         SnowFogWalk.buildTable(layout.decayLength, table);
-        byte[] texels = new byte[NOISE_TEXEL_COUNT];
-        SnowFogNoise.build(SnowFogNoise.SEED, texels);
-        warmOperations(layout, table, texels, ALLOCATION_WARMUP_CALLS);
+        byte[] texels = new byte[STRUCTURE_TEXEL_COUNT];
+        FogStructure.build(FogStructure.SEED, texels);
+        FogStructure structure = new FogStructure();
+        structure.setTexture(texels);
+        structure.setDensity(STRUCTURE_SHARE, WALK_STRUCTURE_COVERAGE, STRUCTURE_EROSION, STRUCTURE_RANGE);
+        structure.follow(layout.eyeBlockX + layout.eyeFractionX, layout.eyeBlockY + layout.eyeFractionY,
+                layout.eyeBlockZ + layout.eyeFractionZ, STRUCTURE_DISPLACEMENT_X, STRUCTURE_DISPLACEMENT_Z,
+                STRUCTURE_DIRECTION, STRUCTURE_SIZE, STRUCTURE_STRETCH);
+        warmOperations(layout, table, structure, ALLOCATION_WARMUP_CALLS);
         ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
         if (!(threadBean instanceof com.sun.management.ThreadMXBean allocationBean)) {
             LOGGER.info("The thread bean is not a com.sun.management.ThreadMXBean, so the allocation of the warm walk "
@@ -528,20 +543,175 @@ public final class SnowFogWalkGameTests {
             allocationBean.getThreadAllocatedBytes(threadId);
         }
         long before = allocationBean.getThreadAllocatedBytes(threadId);
-        double sum = warmOperations(layout, table, texels, ALLOCATION_DEPTH_CALLS);
+        double sum = warmOperations(layout, table, structure, ALLOCATION_DEPTH_CALLS);
         long allocated = allocationBean.getThreadAllocatedBytes(threadId) - before;
         LOGGER.info("The warm snow fog walk allocated " + allocated + " bytes with a sum of " + sum);
-        helper.assertTrue(allocated == 0, "The " + ALLOCATION_DEPTH_CALLS + " warm optical depths of the noisy walk, "
-                + "the " + ALLOCATION_TABLE_CALLS + " warm tables and the setters allocate " + allocated
+        helper.assertTrue(allocated == 0, "The " + ALLOCATION_DEPTH_CALLS + " warm optical depths of the structured "
+                + "walk, the " + ALLOCATION_TABLE_CALLS + " warm tables and the setters allocate " + allocated
                 + " bytes instead of 0");
         helper.succeed();
     }
 
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void skyWalkGivesTheAnalyticDepthOfAnOpenField(GameTestHelper helper) {
+        SnowFogWalk walk = setUpSkyWalk();
+        assertSkyDepth(helper, "the direction (0.8, 0.6, 0.0) of the walk " + SKY_WALK_DISTANCE, walk, SKY_DIRECTION_X,
+                SKY_DIRECTION_Y, 0.0, SKY_WALK_DISTANCE, SKY_TOTAL_DEPTH);
+        assertSkyDepth(helper, "the unnormalized direction (8.0, 6.0, 0.0) of the walk " + SKY_WALK_DISTANCE, walk,
+                SKY_DIRECTION_X * UNNORMALIZED_DIRECTION_SCALE, SKY_DIRECTION_Y * UNNORMALIZED_DIRECTION_SCALE, 0.0,
+                SKY_WALK_DISTANCE, SKY_TOTAL_DEPTH);
+        assertSkyDepth(helper, "the direction (0.8, 0.6, 0.0) of the walk " + SKY_SHORT_WALK_DISTANCE, walk,
+                SKY_DIRECTION_X, SKY_DIRECTION_Y, 0.0, SKY_SHORT_WALK_DISTANCE, SKY_TOTAL_DEPTH);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void skyWalkStaysAtTheCapBelowTheHorizon(GameTestHelper helper) {
+        SnowFogWalk walk = setUpSkyWalk();
+        assertMaximumSkyDepth(helper, "the level direction (1.0, 0.0, 0.0) of the walk " + SKY_WALK_DISTANCE, walk,
+                1.0, 0.0, 0.0, SKY_WALK_DISTANCE);
+        assertMaximumSkyDepth(helper, "the descending direction (1.0, -0.2, 0.0) of the walk " + SKY_WALK_DISTANCE,
+                walk, 1.0, -0.2, 0.0, SKY_WALK_DISTANCE);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void skyWalkGuardsBadDirectionsAndDistances(GameTestHelper helper) {
+        SnowFogWalk walk = setUpSkyWalk();
+        assertZeroSkyDepth(helper, "the zero direction of the walk " + SKY_WALK_DISTANCE, walk, 0.0, 0.0, 0.0,
+                SKY_WALK_DISTANCE);
+        assertZeroLengthLastValues(helper, "the zero direction", walk);
+        assertZeroSkyDepth(helper, "the direction (0.8, NaN, 0.0) of the walk " + SKY_WALK_DISTANCE, walk,
+                SKY_DIRECTION_X, Double.NaN, 0.0, SKY_WALK_DISTANCE);
+        assertZeroSkyDepth(helper, "the direction (Infinity, 0.6, 0.0) of the walk " + SKY_WALK_DISTANCE, walk,
+                Double.POSITIVE_INFINITY, SKY_DIRECTION_Y, 0.0, SKY_WALK_DISTANCE);
+        assertZeroSkyDepth(helper, "the direction (0.8, 0.6, 0.0) of the walk distance 0", walk, SKY_DIRECTION_X,
+                SKY_DIRECTION_Y, 0.0, 0.0);
+        assertZeroSkyDepth(helper, "the direction (0.8, 0.6, 0.0) of the walk distance -1", walk, SKY_DIRECTION_X,
+                SKY_DIRECTION_Y, 0.0, -1.0);
+        assertZeroSkyDepth(helper, "the direction (0.8, 0.6, 0.0) of the walk distance NaN", walk, SKY_DIRECTION_X,
+                SKY_DIRECTION_Y, 0.0, Double.NaN);
+        walk.setFog(0.0, SKY_HEIGHT_SCALE);
+        assertZeroSkyDepth(helper, "the direction (0.8, 0.6, 0.0) of the walk " + SKY_WALK_DISTANCE + " without "
+                + "extinction", walk, SKY_DIRECTION_X, SKY_DIRECTION_Y, 0.0, SKY_WALK_DISTANCE);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void skyWalkStopsTheTailUnderCover(GameTestHelper helper) {
+        SnowFogWalk walk = setUpWalk(byteField(0), filledHeights(SKY_COVER_HEIGHT));
+        walk.setFog(SKY_EYE_EXTINCTION, SKY_HEIGHT_SCALE);
+        walk.setRadius(SKY_RADIUS);
+        double directionLength = Math.sqrt(SKY_COVERED_DIRECTION_X * SKY_COVERED_DIRECTION_X
+                + SKY_COVERED_DIRECTION_Y * SKY_COVERED_DIRECTION_Y);
+        double unitX = SKY_COVERED_DIRECTION_X / directionLength;
+        double unitY = SKY_COVERED_DIRECTION_Y / directionLength;
+        double skyDepth = walk.skyOpticalDepth(SKY_COVERED_DIRECTION_X, SKY_COVERED_DIRECTION_Y, 0.0,
+                SKY_COVERED_WALK_DISTANCE);
+        double farStop = walk.lastFarStop();
+        double walked = walk.opticalDepth(unitX * SKY_COVERED_WALK_DISTANCE, unitY * SKY_COVERED_WALK_DISTANCE, 0.0);
+        helper.assertTrue(farStop < 1.0, "The walk of the covered direction (1.0, 0.05, 0.0) stops its far part at "
+                + farStop + " instead of below 1, although the columns of the height " + SKY_COVER_HEIGHT + " cover "
+                + "every point it reaches");
+        helper.assertTrue(skyDepth == walked, "The sky depth of the covered direction (1.0, 0.05, 0.0) of the walk "
+                + SKY_COVERED_WALK_DISTANCE + " is " + skyDepth + " instead of the " + walked + " of the walk alone, "
+                + "since no tail may follow a covered end");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void skyWalkReportsTheInnerWalk(GameTestHelper helper) {
+        SnowFogWalk walk = setUpSkyWalk();
+        walk.skyOpticalDepth(SKY_DIRECTION_X, SKY_DIRECTION_Y, 0.0, SKY_WALK_DISTANCE);
+        int cellSteps = walk.lastCellSteps();
+        int columnSteps = walk.lastColumnSteps();
+        int coarseSteps = walk.lastCoarseSteps();
+        double regionEnd = walk.lastRegionEnd();
+        double farStop = walk.lastFarStop();
+        walk.opticalDepth(SKY_DIRECTION_X * SKY_WALK_DISTANCE, SKY_DIRECTION_Y * SKY_WALK_DISTANCE, 0.0);
+        String step = "the sky walk of (0.8, 0.6, 0.0) over " + SKY_WALK_DISTANCE + " blocks";
+        String walkedStep = "the optical depth of (76.8, 57.6, 0.0)";
+        helper.assertTrue(cellSteps == walk.lastCellSteps(), "The " + step + " leaves " + cellSteps
+                + " cell steps instead of the " + walk.lastCellSteps() + " of " + walkedStep);
+        helper.assertTrue(columnSteps == walk.lastColumnSteps(), "The " + step + " leaves " + columnSteps
+                + " column steps instead of the " + walk.lastColumnSteps() + " of " + walkedStep);
+        helper.assertTrue(coarseSteps == walk.lastCoarseSteps(), "The " + step + " leaves " + coarseSteps
+                + " coarse steps instead of the " + walk.lastCoarseSteps() + " of " + walkedStep);
+        helper.assertTrue(Math.abs(regionEnd - walk.lastRegionEnd()) <= STOP_TOLERANCE, "The " + step + " leaves its "
+                + "region end at " + regionEnd + " instead of the " + walk.lastRegionEnd() + " of " + walkedStep);
+        helper.assertTrue(Math.abs(farStop - walk.lastFarStop()) <= STOP_TOLERANCE, "The " + step + " leaves its far "
+                + "stop at " + farStop + " instead of the " + walk.lastFarStop() + " of " + walkedStep);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void skyWalkAddsTheTailPastTheStructureRange(GameTestHelper helper) {
+        FogStructure structure = setUpStructure(filledStructureTexels(STRUCTURE_SHAPE_BYTE, 0), STRUCTURE_SHARE,
+                UNIFORM_STRUCTURE_COVERAGE, 0.0, UNIFORM_STRUCTURE_RANGE, STRUCTURE_MEAN_SHAPE);
+        SnowFogWalk walk = setUpSkyWalk();
+        walk.setStructure(structure);
+        double directionLength = Math.sqrt(SKY_DIRECTION_X * SKY_DIRECTION_X + SKY_DIRECTION_Y * SKY_DIRECTION_Y);
+        double unitX = SKY_DIRECTION_X / directionLength;
+        double unitY = SKY_DIRECTION_Y / directionLength;
+        double walked = walk.opticalDepth(unitX * UNIFORM_STRUCTURE_RANGE, unitY * UNIFORM_STRUCTURE_RANGE, 0.0);
+        double tail = HeightFog.skyTailOpticalDepth(SKY_EYE_EXTINCTION, UNIFORM_STRUCTURE_RANGE, unitY,
+                SKY_HEIGHT_SCALE);
+        double skyDepth = walk.skyOpticalDepth(SKY_DIRECTION_X, SKY_DIRECTION_Y, 0.0, UNIFORM_STRUCTURE_RANGE);
+        double expected = walked + tail;
+        double relativeDifference = Math.abs(skyDepth - expected) / Math.abs(expected);
+        helper.assertTrue(relativeDifference <= SKY_STRUCTURE_RELATIVE_TOLERANCE, "The sky depth of the direction "
+                + "(0.8, 0.6, 0.0) over the structure range " + UNIFORM_STRUCTURE_RANGE + " is " + skyDepth
+                + " instead of the " + walked + " of the walk plus the " + tail + " of the tail at the density 1, a "
+                + "relative difference of " + relativeDifference + " above " + SKY_STRUCTURE_RELATIVE_TOLERANCE);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void warmSkyWalkAllocatesNothing(GameTestHelper helper) {
+        SnowFogWalk walk = setUpSkyWalk();
+        walk.setStructure(setUpStructure(filledStructureTexels(STRUCTURE_SHAPE_BYTE, 0), STRUCTURE_SHARE,
+                UNIFORM_STRUCTURE_COVERAGE, STRUCTURE_EROSION, STRUCTURE_RANGE, STRUCTURE_MEAN_SHAPE));
+        warmSkyOpticalDepth(walk, ALLOCATION_WARMUP_CALLS);
+        ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
+        if (!(threadBean instanceof com.sun.management.ThreadMXBean allocationBean)) {
+            LOGGER.info("The thread bean is not a com.sun.management.ThreadMXBean, so the allocation of the warm sky "
+                    + "walk is not measured");
+            helper.succeed();
+            return;
+        }
+        if (!allocationBean.isThreadAllocatedMemoryEnabled()) {
+            try {
+                allocationBean.setThreadAllocatedMemoryEnabled(true);
+            } catch (UnsupportedOperationException unsupported) {
+                LOGGER.info("Thread allocated memory cannot be turned on", unsupported);
+            }
+        }
+        if (!allocationBean.isThreadAllocatedMemoryEnabled()) {
+            LOGGER.info("Thread allocated memory is not enabled, so the allocation of the warm sky walk is not "
+                    + "measured");
+            helper.succeed();
+            return;
+        }
+        long threadId = Thread.currentThread().getId();
+        for (int warmup = 0; warmup < ALLOCATION_BEAN_WARMUPS; warmup++) {
+            allocationBean.getThreadAllocatedBytes(threadId);
+        }
+        long before = allocationBean.getThreadAllocatedBytes(threadId);
+        double sum = warmSkyOpticalDepth(walk, ALLOCATION_DEPTH_CALLS);
+        long allocated = allocationBean.getThreadAllocatedBytes(threadId) - before;
+        LOGGER.info("The warm sky snow fog walk allocated " + allocated + " bytes with a sum of " + sum);
+        helper.assertTrue(allocated == 0, "The " + ALLOCATION_DEPTH_CALLS + " warm sky optical depths allocate "
+                + allocated + " bytes instead of 0");
+        helper.succeed();
+    }
+
     /**
-     * The work of the allocation test: the optical depths of the rays of the first layout with the noise on, the tables
-     * into the same array and the setters, without an assertion or a message of its own, so that it can be measured.
+     * The work of the allocation test: the optical depths of the rays of the first layout with the structure on, the
+     * tables into the same array and the setters, without an assertion or a message of its own, so that it can be
+     * measured.
      */
-    private static double warmOperations(ReferenceLayout layout, float[] table, byte[] texels, int depthCalls) {
+    private static double warmOperations(ReferenceLayout layout, float[] table, FogStructure structure,
+            int depthCalls) {
         SnowFogWalk walk = layout.walk;
         double sum = 0.0;
         walk.setField(layout.distances, FIELD_SIZE);
@@ -554,7 +724,8 @@ public final class SnowFogWalkGameTests {
         walk.setFog(layout.eyeExtinction, layout.heightScale);
         walk.setRadius(layout.radius);
         walk.setFieldFade(layout.fieldFade);
-        setLayoutNoise(layout, texels, NOISE_STRENGTH, NOISE_FINE_TILE);
+        layout.structure = structure;
+        walk.setStructure(structure);
         for (int call = 0; call < depthCalls; call++) {
             double[] ray = layout.rays[call % layout.rays.length];
             sum += walk.opticalDepth(ray[0], ray[1], ray[2]);
@@ -676,16 +847,16 @@ public final class SnowFogWalkGameTests {
      */
     private static ReferenceDepth referenceDepth(ReferenceLayout layout, double offsetX, double offsetY,
             double offsetZ) {
-        return referenceDepth(layout, offsetX, offsetY, offsetZ, null, 0.0);
+        return referenceDepth(layout, offsetX, offsetY, offsetZ, null);
     }
 
     /**
      * The optical depth of a ray by midpoint samples at a step of 1/1024 of a block, with the share of every sample
      * computed pointwise from the field and the far rule, and with the largest depth of one step of the same sampling.
-     * With a walk, the extinction of each step is multiplied by the noise of the walk at the step's midpoint.
+     * With a structure, the extinction of each step is multiplied by the density at the step's midpoint.
      */
     private static ReferenceDepth referenceDepth(ReferenceLayout layout, double offsetX, double offsetY,
-            double offsetZ, SnowFogWalk noiseWalk, double noiseStrength) {
+            double offsetZ, FogStructure structure) {
         double length = Math.sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
         int stepCount = Math.max(1, (int) Math.ceil(length * STEPS_PER_BLOCK));
         double[] stepShares = new double[stepCount];
@@ -725,13 +896,12 @@ public final class SnowFogWalkGameTests {
             double segmentDepth = HeightFog.opticalDepth(layout.eyeExtinction, parameter * length,
                     parameter * offsetY, layout.heightScale);
             double stepDepth = Math.max(0.0, segmentDepth - previousDepth);
-            double noiseFactor = 1.0;
-            if (noiseWalk != null) {
+            double densityFactor = 1.0;
+            if (structure != null) {
                 double midpoint = (stepIndex + 0.5) / stepCount;
-                noiseFactor = 1.0 + noiseStrength * noiseWalk.noiseAt(midpoint * offsetX, midpoint * offsetY,
-                        midpoint * offsetZ);
+                densityFactor = structure.densityAt(midpoint * offsetX, midpoint * offsetY, midpoint * offsetZ);
             }
-            depth += stepShares[stepIndex] * stepDepth * noiseFactor;
+            depth += stepShares[stepIndex] * stepDepth * densityFactor;
             largestStepDepth = Math.max(largestStepDepth, stepDepth);
             previousDepth = segmentDepth;
         }
@@ -948,12 +1118,12 @@ public final class SnowFogWalkGameTests {
     }
 
     /**
-     * Checks the noisy walk of the layouts against the fine step reference at the given fine tile, where the
-     * transmittance of each ray stays within its tolerance and, when asked, the depth of each ray below
-     * RELATIVE_DEPTH_LIMIT stays within RELATIVE_DEPTH_TOLERANCE of the reference.
+     * Checks the structured walk of the layouts against the fine step reference at the given structure size, where
+     * the transmittance of each ray stays within its tolerance and, when asked, the depth of each ray below
+     * RELATIVE_DEPTH_LIMIT stays within STRUCTURE_RELATIVE_DEPTH_TOLERANCE of the reference.
      */
-    private static void assertNoisyWalk(GameTestHelper helper, ReferenceLayout[] layouts, byte[] texels,
-            double fineTile, double transmittanceTolerance, boolean checkRelative) {
+    private static void assertStructuredWalk(GameTestHelper helper, ReferenceLayout[] layouts, byte[] texels,
+            double size, double transmittanceTolerance, boolean checkRelative) {
         double largestTransmittanceError = 0.0;
         String largestErrorCase = "none";
         double largestRelativeError = 0.0;
@@ -961,11 +1131,10 @@ public final class SnowFogWalkGameTests {
         int rayCount = 0;
         for (int layoutIndex = 0; layoutIndex < layouts.length; layoutIndex++) {
             ReferenceLayout layout = layouts[layoutIndex];
-            setLayoutNoise(layout, texels, NOISE_STRENGTH, fineTile);
+            setLayoutStructure(layout, texels, size);
             for (int rayIndex = 0; rayIndex < layout.rays.length; rayIndex++) {
                 double[] ray = layout.rays[rayIndex];
-                ReferenceDepth reference = referenceDepth(layout, ray[0], ray[1], ray[2], layout.walk,
-                        NOISE_STRENGTH);
+                ReferenceDepth reference = referenceDepth(layout, ray[0], ray[1], ray[2], layout.structure);
                 double depth = layout.walk.opticalDepth(ray[0], ray[1], ray[2]);
                 double transmittance = Math.exp(-depth);
                 double referenceTransmittance = Math.exp(-reference.depth);
@@ -974,7 +1143,7 @@ public final class SnowFogWalkGameTests {
                     largestTransmittanceError = transmittanceError;
                     largestErrorCase = "the layout " + layoutIndex + " and the ray " + describeRay(ray);
                 }
-                helper.assertTrue(transmittanceError <= transmittanceTolerance, "At the fine tile " + fineTile
+                helper.assertTrue(transmittanceError <= transmittanceTolerance, "At the structure size " + size
                         + ", the layout " + layoutIndex + " gives the ray " + describeRay(ray) + " the depth " + depth
                         + " where the fine step reference gives " + reference.depth + ", whose transmittances "
                         + transmittance + " and " + referenceTransmittance + " differ by " + transmittanceError
@@ -985,100 +1154,82 @@ public final class SnowFogWalkGameTests {
                         largestRelativeError = relativeError;
                         largestRelativeCase = "the layout " + layoutIndex + " and the ray " + describeRay(ray);
                     }
-                    helper.assertTrue(relativeError <= RELATIVE_DEPTH_TOLERANCE, "At the fine tile " + fineTile
-                            + ", the layout " + layoutIndex + " gives the ray " + describeRay(ray) + " the depth "
-                            + depth + " where the fine step reference gives " + reference.depth + ", a relative error "
-                            + "of " + relativeError + " above " + RELATIVE_DEPTH_TOLERANCE);
+                    helper.assertTrue(relativeError <= STRUCTURE_RELATIVE_DEPTH_TOLERANCE, "At the structure size "
+                            + size + ", the layout " + layoutIndex + " gives the ray " + describeRay(ray) + " the "
+                            + "depth " + depth + " where the fine step reference gives " + reference.depth + ", a "
+                            + "relative error of " + relativeError + " above "
+                            + STRUCTURE_RELATIVE_DEPTH_TOLERANCE);
                 }
                 rayCount++;
             }
         }
-        LOGGER.info("The noisy walk at the fine tile " + fineTile + " matches the fine step reference on " + rayCount
+        LOGGER.info("The structured walk at the size " + size + " matches the fine step reference on " + rayCount
                 + " rays, the largest transmittance error " + largestTransmittanceError + " at " + largestErrorCase
                 + " and the largest relative depth error " + largestRelativeError + " at " + largestRelativeCase);
     }
 
     /**
-     * Sets the noise of a layout's walk from the built texture, at the eye's tile coordinate of each octave with the
-     * displacement of the wind.
+     * Gives a layout's walk a structure of the built texture that follows its eye, at the given size.
      */
-    private static void setLayoutNoise(ReferenceLayout layout, byte[] texels, double strength, double fineTile) {
+    private static void setLayoutStructure(ReferenceLayout layout, byte[] texels, double size) {
         double eyeX = layout.eyeBlockX + layout.eyeFractionX;
         double eyeY = layout.eyeBlockY + layout.eyeFractionY;
         double eyeZ = layout.eyeBlockZ + layout.eyeFractionZ;
-        double coarseTile = fineTile * SnowFogNoise.COARSE_TILE_FACTOR;
-        layout.walk.setNoise(texels, strength, fineTile,
-                SnowFogNoise.tileCoordinate(eyeX, NOISE_DISPLACEMENT_X, fineTile),
-                SnowFogNoise.tileCoordinate(eyeY, 0.0, fineTile),
-                SnowFogNoise.tileCoordinate(eyeZ, NOISE_DISPLACEMENT_Z, fineTile),
-                SnowFogNoise.tileCoordinate(eyeX, NOISE_DISPLACEMENT_X, coarseTile),
-                SnowFogNoise.tileCoordinate(eyeY, 0.0, coarseTile),
-                SnowFogNoise.tileCoordinate(eyeZ, NOISE_DISPLACEMENT_Z, coarseTile));
+        FogStructure structure = new FogStructure();
+        structure.setTexture(texels);
+        structure.setDensity(STRUCTURE_SHARE, WALK_STRUCTURE_COVERAGE, STRUCTURE_EROSION, STRUCTURE_RANGE);
+        structure.follow(eyeX, eyeY, eyeZ, STRUCTURE_DISPLACEMENT_X, STRUCTURE_DISPLACEMENT_Z, STRUCTURE_DIRECTION,
+                size, STRUCTURE_STRETCH);
+        layout.structure = structure;
+        layout.walk.setStructure(structure);
     }
 
     /**
-     * Sets a noise that is the same at every coordinate, whose two eye coordinates only keep the reads in the texture.
+     * A structure of the given texture and density with the means given, which has not followed an eye, so that its
+     * pattern coordinate is 0 everywhere and its density is the same at every offset.
      */
-    private static void setUniformNoise(SnowFogWalk walk, byte[] texels, double strength) {
-        walk.setNoise(texels, strength, NOISE_FINE_TILE, UNIFORM_EYE_U, UNIFORM_EYE_V, UNIFORM_EYE_W,
-                UNIFORM_COARSE_EYE_U, UNIFORM_COARSE_EYE_V, UNIFORM_COARSE_EYE_W);
+    private static FogStructure setUpStructure(byte[] texels, double share, double coverage, double erosion,
+            double range, double mean) {
+        FogStructure structure = new FogStructure();
+        structure.setTexture(texels);
+        structure.setDensityWithMeans(share, coverage, erosion, range, mean, mean);
+        return structure;
     }
 
     /**
-     * A noise texture of the given byte everywhere.
+     * A structure texture of the given shape byte and detail byte everywhere.
      */
-    private static byte[] filledTexels(int value) {
-        byte[] texels = new byte[NOISE_TEXEL_COUNT];
-        Arrays.fill(texels, (byte) value);
+    private static byte[] filledStructureTexels(int shapeByte, int detailByte) {
+        byte[] texels = new byte[STRUCTURE_TEXEL_COUNT];
+        for (int texel = 0; texel < STRUCTURE_TEXEL_COUNT; texel += FogStructure.CHANNELS) {
+            texels[texel + FogStructure.SHAPE_CHANNEL] = (byte) shapeByte;
+            texels[texel + FogStructure.DETAIL_CHANNEL] = (byte) detailByte;
+        }
         return texels;
     }
 
     /**
-     * Checks the depths of the open field, their march steps and the noise at an offset while the noise is off.
+     * Checks the depths of the open field and the coarse parts of each ray, which must stay the depths of the fog
+     * without structures.
      */
-    private static void assertDepthsWithoutNoise(GameTestHelper helper, String step, SnowFogWalk walk) {
+    private static void assertDepthsWithoutStructure(GameTestHelper helper, String step, SnowFogWalk walk) {
         assertDepth(helper, "the open field of " + step, walk, 1.0, 10.0, 0.0, 0.0);
-        assertMarchSteps(helper, "the ray (10.0, 0.0, 0.0) of " + step, walk, 0);
+        assertCoarseSteps(helper, "the ray (10.0, 0.0, 0.0) of " + step, walk, 0);
         assertDepth(helper, "the open field of " + step, walk, 10.0, 100.0, 0.0, 0.0);
-        assertMarchSteps(helper, "the ray (100.0, 0.0, 0.0) of " + step, walk, 0);
+        assertCoarseSteps(helper, "the ray (100.0, 0.0, 0.0) of " + step, walk, 0);
         assertDepth(helper, "the open field of " + step, walk, 1.3, 3.0, 4.0, 12.0);
-        assertMarchSteps(helper, "the ray (3.0, 4.0, 12.0) of " + step, walk, 0);
+        assertCoarseSteps(helper, "the ray (3.0, 4.0, 12.0) of " + step, walk, 0);
         assertDepth(helper, "the open field of " + step, walk, 5.0, 0.0, -50.0, 0.0);
-        assertMarchSteps(helper, "the ray (0.0, -50.0, 0.0) of " + step, walk, 0);
-        double noise = walk.noiseAt(1.0, 2.0, 3.0);
-        helper.assertTrue(noise == 0.0, "The noise at (1.0, 2.0, 3.0) of " + step + " is " + noise
-                + " instead of exactly 0.0 while the noise is off");
+        assertCoarseSteps(helper, "the ray (0.0, -50.0, 0.0) of " + step, walk, 0);
     }
 
     /**
-     * Checks the far march steps of the last ray against the expected count.
+     * Checks the parts that the coarse walk of the last ray visited against the expected count.
      */
-    private static void assertMarchSteps(GameTestHelper helper, String step, SnowFogWalk walk, int expectedSteps) {
-        int marchSteps = walk.lastMarchSteps();
-        helper.assertTrue(marchSteps == expectedSteps, "In " + step + ", the far march walks " + marchSteps
-                + " steps instead of " + expectedSteps);
-    }
-
-    /**
-     * Checks the noise at an offset from the eye against its expected value within NOISE_TOLERANCE.
-     */
-    private static void assertNoise(GameTestHelper helper, String step, SnowFogWalk walk, double expected,
-            double offsetX, double offsetY, double offsetZ) {
-        double noise = walk.noiseAt(offsetX, offsetY, offsetZ);
-        double difference = Math.abs(noise - expected);
-        helper.assertTrue(difference <= NOISE_TOLERANCE, "The noise of " + step + " at (" + offsetX + ", " + offsetY
-                + ", " + offsetZ + ") is " + noise + " instead of " + expected + ", a difference of " + difference
-                + " above " + NOISE_TOLERANCE);
-    }
-
-    /**
-     * Checks a parameter of a segment against its expected value within the given tolerance.
-     */
-    private static void assertParameter(GameTestHelper helper, String step, double actual, double expected,
-            double tolerance) {
-        double difference = Math.abs(actual - expected);
-        helper.assertTrue(difference <= tolerance, "The value of " + step + " is " + actual + " instead of " + expected
-                + ", a difference of " + difference + " above " + tolerance);
+    private static void assertCoarseSteps(GameTestHelper helper, String step, SnowFogWalk walk, int expectedSteps) {
+        int coarseSteps = walk.lastCoarseSteps();
+        helper.assertTrue(coarseSteps == expectedSteps, "In " + step + ", the coarse walk visits " + coarseSteps
+                + " parts instead of " + expectedSteps);
     }
 
     /**
@@ -1093,6 +1244,87 @@ public final class SnowFogWalkGameTests {
      */
     private static String describeRay(double offsetX, double offsetY, double offsetZ) {
         return "(" + offsetX + ", " + offsetY + ", " + offsetZ + ")";
+    }
+
+    /**
+     * A walk of the sky tests: the open field of setUpWalk with the fog of the extinction 0.05 and the height scale
+     * 128, the radius 12 and no structure.
+     */
+    private static SnowFogWalk setUpSkyWalk() {
+        SnowFogWalk walk = setUpWalk(byteField(0), unknownHeights());
+        walk.setFog(SKY_EYE_EXTINCTION, SKY_HEIGHT_SCALE);
+        walk.setRadius(SKY_RADIUS);
+        walk.setStructure(null);
+        return walk;
+    }
+
+    /**
+     * Checks the sky optical depth of a direction against its expected value within SKY_RELATIVE_TOLERANCE relative.
+     */
+    private static void assertSkyDepth(GameTestHelper helper, String step, SnowFogWalk walk, double directionX,
+            double directionY, double directionZ, double walkDistance, double expected) {
+        double depth = walk.skyOpticalDepth(directionX, directionY, directionZ, walkDistance);
+        double relativeDifference = Math.abs(depth - expected) / Math.abs(expected);
+        helper.assertTrue(relativeDifference <= SKY_RELATIVE_TOLERANCE, "The sky depth of " + step + " is " + depth
+                + " instead of " + expected + ", a relative difference of " + relativeDifference + " above "
+                + SKY_RELATIVE_TOLERANCE);
+    }
+
+    /**
+     * Checks that the sky optical depth of a direction is exactly the maximum optical depth.
+     */
+    private static void assertMaximumSkyDepth(GameTestHelper helper, String step, SnowFogWalk walk, double directionX,
+            double directionY, double directionZ, double walkDistance) {
+        double depth = walk.skyOpticalDepth(directionX, directionY, directionZ, walkDistance);
+        helper.assertTrue(depth == HeightFog.MAXIMUM_OPTICAL_DEPTH, "The sky depth of " + step + " is " + depth
+                + " instead of exactly " + HeightFog.MAXIMUM_OPTICAL_DEPTH);
+    }
+
+    /**
+     * Checks that the sky optical depth of a direction is exactly 0.
+     */
+    private static void assertZeroSkyDepth(GameTestHelper helper, String step, SnowFogWalk walk, double directionX,
+            double directionY, double directionZ, double walkDistance) {
+        double depth = walk.skyOpticalDepth(directionX, directionY, directionZ, walkDistance);
+        helper.assertTrue(depth == 0.0, "The sky depth of " + step + " is " + depth + " instead of exactly 0.0");
+    }
+
+    /**
+     * Checks that the last values of a walk equal those that a zero-length opticalDepth call leaves, which the guards
+     * of the sky walk keep.
+     */
+    private static void assertZeroLengthLastValues(GameTestHelper helper, String step, SnowFogWalk walk) {
+        int cellSteps = walk.lastCellSteps();
+        int columnSteps = walk.lastColumnSteps();
+        int coarseSteps = walk.lastCoarseSteps();
+        double regionEnd = walk.lastRegionEnd();
+        double farStop = walk.lastFarStop();
+        walk.opticalDepth(0.0, 0.0, 0.0);
+        helper.assertTrue(cellSteps == walk.lastCellSteps(), "The sky walk of " + step + " leaves " + cellSteps
+                + " cell steps instead of the " + walk.lastCellSteps() + " of a zero-length optical depth");
+        helper.assertTrue(columnSteps == walk.lastColumnSteps(), "The sky walk of " + step + " leaves " + columnSteps
+                + " column steps instead of the " + walk.lastColumnSteps() + " of a zero-length optical depth");
+        helper.assertTrue(coarseSteps == walk.lastCoarseSteps(), "The sky walk of " + step + " leaves " + coarseSteps
+                + " coarse steps instead of the " + walk.lastCoarseSteps() + " of a zero-length optical depth");
+        helper.assertTrue(Math.abs(regionEnd - walk.lastRegionEnd()) <= STOP_TOLERANCE, "The sky walk of " + step
+                + " leaves its region end at " + regionEnd + " instead of the " + walk.lastRegionEnd()
+                + " of a zero-length optical depth");
+        helper.assertTrue(Math.abs(farStop - walk.lastFarStop()) <= STOP_TOLERANCE, "The sky walk of " + step
+                + " leaves its far stop at " + farStop + " instead of the " + walk.lastFarStop()
+                + " of a zero-length optical depth");
+    }
+
+    /**
+     * The work of the sky allocation test: the sky optical depths of changing directions, without an assertion or a
+     * message of its own, so that it can be measured.
+     */
+    private static double warmSkyOpticalDepth(SnowFogWalk walk, int calls) {
+        double sum = 0.0;
+        for (int call = 0; call < calls; call++) {
+            double[] direction = SKY_WARM_DIRECTIONS[call % SKY_WARM_DIRECTIONS.length];
+            sum += walk.skyOpticalDepth(direction[0], direction[1], direction[2], SKY_WALK_DISTANCE);
+        }
+        return sum;
     }
 
     /**
@@ -1124,6 +1356,7 @@ public final class SnowFogWalkGameTests {
         private final float[] table;
         private final SnowFogWalk walk;
         private double[][] rays;
+        private FogStructure structure;
 
         private ReferenceLayout(byte[] distances, short[] heights, boolean hasShownBox, int shownMinX, int shownMinY,
                 int shownMinZ, int shownMaxX, int shownMaxY, int shownMaxZ, double fieldFade, double radius,
