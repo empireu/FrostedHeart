@@ -85,10 +85,15 @@ public final class SnowFogWalk {
      */
     public static final double FAR_CELL = FAR_CELL_BLOCKS;
     /**
-     * The most cells that each part of a piece of the segment visits, after which the rest of the piece counts as the
-     * open fog at the density 1.
+     * The most cells that the near part of a piece of the segment visits, after which the rest of the piece counts as
+     * the open fog at the density 1.
      */
     public static final int PIECE_MAXIMUM_STEPS = 16;
+    /**
+     * The most cells of FAR_CELL blocks that the far part of a piece of the segment visits, after which the rest of the
+     * piece counts as the open fog at the density 1. It matches SNOW_WALK_PIECE_FAR_MAXIMUM_STEPS in snow_walk.glsl.
+     */
+    public static final int PIECE_FAR_MAXIMUM_STEPS = 32;
 
     /**
      * The radius in blocks of the region before setRadius, which is the default of fogFieldRadius.
@@ -326,7 +331,7 @@ public final class SnowFogWalk {
         double unitX = offsetX / segmentLength;
         double unitY = offsetY / segmentLength;
         double unitZ = offsetZ / segmentLength;
-        double total = walkPiece(unitX, unitY, unitZ, 0.0, segmentLength, WHOLE_MAXIMUM_STEPS);
+        double total = walkPiece(unitX, unitY, unitZ, 0.0, segmentLength, WHOLE_MAXIMUM_STEPS, WHOLE_MAXIMUM_STEPS);
         if (!(total > 0.0)) {
             return 0.0;
         }
@@ -369,8 +374,8 @@ public final class SnowFogWalk {
     /**
      * The optical depth of the piece of the ray (given by any non-zero direction) between two distances along it, in
      * optical depths, from the near part's cell walk inside the region and the far part's cells of FAR_CELL blocks
-     * beyond it, each part capped at PIECE_MAXIMUM_STEPS cells with the rest of the piece at share 1 and density 1. The
-     * result is clamped to HeightFog.MAXIMUM_OPTICAL_DEPTH.
+     * beyond it, capped at PIECE_MAXIMUM_STEPS and PIECE_FAR_MAXIMUM_STEPS cells with the rest of the piece at share 1
+     * and density 1. The result is clamped to HeightFog.MAXIMUM_OPTICAL_DEPTH.
      * Guards: a direction or distance that is not finite, a direction of length 0, a start that is not below the end, or
      * an extinction that is not positive give 0; a start below 0 counts as 0. The four last getters record the parts
      * this call walked, and a rejected call leaves them at 0. Allocates nothing.
@@ -398,7 +403,7 @@ public final class SnowFogWalk {
         double unitY = directionY / directionLength;
         double unitZ = directionZ / directionLength;
         double pieceDepth = walkPiece(unitX, unitY, unitZ, Math.max(startDistance, 0.0), endDistance,
-                PIECE_MAXIMUM_STEPS);
+                PIECE_MAXIMUM_STEPS, PIECE_FAR_MAXIMUM_STEPS);
         if (!(pieceDepth > 0.0)) {
             return 0.0;
         }
@@ -444,7 +449,8 @@ public final class SnowFogWalk {
         double previousDistance = 0.0;
         for (int boundary = 0; boundary < boundaryCount; boundary++) {
             double boundaryDistance = boundaryDistances[boundary];
-            runningDepth += walkPiece(unitX, unitY, unitZ, previousDistance, boundaryDistance, PIECE_MAXIMUM_STEPS);
+            runningDepth += walkPiece(unitX, unitY, unitZ, previousDistance, boundaryDistance, PIECE_MAXIMUM_STEPS,
+                    PIECE_FAR_MAXIMUM_STEPS);
             previousDistance = boundaryDistance;
             excesses[boundary] = runningDepth - tauAt(boundaryDistance, unitY);
         }
@@ -535,7 +541,7 @@ public final class SnowFogWalk {
 
     /**
      * The cells that the far part of the last walk visited, which is 0 when the walk ended inside the region.
-     * @return the cells walked, from 0 up, at most PIECE_MAXIMUM_STEPS for a piece and however many far cells of
+     * @return the cells walked, from 0 up, at most PIECE_FAR_MAXIMUM_STEPS for a piece and however many far cells of
      *         FAR_CELL blocks the whole ray crosses
      */
     public int lastFarSteps() {
@@ -543,8 +549,8 @@ public final class SnowFogWalk {
     }
 
     /**
-     * Whether the far part of the last piece walk ran out of its PIECE_MAXIMUM_STEPS cells, after which the rest of the
-     * piece counts as the open fog at the density 1.
+     * Whether the far part of the last piece walk ran out of its PIECE_FAR_MAXIMUM_STEPS cells, after which the rest of
+     * the piece counts as the open fog at the density 1.
      * @return true when the far part was capped
      */
     public boolean lastFarCapped() {
@@ -563,12 +569,12 @@ public final class SnowFogWalk {
 
     /**
      * The optical depth of one piece of the ray of a unit direction from the start to the end distance, which is the
-     * near cells inside the region plus the far cells of FAR_CELL blocks beyond it. Each part visits at most
-     * maximumSteps cells, and the rest of a part that runs out of them counts as the open fog at the share 1 and the
-     * density 1. Records the four last values of the piece. Allocates nothing.
+     * near cells inside the region plus the far cells of FAR_CELL blocks beyond it. The near part visits at most
+     * nearMaximumSteps cells and the far part farMaximumSteps, and the rest of a part that runs out of them counts as
+     * the open fog at the share 1 and the density 1. Records the four last values of the piece. Allocates nothing.
      */
     private double walkPiece(double unitX, double unitY, double unitZ, double startDistance, double endDistance,
-            int maximumSteps) {
+            int nearMaximumSteps, int farMaximumSteps) {
         resetLastWalk();
         double largestComponent = Math.max(Math.abs(unitX), Math.max(Math.abs(unitY), Math.abs(unitZ)));
         if (!(largestComponent > 0.0)) {
@@ -579,11 +585,11 @@ public final class SnowFogWalk {
         double nearStart = Math.max(startDistance, 0.0);
         double nearEnd = Math.min(endDistance, exitDistance);
         if (nearEnd > nearStart) {
-            depth += walkNearCells(unitX, unitY, unitZ, nearStart, nearEnd, maximumSteps);
+            depth += walkNearCells(unitX, unitY, unitZ, nearStart, nearEnd, nearMaximumSteps);
         }
         double farStart = Math.max(startDistance, exitDistance);
         if (endDistance > farStart) {
-            depth += walkFarCells(unitX, unitY, unitZ, farStart, endDistance, maximumSteps);
+            depth += walkFarCells(unitX, unitY, unitZ, farStart, endDistance, farMaximumSteps);
         }
         return depth;
     }

@@ -188,7 +188,7 @@ vec4 debugFroxel(int column, int row, bool isSky, float distance) {
     bool farCapped;
     snowWalkPiece(direction, startDistance, endDistance, partMask, nearSteps, nearCapped, farSteps, farCapped);
     return vec4(float(nearSteps) / float(SNOW_WALK_PIECE_MAXIMUM_STEPS),
-            float(farSteps) / float(SNOW_WALK_PIECE_MAXIMUM_STEPS), (nearCapped || farCapped) ? 1.0 : 0.0,
+            float(farSteps) / float(SNOW_WALK_PIECE_FAR_MAXIMUM_STEPS), (nearCapped || farCapped) ? 1.0 : 0.0,
             DEBUG_FROXEL_OPACITY);
 }
 

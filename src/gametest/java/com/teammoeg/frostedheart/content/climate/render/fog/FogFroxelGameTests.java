@@ -401,11 +401,11 @@ public final class FogFroxelGameTests {
         assertPieceSteps(helper, "the open piece from 10 to 27.5", openWalk, 16, true, 0, false);
         SnowFogWalk coveredWalk = SnowFogWalkGameTests.setUpWalk(SnowFogWalkGameTests.byteField(0),
                 SnowFogWalkGameTests.filledHeights(SnowFogWalkGameTests.SHELTERED_COLUMN_HEIGHT));
-        assertPiece(helper, "the covered far piece from 30 to 65, whose far part runs out of cells", coveredWalk, 0.35,
-                30.0, 65.0);
-        assertPieceSteps(helper, "the covered far piece from 30 to 65", coveredWalk, 0, false, 16, true);
-        assertPiece(helper, "the open far piece from 30 to 65, which the cap leaves whole", openWalk, 3.5, 30.0, 65.0);
-        assertPieceSteps(helper, "the open far piece from 30 to 65", openWalk, 0, false, 16, true);
+        assertPiece(helper, "the covered far piece from 30 to 97, whose far part runs out of cells", coveredWalk, 0.35,
+                30.0, 97.0);
+        assertPieceSteps(helper, "the covered far piece from 30 to 97", coveredWalk, 0, false, 32, true);
+        assertPiece(helper, "the open far piece from 30 to 97, which the cap leaves whole", openWalk, 6.7, 30.0, 97.0);
+        assertPieceSteps(helper, "the open far piece from 30 to 97", openWalk, 0, false, 32, true);
         short[] roofHeights = SnowFogWalkGameTests.filledHeights(0);
         for (int x = ROOF_FIRST_X; x <= ROOF_LAST_X; x++) {
             for (int z = ROOF_FIRST_Z; z <= ROOF_LAST_Z; z++) {
@@ -413,9 +413,9 @@ public final class FogFroxelGameTests {
             }
         }
         SnowFogWalk roofedWalk = SnowFogWalkGameTests.setUpWalk(SnowFogWalkGameTests.byteField(0), roofHeights);
-        assertPiece(helper, "the far piece from 30 to 65 under the roof of the columns 40 to 50", roofedWalk, 2.5, 30.0,
-                65.0);
-        assertPieceSteps(helper, "the far piece from 30 to 65 under the roof", roofedWalk, 0, false, 16, true);
+        assertPiece(helper, "the far piece from 30 to 97 under the roof of the columns 40 to 50", roofedWalk, 5.7, 30.0,
+                97.0);
+        assertPieceSteps(helper, "the far piece from 30 to 97 under the roof", roofedWalk, 0, false, 32, true);
         helper.succeed();
     }
 
@@ -796,8 +796,8 @@ public final class FogFroxelGameTests {
                             + SnowFogWalk.PIECE_MAXIMUM_STEPS);
                     helper.assertTrue(!layout.walk.lastFarCapped(), "At the structure size " + size + ", " + step
                             + " caps the far part of the last piece after " + layout.walk.lastFarSteps()
-                            + " cells, while the 32 slices keep every piece below PIECE_MAXIMUM_STEPS = "
-                            + SnowFogWalk.PIECE_MAXIMUM_STEPS);
+                            + " cells, while the 32 slices keep every piece below PIECE_FAR_MAXIMUM_STEPS = "
+                            + SnowFogWalk.PIECE_FAR_MAXIMUM_STEPS);
                     double transmittance = Math.exp(-depth);
                     double referenceTransmittance = Math.exp(-reference.depth);
                     double transmittanceError = Math.abs(transmittance - referenceTransmittance);

@@ -61,7 +61,7 @@ public final class FogFroxelGrid {
     /**
      * The number of depth slices of a ray before the settings say otherwise.
      */
-    public static final int DEFAULT_SLICES = 64;
+    public static final int DEFAULT_SLICES = 32;
     /**
      * The shortest range in blocks out to which the slices are walked.
      */

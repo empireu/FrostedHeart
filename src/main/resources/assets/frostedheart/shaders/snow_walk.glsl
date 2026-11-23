@@ -12,8 +12,8 @@
 // A piece of a ray, which the froxel stages walk, is the stretch between two distances along a unit direction, which the
 // inject cuts at the slice boundaries. Its near stretch inside the region is the cell walk from the cell that holds the
 // start distance, and its far stretch beyond it is the world-aligned grid of SNOW_WALK_FAR_CELL blocks, whose share is
-// the height share of the column under the cell's middle. Each stretch visits at most SNOW_WALK_PIECE_MAXIMUM_STEPS
-// cells, and the rest of a stretch that runs out of them counts as the open fog at the share 1 and the density 1.
+// the height share of the column under the cell's middle. The near stretch visits at most SNOW_WALK_PIECE_MAXIMUM_STEPS
+// cells and the far one SNOW_WALK_PIECE_FAR_MAXIMUM_STEPS, and the rest of a stretch that runs out of them counts as the open fog at the share 1 and the density 1.
 // Every position here is a cell offset from the eye's block, so no world position passes through a float.
 // The field of the snow near the eye, a cube of size fieldMask + 1 cells
 // whose bytes are distances in eighths of a block:
@@ -61,12 +61,14 @@ uniform vec3 structureUp;
 uniform vec3 structureAcross;
 
 // The side in blocks of the world-aligned cells that the far stretch of a piece is walked in, and the most cells that
-// each stretch of a piece visits, as SnowFogWalk.FAR_CELL_BLOCKS and SnowFogWalk.PIECE_MAXIMUM_STEPS.
+// the near and the far stretch of a piece visit, as SnowFogWalk.FAR_CELL_BLOCKS, SnowFogWalk.PIECE_MAXIMUM_STEPS and
+// SnowFogWalk.PIECE_FAR_MAXIMUM_STEPS.
 // The far cell must be a power of two, because the eye's place in the far grid is its block masked with the mask:
 const int SNOW_WALK_FAR_CELL_BLOCKS = 2;
 const int SNOW_WALK_FAR_CELL_MASK = SNOW_WALK_FAR_CELL_BLOCKS - 1;
 const float SNOW_WALK_FAR_CELL = float(SNOW_WALK_FAR_CELL_BLOCKS);
 const int SNOW_WALK_PIECE_MAXIMUM_STEPS = 16;
+const int SNOW_WALK_PIECE_FAR_MAXIMUM_STEPS = 32;
 // The structure constants that shape the density, as FogStructure:
 const float SNOW_WALK_EDGE_WIDTH = 0.5;
 const int SNOW_WALK_DETAIL_REPEAT = 4;
@@ -415,7 +417,8 @@ float snowWalkPiece(vec3 unit, float startDistance, float endDistance, int partM
             if (runsFar) {
                 int steps;
                 bool isCapped;
-                depth += snowWalkFarCells(unit, farStart, endDistance, SNOW_WALK_PIECE_MAXIMUM_STEPS, steps, isCapped);
+                depth += snowWalkFarCells(unit, farStart, endDistance, SNOW_WALK_PIECE_FAR_MAXIMUM_STEPS, steps,
+                        isCapped);
                 farSteps = steps;
                 farCapped = isCapped;
             } else {
