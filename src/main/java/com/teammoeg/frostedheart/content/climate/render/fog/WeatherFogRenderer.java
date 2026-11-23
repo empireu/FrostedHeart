@@ -60,7 +60,6 @@ import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL12;
 import org.lwjgl.opengl.GL13;
 import org.lwjgl.opengl.GL14;
-import org.lwjgl.opengl.GL15;
 import org.lwjgl.opengl.GL20;
 import org.lwjgl.opengl.GL30;
 import org.slf4j.Logger;
@@ -75,19 +74,25 @@ import java.util.Locale;
 
 /**
  * Draws the fog of snow and blizzards over the frame after the translucent terrain and the tripwire layer and before
- * the particles, the clouds and the weather, in frames where the calculated sky was drawn. One full screen pass reads
- * the depth of the main target, rebuilds the scene point of each pixel from it, and blends a fog color over the pixel
- * by the opacity that the height fog of HeightFog gives along the segment from the eye to that point, as
- * weather_fog.glsl and weather_fog.fsh compute it. The fog shortens the visibility in the snow and the blizzard, thins
- * out with height by the fog height scale, and stands as far as the settings say at every render distance.
+ * the particles, the clouds and the weather, in frames where the calculated sky was drawn. The draw is a setup and four
+ * passes: weather_fog_share.fsh fills the share volume of the field's cells around the eye, weather_fog_inject.fsh walks
+ * the piece of its column's ray that each fragment stands for and writes its optical depth to the froxel atlas,
+ * weather_fog_integrate.fsh sums the pieces of each column and writes the excess of the walked depth over the analytic
+ * height fog at every slice boundary, and weather_fog_composite.fsh reads the depth of the main target, rebuilds the
+ * scene point of each pixel from it, and blends a fog color over the pixel by the opacity that the height fog of
+ * HeightFog gives along the segment from the eye to that point, together with the excess at its distance. The fog
+ * shortens the visibility in the snow and the blizzard, thins out with height by the fog height scale, and stands as far
+ * as the settings say at every render distance.
  * <p>
  * A pixel takes the fog of the snow along the segment from the eye to its scene point: the share of each cell near the
  * eye, which the snow field's distance to open sky gives, blended toward the share of the column's motion height over
- * the last blocks before the region's edge, and beyond the region the fog of the open air up to the stretch that runs
- * under cover, which a backward walk over the columns under the segment finds, as weather_fog.glsl, snow_walk.glsl and
- * weather_fog.fsh walk it. A room therefore stays clear where the whole segment from the eye to the scene point stays
- * under its roof, and a porch holds the fog back by the first open air under it. The field's share fades in over half a
- * second after a fill filled the shown box, so after a jump partial cover gains its fog once and smoothly instead of
+ * the last blocks before the region's edge, and beyond the region the height share of the world-aligned far cells, as
+ * weather_fog.glsl, snow_walk.glsl and weather_fog_inject.fsh walk each piece of the ray. The pieces of a column are
+ * summed into the excess of the walked depth over the analytic height fog at every slice boundary, which
+ * weather_fog_integrate.fsh writes and weather_fog_composite.fsh reads at each pixel's own distance between the columns
+ * around it. A room therefore stays clear where the whole segment from the eye to the scene point stays under its roof,
+ * and a porch holds the fog back by the first open air under it. The field's share fades in over half a second
+ * after a fill filled the shown box, so after a jump partial cover gains its fog once and smoothly instead of
  * along a moving edge. The fog color is the light on a white face at full sky light, which the renderer reads from the
  * lightmap every frame, so the fog, the terrain and the sky follow one light. A pixel of the sky has no scene point and
  * takes the same snow fog along its ray to infinity, so the sky converges to the color of the snow that hides the
@@ -95,9 +100,9 @@ import java.util.Locale;
  * ends where the fog is already opaque, so that the terrain beyond it is culled, which it does only while the eye stands
  * in open air of the field, and vanilla's fog color turns to the same light, which the sky shader's rain mix and
  * horizon fade, the clouds and the culled terrain take. Everything that draws after the pass until the end of the
- * weather stage, which is the particles, the clouds and the weather, gets vanilla's fog fitted to the fog at the eye, and
- * the clouds get the cloud fit of fitCloudFog, which fades them by the fog from the eye to their layer. Render thread
- * only.
+ * weather stage, which is the particles, the clouds and the weather, gets vanilla's fog fitted to the fog at the eye,
+ * and the clouds get the cloud fit of fitCloudFog, which fades them by the fog from the eye to their layer.
+ * Render thread only.
  */
 @OnlyIn(Dist.CLIENT)
 @Mod.EventBusSubscriber(modid = FHMain.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
@@ -105,9 +110,11 @@ public final class WeatherFogRenderer {
     private static final Logger LOGGER = LogUtils.getLogger();
     /**
      * The scene depth goes to texture unit 0 while the fog draws, the share volume to unit 1, the snow field to unit 2,
-     * the far heights to unit 3, the share table to unit 4, the structures of the fog to unit 5, and the low-resolution
-     * target of the composite to unit 6. Unit 1 is free because no other pass of the fog draws to it, and SkyGlPass
-     * keeps the 2D binding of every unit up to 6, so the binding of the frame before comes back after the passes.
+     * the far heights to unit 3, the share table to unit 4, the structures of the fog to unit 5, the inject atlas to
+     * unit 6, and the excesses of the froxel grid to unit 7. Unit 1 is free because no other pass of the fog draws to
+     * it, and SkyGlPass keeps the 2D binding of every unit up to 7, so the binding of the frame before comes back after
+     * the passes. The excesses are bound as a 2D array, which SkyGlPass does not keep, so the draw saves and restores
+     * that binding itself.
      */
     private static final int SCENE_DEPTH_UNIT = 0;
     private static final int SHARE_VOLUME_UNIT = 1;
@@ -115,7 +122,8 @@ public final class WeatherFogRenderer {
     private static final int HEIGHT_UNIT = 3;
     private static final int SHARE_TABLE_UNIT = 4;
     private static final int STRUCTURE_UNIT = 5;
-    private static final int LOW_RESOLUTION_UNIT = 6;
+    private static final int ATLAS_UNIT = 6;
+    private static final int EXCESS_UNIT = 7;
     private static final int COLOR_CHANNELS = 3;
     /**
      * The sky light of the two lightmap pixels whose mean the snow fog color is, at block light 0: the rows 14 and 15 of
@@ -145,15 +153,10 @@ public final class WeatherFogRenderer {
     private static final double[] SELF_TEST_SPIRAL_LENGTHS = {6.0, 25.0, 45.0, 120.0, 300.0};
     private static final double SELF_TEST_GOLDEN_ANGLE = 2.39996323;
     /**
-     * The tolerance on the walk counts of the self test, within which a column or a cell may differ by float ties.
+     * The tolerance on the optical depth of the self test, absolute and relative: a boundary and a sky value may differ
+     * from the walk by this much plus this share of its depth.
      */
     private static final double SELF_TEST_WALK_TOLERANCE = 1.0e-3;
-    /**
-     * The modes of the self test: 1 walks the ray of each texel to its scene point, and 2 walks its sky to infinity past
-     * the structure range.
-     */
-    private static final int SELF_TEST_MODE_WALK = 1;
-    private static final int SELF_TEST_MODE_SKY = 2;
     /**
      * The share of the walked depth within which the self test's rays must match the walk while the structures are on,
      * since the filtered reads of the GPU round their weights and the profile steepens the error.
@@ -162,10 +165,12 @@ public final class WeatherFogRenderer {
 
     private static final ClientMockWeather mockWeather = new ClientMockWeather();
     private static final SkyDrawTimer timer = new SkyDrawTimer();
-    private static final SkyGlPass pass = new SkyGlPass(7);
-    private static final FogProgram fogPass = new FogProgram();
-    private static final UpsampleProgram upsamplePass = new UpsampleProgram();
+    private static final FogPassTimer passTimer = new FogPassTimer();
+    private static final SkyGlPass pass = new SkyGlPass(8);
     private static final ShareProgram sharePass = new ShareProgram();
+    private static final InjectProgram injectPass = new InjectProgram();
+    private static final IntegrateProgram integratePass = new IntegrateProgram();
+    private static final CompositeProgram compositePass = new CompositeProgram();
     private static final WeatherWind wind = new WeatherWind();
     private static final Matrix4f viewProjection = new Matrix4f();
     private static final Matrix4f inverseViewProjection = new Matrix4f();
@@ -195,9 +200,24 @@ public final class WeatherFogRenderer {
     private static final FloatBuffer selfTestOffsetBuffer = BufferUtils.createFloatBuffer(SELF_TEST_RAY_COUNT * 3);
     private static final IntBuffer viewportBuffer = BufferUtils.createIntBuffer(16);
     /**
+     * The color attachment that each of the eight outputs of the integrate holds, and the buffer that lists the draw
+     * buffers of one of its framebuffers.
+     */
+    private static final int[] froxelOutputLocations = new int[FogFroxelGrid.TILES_ACROSS];
+    private static final IntBuffer excessDrawBuffers = BufferUtils.createIntBuffer(FogFroxelGrid.TILES_ACROSS);
+    /**
      * The walk that the self test compares with the shader, which keeps the references of the last frame.
      */
     private static final SnowFogWalk selfTestWalk = new SnowFogWalk();
+    /**
+     * Whether the settings of the draw were read once, and the froxel divisor, the slice count, the range and the debug
+     * mode of the frame before, which start a new measurement of the passes when they change.
+     */
+    private static boolean passTimerSettingsKnown;
+    private static int passTimerFroxelDivisor;
+    private static int passTimerSliceCount;
+    private static double passTimerRangeDistance;
+    private static int passTimerDebugMode;
 
     @Nullable
     private static ClientLevel keptFrameLevel;
@@ -206,6 +226,22 @@ public final class WeatherFogRenderer {
     private static boolean structureTextureBuilt;
     private static int selfTestTexture;
     private static int selfTestFramebuffer;
+    /**
+     * The atlas of the pieces of the self test and its framebuffer, the array of its excesses and the two framebuffers
+     * that write its layers, and the framebuffer that reads the layers back, which the three stages of the self test
+     * draw to.
+     */
+    private static int selfTestAtlasTexture;
+    private static int selfTestAtlasFramebuffer;
+    private static int selfTestExcessTexture;
+    private static int selfTestExcessLowerFramebuffer;
+    private static int selfTestExcessUpperFramebuffer;
+    private static int selfTestReadFramebuffer;
+    /**
+     * Whether making a target of the froxel stages of the self test failed, after which the self test does not try
+     * again.
+     */
+    private static boolean selfTestTargetFailed;
     /**
      * The structures of the fog of this frame, whose texture is set once the bytes below are built.
      */
@@ -224,36 +260,39 @@ public final class WeatherFogRenderer {
     private static int shareVolumeFramebuffer;
     private static boolean shareVolumeFailed;
     /**
-     * The low-resolution target of the walk, its framebuffer, and the size it was made or last sized at.
+     * The atlas of the pieces of the froxel grid, its framebuffer, and the width and height it was made or last sized
+     * at.
      */
-    private static int lowResolutionTexture;
-    private static int lowResolutionFramebuffer;
-    private static int lowResolutionWidth;
-    private static int lowResolutionHeight;
+    private static int pieceAtlasTexture;
+    private static int pieceAtlasFramebuffer;
+    private static int pieceAtlasWidth;
+    private static int pieceAtlasHeight;
     /**
-     * The queries that count the pixels of the fallback, used in turn, whether each has run, and the index of the query
-     * that the next frame writes.
+     * The array of the excesses of the froxel grid, the two framebuffers that write its layers, and the width and height
+     * it was made or last sized at.
      */
-    private static final int[] fallbackQueries = new int[2];
-    private static final boolean[] fallbackQueryUsed = new boolean[2];
-    private static int nextFallbackQuery;
+    private static int excessTexture;
+    private static int excessLowerFramebuffer;
+    private static int excessUpperFramebuffer;
+    private static int excessWidth;
+    private static int excessHeight;
     /**
-     * The share of the screen that fell back in the last frame, which is NaN before the first count, and whether the
-     * fallback is allowed.
+     * Whether making a target of the froxel fog failed, after which the fog is not drawn for the rest of the session.
      */
-    private static double fallbackShare = Double.NaN;
-    private static boolean fallbackAllowed = true;
+    private static boolean froxelTargetFailed;
     /**
      * When the wind last advanced.
      */
     private static long lastFrameNanos;
     /**
-     * The divisor of the resolution that the fog was walked at in the last frame, and the size of its low-resolution
-     * target.
+     * The froxel grid of this frame: the pixels per side of a column, the depth slices of a ray, the range in blocks of
+     * its last boundary, and its columns and rows.
      */
-    private static int frameDivisor = 1;
-    private static int frameLowWidth;
-    private static int frameLowHeight;
+    private static int frameFroxelDivisor;
+    private static int frameSliceCount;
+    private static int frameRowCount;
+    private static int frameColumnCount;
+    private static double frameRangeDistance;
     /**
      * The decay length of the last share table build, so that the table is built again only when the weather changes it.
      */
@@ -664,6 +703,7 @@ public final class WeatherFogRenderer {
     }
 
     private static void render(ClientLevel level, RenderLevelStageEvent event) {
+        resetPassTimerIfSettingsChanged();
         float partialTick = event.getPartialTick();
         updateWeather(level, partialTick);
         advanceWind();
@@ -707,17 +747,39 @@ public final class WeatherFogRenderer {
         frameHeightScale = conditions.heightScale();
         frameEyeY = eyeY;
         RenderTarget mainTarget = Minecraft.getInstance().getMainRenderTarget();
-        frameDivisor = FogUpsample.divisorOf(SkySetting.FOG_RESOLUTION_DIVISOR.get());
-        frameLowWidth = FogUpsample.lowResolutionSize(mainTarget.width, frameDivisor);
-        frameLowHeight = FogUpsample.lowResolutionSize(mainTarget.height, frameDivisor);
+        frameFroxelDivisor = FogFroxelGrid.divisorOf(SkySetting.FOG_FROXEL_DIVISOR.get());
+        frameSliceCount = FogFroxelGrid.sliceCountOf(SkySetting.FOG_FROXEL_SLICES.get());
+        frameRangeDistance = FogFroxelGrid.rangeOf(SkySetting.FOG_FROXEL_RANGE.get());
+        frameColumnCount = FogFroxelGrid.columnCount(mainTarget.width, frameFroxelDivisor);
+        frameRowCount = FogFroxelGrid.columnCount(mainTarget.height, frameFroxelDivisor);
         timer.begin();
         try {
             draw(mainTarget);
         } finally {
             timer.end();
         }
-        drawnThisFrame = true;
+        drawnThisFrame = !froxelTargetFailed;
         keptFrameLevel = level;
+    }
+
+    /**
+     * Clears the measured pass times when a setting that changes what the passes cost changed since the frame before,
+     * since the settings have no change hook. It runs before the early returns of the frame, so that the next frame that
+     * draws measures the new configuration alone. Allocates nothing.
+     */
+    private static void resetPassTimerIfSettingsChanged() {
+        int froxelDivisor = FogFroxelGrid.divisorOf(SkySetting.FOG_FROXEL_DIVISOR.get());
+        int sliceCount = FogFroxelGrid.sliceCountOf(SkySetting.FOG_FROXEL_SLICES.get());
+        double rangeDistance = FogFroxelGrid.rangeOf(SkySetting.FOG_FROXEL_RANGE.get());
+        if (passTimerSettingsKnown && (froxelDivisor != passTimerFroxelDivisor || sliceCount != passTimerSliceCount
+                || Double.compare(rangeDistance, passTimerRangeDistance) != 0 || debugMode != passTimerDebugMode)) {
+            passTimer.reset();
+        }
+        passTimerSettingsKnown = true;
+        passTimerFroxelDivisor = froxelDivisor;
+        passTimerSliceCount = sliceCount;
+        passTimerRangeDistance = rangeDistance;
+        passTimerDebugMode = debugMode;
     }
 
     /**
@@ -953,13 +1015,18 @@ public final class WeatherFogRenderer {
     }
 
     /**
-     * Draws the fog over the frame in three passes: the share of every cell of the region cube into its volume, the walk
-     * into the low-resolution target, and the composite over the frame, whose second part walks the pixels that fall back
-     * at full resolution inside the query that counts them. The depth of the main target is read through a color only
-     * framebuffer, so that its depth texture is not attached to what it draws to. Every piece of state the pass changes
-     * is set back after it, and the framebuffer holds no texture of the main target once it is released.
+     * Draws the fog over the frame in five stages between the timer's boundaries: the setup that binds the depth and the
+     * fields, the share of every cell of the region cube into its volume, the piece of each froxel of the column grid
+     * into its atlas, the excess of the walked depth over the analytic fog at every slice boundary into its array, and
+     * the fog over the frame, which reads the excesses of the columns around each pixel. The depth of the main target is
+     * read through a color only framebuffer, so that its depth texture is not attached to what it draws to. Every piece
+     * of state the pass changes is set back after it, and the framebuffer holds no texture of the main target once it is
+     * released.
      */
     private static void draw(RenderTarget mainTarget) {
+        if (froxelTargetFailed) {
+            return;
+        }
         pass.begin();
         int previousFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
         int sourceColor = GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB);
@@ -968,6 +1035,7 @@ public final class WeatherFogRenderer {
         int destinationAlpha = GL11.glGetInteger(GL14.GL_BLEND_DST_ALPHA);
         int colorEquation = GL11.glGetInteger(GL20.GL_BLEND_EQUATION_RGB);
         int alphaEquation = GL11.glGetInteger(GL20.GL_BLEND_EQUATION_ALPHA);
+        boolean blending = GL11.glIsEnabled(GL11.GL_BLEND);
         boolean culling = GL11.glIsEnabled(GL11.GL_CULL_FACE);
         boolean scissor = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
         viewportBuffer.clear();
@@ -980,51 +1048,52 @@ public final class WeatherFogRenderer {
         int previousFieldTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + STRUCTURE_UNIT);
         int previousStructureTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
+        int previousExcessTexture = GL11.glGetInteger(GL30.GL_TEXTURE_BINDING_2D_ARRAY);
         try {
+            passTimer.begin();
             updateStructureTexture();
-            updateFallbackShare(mainTarget);
             RenderSystem.disableCull();
             RenderSystem.disableScissor();
             RenderSystem.disableBlend();
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SCENE_DEPTH_UNIT);
             RenderSystem.bindTexture(mainTarget.getDepthTextureId());
             bindFieldTextures();
+            passTimer.mark(1);
             boolean shareVolumeBound = prepareShareVolume();
             if (shareVolumeBound) {
                 drawShareVolume(mainTarget);
                 bindShareVolume();
             }
-            bindLowResolutionFramebuffer(mainTarget);
-            fogPass.use();
-            fogPass.setFrameUniforms(mainTarget);
-            fogPass.setShareVolumeInUse(shareVolumeBound);
-            SkyGlPass.drawFullScreenQuad();
+            passTimer.mark(2);
+            if (!drawInjectPass(mainTarget, shareVolumeBound)) {
+                return;
+            }
+            passTimer.mark(3);
+            if (!drawIntegratePass(mainTarget)) {
+                return;
+            }
+            passTimer.mark(4);
             bindColorFramebuffer(mainTarget);
             RenderSystem.viewport(viewportX, viewportY, viewportWidth, viewportHeight);
             RenderSystem.enableBlend();
             RenderSystem.blendEquation(GL14.GL_FUNC_ADD);
             RenderSystem.blendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ZERO, GL11.GL_ONE);
-            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + LOW_RESOLUTION_UNIT);
-            RenderSystem.bindTexture(lowResolutionTexture);
-            upsamplePass.use();
-            upsamplePass.setFrameUniforms(mainTarget);
-            upsamplePass.setShareVolumeInUse(shareVolumeBound);
-            upsamplePass.setPart(0);
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
+            GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, excessTexture);
+            compositePass.use();
+            compositePass.setFrameUniforms(mainTarget);
+            compositePass.setShareVolumeInUse(shareVolumeBound);
             SkyGlPass.drawFullScreenQuad();
-            int queryIndex = nextFallbackQuery & 1;
-            int query = fallbackQuery(queryIndex);
-            GL15.glBeginQuery(GL15.GL_SAMPLES_PASSED, query);
-            try {
-                upsamplePass.setPart(1);
-                SkyGlPass.drawFullScreenQuad();
-            } finally {
-                GL15.glEndQuery(GL15.GL_SAMPLES_PASSED);
-            }
-            fallbackQueryUsed[queryIndex] = true;
-            nextFallbackQuery++;
+            passTimer.end();
         } finally {
             GL20.glBlendEquationSeparate(colorEquation, alphaEquation);
             RenderSystem.blendFuncSeparate(sourceColor, destinationColor, sourceAlpha, destinationAlpha);
+            if (blending) {
+                RenderSystem.enableBlend();
+            } else {
+                RenderSystem.disableBlend();
+            }
             if (culling) {
                 RenderSystem.enableCull();
             } else {
@@ -1039,10 +1108,111 @@ public final class WeatherFogRenderer {
             GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousFieldTexture);
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + STRUCTURE_UNIT);
             GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousStructureTexture);
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
+            GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, previousExcessTexture);
             RenderSystem.viewport(viewportX, viewportY, viewportWidth, viewportHeight);
             releaseColorFramebuffer(previousFramebuffer);
             pass.end();
         }
+    }
+
+    /**
+     * Draws the piece of every froxel of the frame's grid into the inject atlas, making the atlas first if needed, and
+     * leaves the framebuffer and the viewport that were bound before bound again.
+     * @param shareVolumeBound whether the walk of the frame may read the share volume
+     * @return whether the pieces were drawn, which is false after a failure that turns the fog off
+     */
+    private static boolean drawInjectPass(RenderTarget mainTarget, boolean shareVolumeBound) {
+        if (!preparePieceAtlas()) {
+            return false;
+        }
+        int previousFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
+        viewportBuffer.clear();
+        GL11.glGetIntegerv(GL11.GL_VIEWPORT, viewportBuffer);
+        int viewportX = viewportBuffer.get(0);
+        int viewportY = viewportBuffer.get(1);
+        int viewportWidth = viewportBuffer.get(2);
+        int viewportHeight = viewportBuffer.get(3);
+        try {
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, pieceAtlasFramebuffer);
+            RenderSystem.viewport(0, 0, FogFroxelGrid.atlasWidth(frameColumnCount),
+                    FogFroxelGrid.atlasDrawHeight(frameRowCount, frameSliceCount));
+            injectPass.use();
+            injectPass.setFrameUniforms(mainTarget);
+            injectPass.setShareVolumeInUse(shareVolumeBound);
+            SkyGlPass.drawFullScreenQuad();
+        } finally {
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, previousFramebuffer);
+            RenderSystem.viewport(viewportX, viewportY, viewportWidth, viewportHeight);
+        }
+        return true;
+    }
+
+    /**
+     * Draws the excess of every boundary of the frame's slices into the excess array, making the array and its
+     * framebuffers first if needed, and leaves the framebuffer and the viewport that were bound before bound again. A
+     * slice count above the boundaries that eight outputs hold takes a second draw into the upper framebuffer, which
+     * sums the pieces of the first draw again.
+     * @return whether the excesses were drawn, which is false after a failure that turns the fog off
+     */
+    private static boolean drawIntegratePass(RenderTarget mainTarget) {
+        if (!prepareExcesses()) {
+            return false;
+        }
+        int boundariesPerDraw = FogFroxelGrid.TILES_ACROSS * FogFroxelGrid.SLICES_PER_LAYER;
+        int previousFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
+        viewportBuffer.clear();
+        GL11.glGetIntegerv(GL11.GL_VIEWPORT, viewportBuffer);
+        int viewportX = viewportBuffer.get(0);
+        int viewportY = viewportBuffer.get(1);
+        int viewportWidth = viewportBuffer.get(2);
+        int viewportHeight = viewportBuffer.get(3);
+        try {
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + ATLAS_UNIT);
+            RenderSystem.bindTexture(pieceAtlasTexture);
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, excessLowerFramebuffer);
+            // The draw buffers follow the output locations, which the link of the integrate assigns:
+            integratePass.use();
+            if (froxelTargetFailed) {
+                return false;
+            }
+            integratePass.setFrameUniforms(mainTarget);
+            integratePass.setFirstBoundary(1);
+            setExcessDrawBuffers(0, frameSliceCount);
+            RenderSystem.viewport(0, 0, frameColumnCount, frameRowCount);
+            SkyGlPass.drawFullScreenQuad();
+            if (frameSliceCount > boundariesPerDraw) {
+                GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, excessUpperFramebuffer);
+                integratePass.setFirstBoundary(boundariesPerDraw + 1);
+                setExcessDrawBuffers(FogFroxelGrid.TILES_ACROSS, frameSliceCount);
+                SkyGlPass.drawFullScreenQuad();
+            }
+        } finally {
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, previousFramebuffer);
+            RenderSystem.viewport(viewportX, viewportY, viewportWidth, viewportHeight);
+        }
+        return true;
+    }
+
+    /**
+     * Lists the color attachments of the layers that hold the given slices as the draw buffers of the bound framebuffer,
+     * at the location of the output that each slice is written to, and no other, so that the slices past them are not
+     * written. Allocates nothing.
+     * @param firstLayer the first layer of the bound framebuffer, 0 or FogFroxelGrid.TILES_ACROSS
+     * @param sliceCount the depth slices of a ray, from FogFroxelGrid.MINIMUM_SLICES to FogFroxelGrid.MAXIMUM_SLICES
+     */
+    private static void setExcessDrawBuffers(int firstLayer, int sliceCount) {
+        excessDrawBuffers.clear();
+        for (int bufferIndex = 0; bufferIndex < FogFroxelGrid.TILES_ACROSS; bufferIndex++) {
+            excessDrawBuffers.put(GL11.GL_NONE);
+        }
+        int lastLayer = Math.min(firstLayer + FogFroxelGrid.TILES_ACROSS, FogFroxelGrid.layerCount(sliceCount));
+        for (int layer = firstLayer; layer < lastLayer; layer++) {
+            excessDrawBuffers.put(froxelOutputLocations[layer - firstLayer],
+                    GL30.GL_COLOR_ATTACHMENT0 + (layer - firstLayer));
+        }
+        excessDrawBuffers.flip();
+        GL20.glDrawBuffers(excessDrawBuffers);
     }
 
     /**
@@ -1188,72 +1358,151 @@ public final class WeatherFogRenderer {
     }
 
     /**
-     * Reads the result of the query of the frame before, which counts the pixels that fell back, if it has one, and
-     * lets the fallback follow the cap from the share it gives. The read never blocks, since the result of the frame
-     * before is complete.
+     * Makes the atlas of the pieces of the froxel grid, an R32F 2D texture of the grid's columns by its rows of tiles,
+     * and the framebuffer that holds it, on first use and again whenever the column counts changed. A slice count change
+     * reallocates nothing, since the texture is allocated for the maximum slice count and the inject draw covers only
+     * the rows of the frame's slices. A target that cannot be made is deleted again and logged once, after which the fog
+     * is not drawn for the rest of the session.
+     * @return whether the pieces of the frame may be drawn
      */
-    private static void updateFallbackShare(RenderTarget mainTarget) {
-        int readIndex = (nextFallbackQuery + 1) & 1;
-        if (!fallbackQueryUsed[readIndex]) {
-            return;
+    private static boolean preparePieceAtlas() {
+        if (froxelTargetFailed) {
+            return false;
         }
-        int query = fallbackQueries[readIndex];
-        if (GL15.glGetQueryObjecti(query, GL15.GL_QUERY_RESULT_AVAILABLE) == 0) {
-            return;
-        }
-        int samples = GL15.glGetQueryObjecti(query, GL15.GL_QUERY_RESULT);
-        fallbackShare = (double) samples / ((double) mainTarget.width * (double) mainTarget.height);
-        fallbackAllowed = FogUpsample.fallbackAllowed(fallbackAllowed, fallbackShare,
-                SkySetting.FOG_FALLBACK_CAP.get());
-    }
-
-    /**
-     * The query of the given index, made on first use.
-     */
-    private static int fallbackQuery(int index) {
-        if (fallbackQueries[index] == 0) {
-            fallbackQueries[index] = GL15.glGenQueries();
-        }
-        return fallbackQueries[index];
-    }
-
-    /**
-     * Binds the low-resolution target for drawing, making it first if needed and giving it the size of the frame when
-     * the frame or the divisor changed, and sets its viewport.
-     */
-    private static void bindLowResolutionFramebuffer(RenderTarget mainTarget) {
-        boolean allocate = lowResolutionFramebuffer == 0;
+        int width = FogFroxelGrid.atlasWidth(frameColumnCount);
+        int height = FogFroxelGrid.atlasHeight(frameRowCount);
+        boolean allocate = pieceAtlasFramebuffer == 0;
+        boolean resize = allocate || pieceAtlasWidth != width || pieceAtlasHeight != height;
         if (allocate) {
-            lowResolutionFramebuffer = GL30.glGenFramebuffers();
-            lowResolutionTexture = GL11.glGenTextures();
+            pieceAtlasFramebuffer = GL30.glGenFramebuffers();
+            pieceAtlasTexture = GL11.glGenTextures();
         }
-        int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
         try {
-            GL11.glBindTexture(GL11.GL_TEXTURE_2D, lowResolutionTexture);
-            if (allocate) {
-                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
-                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
-                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
-                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
+            int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+            try {
+                GL11.glBindTexture(GL11.GL_TEXTURE_2D, pieceAtlasTexture);
+                if (allocate) {
+                    GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
+                    GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
+                    GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
+                    GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
+                }
+                if (resize) {
+                    GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_R32F, width, height, 0, GL11.GL_RED,
+                            GL11.GL_FLOAT, (FloatBuffer) null);
+                    pieceAtlasWidth = width;
+                    pieceAtlasHeight = height;
+                }
+            } finally {
+                GL11.glBindTexture(GL11.GL_TEXTURE_2D, previousTexture);
             }
-            if (allocate || lowResolutionWidth != frameLowWidth || lowResolutionHeight != frameLowHeight) {
-                GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_RG16F, frameLowWidth, frameLowHeight, 0, GL30.GL_RG,
-                        GL11.GL_FLOAT, (FloatBuffer) null);
-                lowResolutionWidth = frameLowWidth;
-                lowResolutionHeight = frameLowHeight;
+            if (resize) {
+                int previousFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
+                try {
+                    GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, pieceAtlasFramebuffer);
+                    GL30.glFramebufferTexture2D(GL30.GL_DRAW_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, GL11.GL_TEXTURE_2D,
+                            pieceAtlasTexture, 0);
+                    int status = GL30.glCheckFramebufferStatus(GL30.GL_DRAW_FRAMEBUFFER);
+                    if (status != GL30.GL_FRAMEBUFFER_COMPLETE) {
+                        throw new IllegalStateException("The weather fog inject atlas framebuffer is incomplete with "
+                                + "status " + status);
+                    }
+                } finally {
+                    GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, previousFramebuffer);
+                }
             }
-        } finally {
-            GL11.glBindTexture(GL11.GL_TEXTURE_2D, previousTexture);
+        } catch (RuntimeException exception) {
+            GL11.glDeleteTextures(pieceAtlasTexture);
+            GL30.glDeleteFramebuffers(pieceAtlasFramebuffer);
+            pieceAtlasTexture = 0;
+            pieceAtlasFramebuffer = 0;
+            froxelTargetFailed = true;
+            LOGGER.warn("The weather fog inject atlas cannot be made, so the fog is not drawn for the rest of the "
+                    + "session.", exception);
+            return false;
         }
-        GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, lowResolutionFramebuffer);
-        GL30.glFramebufferTexture2D(GL30.GL_DRAW_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, GL11.GL_TEXTURE_2D,
-                lowResolutionTexture, 0);
-        int status = GL30.glCheckFramebufferStatus(GL30.GL_DRAW_FRAMEBUFFER);
-        if (status != GL30.GL_FRAMEBUFFER_COMPLETE) {
-            throw new IllegalStateException("The weather fog low-resolution framebuffer is incomplete with status "
-                    + status);
+        return true;
+    }
+
+    /**
+     * Makes the array of the excesses of the froxel grid, an RGBA16F 2D array texture of the grid's columns by its rows
+     * by the maximum layer count, and its two framebuffers, on first use and again whenever the column counts changed.
+     * The first framebuffer writes the lower half of the layers and the second the upper half, one layer on each color
+     * attachment. A slice count change reallocates nothing, since the array holds every layer that the maximum slice
+     * count needs and the draw buffers cover only the layers of the frame's slices. A target that cannot be made is
+     * deleted again and logged once, after which the fog is not drawn for the rest of the session.
+     * @return whether the excesses of the frame may be drawn
+     */
+    private static boolean prepareExcesses() {
+        if (froxelTargetFailed) {
+            return false;
         }
-        RenderSystem.viewport(0, 0, frameLowWidth, frameLowHeight);
+        boolean allocate = excessLowerFramebuffer == 0;
+        boolean resize = allocate || excessWidth != frameColumnCount || excessHeight != frameRowCount;
+        if (allocate) {
+            excessLowerFramebuffer = GL30.glGenFramebuffers();
+            excessUpperFramebuffer = GL30.glGenFramebuffers();
+            excessTexture = GL11.glGenTextures();
+        }
+        try {
+            int previousTexture = GL11.glGetInteger(GL30.GL_TEXTURE_BINDING_2D_ARRAY);
+            try {
+                GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, excessTexture);
+                if (allocate) {
+                    GL11.glTexParameteri(GL30.GL_TEXTURE_2D_ARRAY, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_LINEAR);
+                    GL11.glTexParameteri(GL30.GL_TEXTURE_2D_ARRAY, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_LINEAR);
+                    GL11.glTexParameteri(GL30.GL_TEXTURE_2D_ARRAY, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
+                    GL11.glTexParameteri(GL30.GL_TEXTURE_2D_ARRAY, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
+                }
+                if (resize) {
+                    GL12.glTexImage3D(GL30.GL_TEXTURE_2D_ARRAY, 0, GL30.GL_RGBA16F, frameColumnCount, frameRowCount,
+                            FogFroxelGrid.MAXIMUM_LAYERS, 0, GL11.GL_RGBA, GL11.GL_FLOAT, (FloatBuffer) null);
+                    excessWidth = frameColumnCount;
+                    excessHeight = frameRowCount;
+                }
+            } finally {
+                GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, previousTexture);
+            }
+            if (resize) {
+                int previousFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
+                try {
+                    GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, excessLowerFramebuffer);
+                    for (int layer = 0; layer < FogFroxelGrid.TILES_ACROSS; layer++) {
+                        GL30.glFramebufferTextureLayer(GL30.GL_DRAW_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0 + layer,
+                                excessTexture, 0, layer);
+                    }
+                    int lowerStatus = GL30.glCheckFramebufferStatus(GL30.GL_DRAW_FRAMEBUFFER);
+                    if (lowerStatus != GL30.GL_FRAMEBUFFER_COMPLETE) {
+                        throw new IllegalStateException("The weather fog excess framebuffer of the lower layers is "
+                                + "incomplete with status " + lowerStatus);
+                    }
+                    GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, excessUpperFramebuffer);
+                    for (int layer = 0; layer < FogFroxelGrid.TILES_ACROSS; layer++) {
+                        GL30.glFramebufferTextureLayer(GL30.GL_DRAW_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0 + layer,
+                                excessTexture, 0, layer + FogFroxelGrid.TILES_ACROSS);
+                    }
+                    int upperStatus = GL30.glCheckFramebufferStatus(GL30.GL_DRAW_FRAMEBUFFER);
+                    if (upperStatus != GL30.GL_FRAMEBUFFER_COMPLETE) {
+                        throw new IllegalStateException("The weather fog excess framebuffer of the upper layers is "
+                                + "incomplete with status " + upperStatus);
+                    }
+                } finally {
+                    GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, previousFramebuffer);
+                }
+            }
+        } catch (RuntimeException exception) {
+            GL11.glDeleteTextures(excessTexture);
+            GL30.glDeleteFramebuffers(excessLowerFramebuffer);
+            GL30.glDeleteFramebuffers(excessUpperFramebuffer);
+            excessTexture = 0;
+            excessLowerFramebuffer = 0;
+            excessUpperFramebuffer = 0;
+            froxelTargetFailed = true;
+            LOGGER.warn("The weather fog excess array cannot be made, so the fog is not drawn for the rest of the "
+                    + "session.", exception);
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -1360,7 +1609,7 @@ public final class WeatherFogRenderer {
      * Sets what the fog draws for the following frames, for the debug subcommand of the client command: the debug view,
      * which part of the walk runs, or both. A mode that runs a part through the analytic fog draws the normal fog, so
      * its draw time gives the cost of the other part when it is compared with the draw time of off.
-     * @param mode one of off, field, cells, noregion, nofar, analytic, transmittance, fallback and structure
+     * @param mode one of off, field, froxel, noregion, nofar, analytic, transmittance and structure
      * @return a line saying what the fog shows from now on
      */
     public static String setDebugMode(String mode) {
@@ -1370,38 +1619,34 @@ public final class WeatherFogRenderer {
                 partMask = 3;
                 return "Fog debug mode field: each pixel shows the snow share of the field a quarter block in front of "
                         + "its surface, and beyond the region the far rule, purple under cover and gray in the open";
-            case "cells":
+            case "froxel":
                 debugMode = 2;
                 partMask = 3;
-                return String.format(Locale.ROOT, "Fog debug mode cells: red is the cells walked over %d and green "
-                                + "the columns walked over %d", SnowFogWalk.MAXIMUM_CELL_STEPS,
-                        SnowFogWalk.FAR_WALK_COLUMNS);
+                return "Fog debug mode froxel: each pixel shows the piece of its column's center ray that holds its "
+                        + "distance, with the near steps in red and the far steps in green as shares of the cap, blue "
+                        + "where a part ran out, and the sky shows its column's last piece";
             case "noregion":
                 debugMode = 0;
                 partMask = 2;
-                return "Fog timing mode noregion: the region part takes the analytic fog, so the difference of its "
-                        + "draw time from the draw time of off is the cost of the cell walk";
+                return "Fog timing mode noregion: the near part of every piece takes the analytic fog, so the "
+                        + "difference of its draw time from the draw time of off is the cost of the near cell walk";
             case "nofar":
                 debugMode = 0;
                 partMask = 1;
-                return "Fog timing mode nofar: the far part counts as open, so the difference of its draw time from "
-                        + "the draw time of off is the cost of the backward walk";
+                return "Fog timing mode nofar: the far part of every piece takes the analytic fog, so the difference "
+                        + "of its draw time from the draw time of off is the cost of the far cell walk";
             case "analytic":
                 debugMode = 0;
                 partMask = 0;
-                return "Fog timing mode analytic: both parts count as open air, which is the fog without the field";
+                return "Fog timing mode analytic: both parts count as open air, which is the fog without the field and "
+                        + "without the structures";
             case "transmittance":
                 debugMode = 3;
                 partMask = 3;
                 return "Fog debug mode transmittance: each pixel shows the transmittance of its fog as opaque gray, "
-                        + "white where nothing hides, with the pixels that fell back walked at full resolution";
-            case "fallback":
-                debugMode = 4;
-                partMask = 3;
-                return "Fog debug mode fallback: the normal fog, with the pixels that fell back drawn opaque red when "
-                        + "they walk at full resolution and orange when the cap takes the nearest sample instead";
+                        + "white where nothing hides";
             case "structure":
-                debugMode = 5;
+                debugMode = 4;
                 partMask = 3;
                 return "Fog debug mode structure: each pixel shows the ratio of the structured fog to the mean fog "
                         + "along its ray as a color, blue for the clear air, gray for the mean and red for the "
@@ -1442,8 +1687,6 @@ public final class WeatherFogRenderer {
                     SnowFieldTextures.shownMinY(), SnowFieldTextures.shownMaxY()), axisLag(eyeBlockZ, lagHalfWidth,
                     SnowFieldTextures.shownMinZ(), SnowFieldTextures.shownMaxZ())));
         }
-        String fallbackShareText = Double.isNaN(fallbackShare) ? "none"
-                : String.format(Locale.ROOT, "%.3f", fallbackShare);
         double windDegrees = Math.toDegrees(wind.direction()) % 360.0;
         if (windDegrees < 0.0) {
             windDegrees += 360.0;
@@ -1452,13 +1695,13 @@ public final class WeatherFogRenderer {
                         + "visibility %.1f blocks, fitted fog end %s; reference extinction %.5f per block, height "
                         + "scale %.1f blocks; %s; %s, decay length %.2f blocks; R %.1f blocks, region half width %.1f "
                         + "blocks, fade %.2f, %s, %d of the %d cells of the region cube inside it, lag %d blocks, %s; "
-                        + "divisor %d at %d by %d texels, fallback share %s %s; %s; wind %.1f blocks per second toward "
-                        + "%.0f degrees, displacement (%.1f, %.1f) blocks%s",
+                        + "froxel divisor %d at %d by %d columns, %d slices out to %.1f blocks; %s; wind %.1f blocks "
+                        + "per second toward %.0f degrees, displacement (%.1f, %.1f) blocks%s",
                 drawn, timer.describe(), eyeExtinction, visibility, fittedEnd, weather().referenceExtinction(),
                 weather().heightScale(), describeSnowColor(), describeEyeShare(), weather().decayLength(), frameRadius,
                 frameHalfWidth, frameFieldFade, hasShownBox ? "a shown box" : "no shown box", insideCells, regionCells,
-                lag, describeShareVolume(), frameDivisor, frameLowWidth, frameLowHeight, fallbackShareText,
-                fallbackAllowed ? "allowed" : "capped", describeStructures(visibility), wind.speed(),
+                lag, describeShareVolume(), frameFroxelDivisor, frameColumnCount, frameRowCount, frameSliceCount,
+                frameRangeDistance, describeStructures(visibility), wind.speed(),
                 windDegrees, wind.displacementX(), wind.displacementZ(), stopped);
     }
 
@@ -1564,6 +1807,23 @@ public final class WeatherFogRenderer {
     }
 
     /**
+     * The time of each pass of the fog's draw, for the client command: the setup, the share volume, the inject, the
+     * integrate, the composite and the whole draw, each with the times that the pass timer keeps, separated by
+     * semicolons and followed by the number of frames they stand for. Allocates.
+     */
+    public static String describePasses() {
+        return passTimer.describe();
+    }
+
+    /**
+     * Clears the measured pass times, for the client command, so that the following lines measure only the passes of the
+     * frames drawn from now on.
+     */
+    public static void resetPassTimes() {
+        passTimer.reset();
+    }
+
+    /**
      * A line about the bound of vanilla's fog in the last frame, for the client command: the opaque distance and the
      * fog end it gives, the far plane it was found for, whether vanilla's fog takes it, the visibility at sea level and
      * the fog's height scale, whether the eye stands in open air and for how long, the upper height the search took, and
@@ -1595,12 +1855,12 @@ public final class WeatherFogRenderer {
     }
 
     /**
-     * The lines of the self test of the client command: it draws 64 fixed rays with the fog program in self test mode
-     * into a 64 by 1 float target, walks them with SnowFogWalk on the same inputs, and compares the two, once to the
-     * scene point of each ray and once along its sky to infinity. Only a command calls it, so it allocates its readback
-     * buffer and its lines.
-     * @return the lines to send, which report the rays outside the tolerance on the optical depth, the largest error
-     *         with its ray, the number of rays whose walk counts differ, and the sky rays outside the tolerance
+     * The lines of the self test of the client command: it draws 64 fixed rays through the three stages of the froxel
+     * pipeline, at the slice count of the last frame and, when that is below FogFroxelGrid.MAXIMUM_SLICES, again at the
+     * maximum, walks the same rays with SnowFogWalk on the same inputs, and compares the excess of every boundary and
+     * the sky value of each ray. Only a command calls it, so it allocates its readback buffers and its lines.
+     * @return the lines to send, which report each ray outside the tolerance with its worst boundary, a summary of each
+     *         run, the sky rays outside the tolerance, and the walk counts of the twin
      */
     public static List<String> selfTest() {
         List<String> lines = new ArrayList<>();
@@ -1613,7 +1873,8 @@ public final class WeatherFogRenderer {
     }
 
     /**
-     * Walks the rays of the self test on the GPU and with SnowFogWalk and adds the comparison to the given lines.
+     * Draws the rays of the self test through the three stages of the froxel pipeline, sets the twin up on the inputs
+     * of the last frame, and adds the comparison of both runs to the given lines.
      */
     private static void collectSelfTest(List<String> lines) {
         ClientLevel level = Minecraft.getInstance().level;
@@ -1638,8 +1899,6 @@ public final class WeatherFogRenderer {
         }
         RenderTarget mainTarget = Minecraft.getInstance().getMainRenderTarget();
         fillSelfTestOffsets();
-        FloatBuffer readback = BufferUtils.createFloatBuffer(SELF_TEST_RAY_COUNT * SELF_TEST_VALUES_PER_RAY);
-        drawSelfTest(mainTarget, readback, SELF_TEST_MODE_WALK);
         selfTestWalk.setField(field.distances(), field.size());
         selfTestWalk.setShownBox(SnowFieldTextures.hasShownBox(), SnowFieldTextures.shownMinX(),
                 SnowFieldTextures.shownMinY(), SnowFieldTextures.shownMinZ(), SnowFieldTextures.shownMaxX(),
@@ -1651,79 +1910,173 @@ public final class WeatherFogRenderer {
         selfTestWalk.setRadius(frameRadius);
         selfTestWalk.setFieldFade(frameFieldFade);
         selfTestWalk.setStructure(structure);
+        runSelfTest(lines, mainTarget, frameSliceCount);
+        if (frameSliceCount < FogFroxelGrid.MAXIMUM_SLICES) {
+            runSelfTest(lines, mainTarget, FogFroxelGrid.MAXIMUM_SLICES);
+        }
+    }
+
+    /**
+     * Draws one run of the self test at a slice count, compares it with the twin, and adds the lines of the run to the
+     * given lines. Only a command calls it, so it allocates the readback buffers of the run.
+     * @param sliceCount the depth slices of a ray of the run, from FogFroxelGrid.MINIMUM_SLICES to
+     *        FogFroxelGrid.MAXIMUM_SLICES
+     */
+    private static void runSelfTest(List<String> lines, RenderTarget mainTarget, int sliceCount) {
+        int excessValueCount = FogFroxelGrid.layerCount(sliceCount) * SELF_TEST_RAY_COUNT * SELF_TEST_VALUES_PER_RAY;
+        FloatBuffer excessReadback = BufferUtils.createFloatBuffer(excessValueCount);
+        FloatBuffer skyReadback = BufferUtils.createFloatBuffer(SELF_TEST_RAY_COUNT * SELF_TEST_VALUES_PER_RAY);
+        drawSelfTest(mainTarget, sliceCount, excessReadback, skyReadback);
+        compareSelfTest(lines, sliceCount, excessReadback, skyReadback);
+    }
+
+    /**
+     * Walks the rays of a run of the self test with SnowFogWalk and compares them with the readback of the GPU: the
+     * depth of every boundary of every ray and the sky value of every ray. Only a command calls it, so it allocates its
+     * arrays and its lines.
+     * @param sliceCount the depth slices of a ray of the run
+     * @param excessReadback the excess of every boundary of every ray, four floats per texel and layer after layer
+     * @param skyReadback the sky value of every ray, four floats per texel
+     */
+    private static void compareSelfTest(List<String> lines, int sliceCount, FloatBuffer excessReadback,
+            FloatBuffer skyReadback) {
         boolean structureOn = structure.isOn();
-        int failedCount = 0;
-        int walkDifferingCount = 0;
+        double[] boundaryDistances = new double[sliceCount];
+        for (int boundary = 1; boundary <= sliceCount; boundary++) {
+            boundaryDistances[boundary - 1] = FogFroxelGrid.boundaryDistance(boundary, sliceCount, frameRangeDistance);
+        }
+        double[] twinExcesses = new double[sliceCount];
+        int failedRayCount = 0;
         double largestError = 0.0;
         int largestErrorRay = 0;
+        int largestErrorBoundary = 1;
+        int largestNearSteps = 0;
+        int largestFarSteps = 0;
+        int cappedRayCount = 0;
+        int valuesPerLayer = SELF_TEST_RAY_COUNT * SELF_TEST_VALUES_PER_RAY;
         for (int ray = 0; ray < SELF_TEST_RAY_COUNT; ray++) {
-            float gpuDepth = readback.get(ray * SELF_TEST_VALUES_PER_RAY);
-            float gpuCells = readback.get(ray * SELF_TEST_VALUES_PER_RAY + 1);
-            float gpuColumns = readback.get(ray * SELF_TEST_VALUES_PER_RAY + 2);
-            float gpuFarStop = readback.get(ray * SELF_TEST_VALUES_PER_RAY + 3);
-            double walkDepth = selfTestWalk.opticalDepth(selfTestOffsets[ray * 3], selfTestOffsets[ray * 3 + 1],
-                    selfTestOffsets[ray * 3 + 2]);
-            double allowed = 1.0e-3 + 1.0e-3 * Math.abs(walkDepth);
-            if (structureOn) {
-                allowed = Math.max(allowed, SELF_TEST_STRUCTURE_TOLERANCE_SHARE * Math.abs(walkDepth));
+            double unitY = selfTestUnitY(ray);
+            selfTestWalk.columnExcesses(selfTestOffsets[ray * 3], selfTestOffsets[ray * 3 + 1],
+                    selfTestOffsets[ray * 3 + 2], boundaryDistances, sliceCount, twinExcesses);
+            largestNearSteps = Math.max(largestNearSteps, selfTestWalk.lastNearSteps());
+            largestFarSteps = Math.max(largestFarSteps, selfTestWalk.lastFarSteps());
+            if (selfTestWalk.lastNearCapped() || selfTestWalk.lastFarCapped()) {
+                cappedRayCount++;
             }
-            double error = Math.abs(gpuDepth - walkDepth);
-            if (error > largestError) {
-                largestError = error;
-                largestErrorRay = ray;
+            boolean rayFailed = false;
+            double worstError = 0.0;
+            int worstBoundary = 1;
+            double worstGpuDepth = 0.0;
+            double worstExpectedDepth = 0.0;
+            double worstAllowed = 0.0;
+            for (int boundary = 1; boundary <= sliceCount; boundary++) {
+                double distance = boundaryDistances[boundary - 1];
+                double analyticDepth = HeightFog.opticalDepth(eyeExtinction, distance, distance * unitY,
+                        frameHeightScale);
+                int valueIndex = FogFroxelGrid.layerOf(boundary) * valuesPerLayer + ray * SELF_TEST_VALUES_PER_RAY
+                        + FogFroxelGrid.channelOf(boundary);
+                double gpuDepth = analyticDepth + excessReadback.get(valueIndex);
+                double expectedDepth = analyticDepth + twinExcesses[boundary - 1];
+                double allowed = SELF_TEST_WALK_TOLERANCE + SELF_TEST_WALK_TOLERANCE * Math.abs(expectedDepth);
+                if (structureOn) {
+                    allowed = Math.max(allowed, SELF_TEST_STRUCTURE_TOLERANCE_SHARE * Math.abs(expectedDepth));
+                }
+                double error = Math.abs(gpuDepth - expectedDepth);
+                if (error > largestError) {
+                    largestError = error;
+                    largestErrorRay = ray;
+                    largestErrorBoundary = boundary;
+                }
+                if (error > worstError) {
+                    worstError = error;
+                    worstBoundary = boundary;
+                    worstGpuDepth = gpuDepth;
+                    worstExpectedDepth = expectedDepth;
+                    worstAllowed = allowed;
+                }
+                if (error > allowed) {
+                    rayFailed = true;
+                }
             }
-            if (error > allowed) {
-                failedCount++;
-                lines.add(String.format(Locale.ROOT, "The ray %d at (%.2f, %.2f, %.2f) has the depth %.6f on the GPU "
-                                + "instead of %.6f in the walk, an error of %.6f above %.6f", ray,
-                        selfTestOffsets[ray * 3], selfTestOffsets[ray * 3 + 1], selfTestOffsets[ray * 3 + 2], gpuDepth,
-                        walkDepth, error, allowed));
-            }
-            if (gpuCells != selfTestWalk.lastCellSteps() || gpuColumns != selfTestWalk.lastColumnSteps()
-                    || Math.abs(gpuFarStop - selfTestWalk.lastFarStop()) > SELF_TEST_WALK_TOLERANCE) {
-                walkDifferingCount++;
+            if (rayFailed) {
+                failedRayCount++;
+                lines.add(String.format(Locale.ROOT, "The self test at %d slices: the ray %d at (%.2f, %.2f, %.2f) has "
+                                + "the depth %.6f at the boundary %d on the GPU instead of %.6f in the walk, an error "
+                                + "of %.6f above %.6f", sliceCount, ray, selfTestOffsets[ray * 3],
+                        selfTestOffsets[ray * 3 + 1], selfTestOffsets[ray * 3 + 2], worstGpuDepth, worstBoundary,
+                        worstExpectedDepth, worstError, worstAllowed));
             }
         }
-        lines.add(String.format(Locale.ROOT, "The self test compared %d rays, %d of them outside the tolerance on the "
-                        + "depth, the largest error %.6f at the ray %d, %s", SELF_TEST_RAY_COUNT, failedCount,
-                largestError, largestErrorRay, structureOn ? "with the structures on" : "with the structures off"));
-        lines.add(String.format(Locale.ROOT, "%d rays differ in the cells walked, the columns walked or the far stop, "
-                + "which a float tie can change by one without failing", walkDifferingCount));
-        double structureRange = structure.range();
-        drawSelfTest(mainTarget, readback, SELF_TEST_MODE_SKY);
-        int skyFailedCount = 0;
+        lines.add(String.format(Locale.ROOT, "The self test at %d slices compared %d rays over %d boundaries each, %d "
+                        + "rays outside the tolerance on the depth, the largest error %.6f at the ray %d and the "
+                        + "boundary %d, %s", sliceCount, SELF_TEST_RAY_COUNT, sliceCount, failedRayCount, largestError,
+                largestErrorRay, largestErrorBoundary,
+                structureOn ? "with the structures on" : "with the structures off"));
+        // The sky value of a ray is the analytic depth at the range, the excess of the last boundary and the tail past
+        // the range, as fogSkyTau sums them:
+        double lastDistance = boundaryDistances[sliceCount - 1];
+        int skyFailedRayCount = 0;
         double largestSkyError = 0.0;
         int largestSkyErrorRay = 0;
         for (int ray = 0; ray < SELF_TEST_RAY_COUNT; ray++) {
-            float gpuSkyDepth = readback.get(ray * SELF_TEST_VALUES_PER_RAY);
-            double walkSkyDepth = selfTestWalk.skyOpticalDepth(selfTestOffsets[ray * 3], selfTestOffsets[ray * 3 + 1],
-                    selfTestOffsets[ray * 3 + 2], structureRange);
-            double allowed = SELF_TEST_WALK_TOLERANCE + SELF_TEST_WALK_TOLERANCE * Math.abs(walkSkyDepth);
+            double unitY = selfTestUnitY(ray);
+            selfTestWalk.columnExcesses(selfTestOffsets[ray * 3], selfTestOffsets[ray * 3 + 1],
+                    selfTestOffsets[ray * 3 + 2], boundaryDistances, sliceCount, twinExcesses);
+            double analyticDepth = HeightFog.opticalDepth(eyeExtinction, lastDistance, lastDistance * unitY,
+                    frameHeightScale);
+            double tailDepth = HeightFog.skyTailOpticalDepth(eyeExtinction, frameRangeDistance, unitY,
+                    frameHeightScale);
+            double expectedSky = Math.min(HeightFog.MAXIMUM_OPTICAL_DEPTH,
+                    Math.max(0.0, analyticDepth + twinExcesses[sliceCount - 1] + tailDepth));
+            double gpuSky = skyReadback.get(ray * SELF_TEST_VALUES_PER_RAY);
+            double allowed = SELF_TEST_WALK_TOLERANCE + SELF_TEST_WALK_TOLERANCE * Math.abs(expectedSky);
             if (structureOn) {
-                allowed = Math.max(allowed, SELF_TEST_STRUCTURE_TOLERANCE_SHARE * Math.abs(walkSkyDepth));
+                allowed = Math.max(allowed, SELF_TEST_STRUCTURE_TOLERANCE_SHARE * Math.abs(expectedSky));
             }
-            double error = Math.abs(gpuSkyDepth - walkSkyDepth);
+            double error = Math.abs(gpuSky - expectedSky);
             if (error > largestSkyError) {
                 largestSkyError = error;
                 largestSkyErrorRay = ray;
             }
             if (error > allowed) {
-                skyFailedCount++;
-                lines.add(String.format(Locale.ROOT, "The sky ray %d at (%.2f, %.2f, %.2f) has the depth %.6f on the "
-                                + "GPU instead of %.6f in the walk, an error of %.6f above %.6f", ray,
-                        selfTestOffsets[ray * 3], selfTestOffsets[ray * 3 + 1], selfTestOffsets[ray * 3 + 2],
-                        gpuSkyDepth, walkSkyDepth, error, allowed));
+                skyFailedRayCount++;
+                lines.add(String.format(Locale.ROOT, "The sky of the self test at %d slices: the ray %d at (%.2f, %.2f, "
+                                + "%.2f) has the depth %.6f on the GPU instead of %.6f in the walk, an error of %.6f "
+                                + "above %.6f", sliceCount, ray, selfTestOffsets[ray * 3],
+                        selfTestOffsets[ray * 3 + 1], selfTestOffsets[ray * 3 + 2], gpuSky, expectedSky, error,
+                        allowed));
             }
         }
-        lines.add(String.format(Locale.ROOT, "The self test compared %d sky rays over the structure range %.0f blocks, "
-                        + "%d sky rays outside the tolerance, the largest error %.6f at the ray %d, %s",
-                SELF_TEST_RAY_COUNT, structureRange, skyFailedCount, largestSkyError, largestSkyErrorRay,
-                structureOn ? "with the structures on" : "with the structures off"));
+        lines.add(String.format(Locale.ROOT, "The sky of the self test at %d slices compared %d rays over the range "
+                        + "%.0f blocks, %d of them outside the tolerance, the largest error %.6f at the ray %d, %s",
+                sliceCount, SELF_TEST_RAY_COUNT, frameRangeDistance, skyFailedRayCount, largestSkyError,
+                largestSkyErrorRay, structureOn ? "with the structures on" : "with the structures off"));
+        lines.add(String.format(Locale.ROOT, "The twin over the %d rays walked at most %d near cells and %d far "
+                + "cells in its last piece, and the last piece of %d rays ran out of one of its caps; the froxel "
+                + "debug view shows the steps of the GPU", SELF_TEST_RAY_COUNT, largestNearSteps, largestFarSteps,
+                cappedRayCount));
     }
 
     /**
-     * Fills the rays of the self test: 48 of them along a golden angle spiral, whose lengths cycle through five values up to 300 blocks,
-     * and 16 fixed ones along the axes and through the diagonals at lengths from 20 to 120 blocks.
+     * The upward component of the unit direction of one ray of the self test.
+     * @param ray the ray, from 0 to SELF_TEST_RAY_COUNT - 1
+     * @return the component in y, from -1 to 1, which is 0 for a ray of zero length
+     */
+    private static double selfTestUnitY(int ray) {
+        double offsetX = selfTestOffsets[ray * 3];
+        double offsetY = selfTestOffsets[ray * 3 + 1];
+        double offsetZ = selfTestOffsets[ray * 3 + 2];
+        double length = Math.sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
+        if (!(length > 0.0) || !Double.isFinite(length)) {
+            return 0.0;
+        }
+        return offsetY / length;
+    }
+
+    /**
+     * Fills the rays of the self test: 48 along a golden angle spiral, whose lengths cycle through the 6, 25, 45, 120
+     * and 300 blocks of SELF_TEST_SPIRAL_LENGTHS, and 16 fixed ones along the axes, at two mixed offsets, along the x-y
+     * diagonal and through the cube diagonal, at lengths from 20 to 138.6 blocks.
      */
     private static void fillSelfTestOffsets() {
         for (int ray = 0; ray < SELF_TEST_SPIRAL_RAYS; ray++) {
@@ -1768,13 +2121,20 @@ public final class WeatherFogRenderer {
     }
 
     /**
-     * Draws the rays of the self test into its target and reads them back. It binds the same textures as the normal
-     * draw, and fills the share volume again, so that its rays read the volume of the uniforms and the textures that the
-     * walk on the CPU reads. Every piece of state it changes is set back after it.
-     * @param mode one of SELF_TEST_MODE_WALK and SELF_TEST_MODE_SKY, which the program answers in place of the fog
+     * Draws the rays of the self test through the inject, the integrate and the composite at the given slice count, and
+     * reads the excess of every boundary and the sky value back. It binds the same textures as the frame's passes and
+     * fills the share volume again, so that its rays read the volume, the uniforms and the textures that the walk on the
+     * CPU reads. The run draws without blending, which its outputs need since they write an alpha of 0, and no stage of
+     * it samples the depth. Every piece of state it changes is set back after it.
+     * @param sliceCount the depth slices of a ray of the run, from FogFroxelGrid.MINIMUM_SLICES to
+     *        FogFroxelGrid.MAXIMUM_SLICES
+     * @param excessReadback the buffer that receives the 64 by 1 texels of every layer of the run's slices, four floats
+     *        per texel and layer after layer
+     * @param skyReadback the buffer that receives the 64 by 1 texels of the composite's target
      */
-    private static void drawSelfTest(RenderTarget mainTarget, FloatBuffer readback, int mode) {
-        createSelfTestTarget();
+    private static void drawSelfTest(RenderTarget mainTarget, int sliceCount, FloatBuffer excessReadback,
+            FloatBuffer skyReadback) {
+        createSelfTestFroxelTargets();
         pass.begin();
         int previousDrawFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
         int previousReadFramebuffer = GL11.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING);
@@ -1790,33 +2150,22 @@ public final class WeatherFogRenderer {
         int previousFieldTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + STRUCTURE_UNIT);
         int previousStructureTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
+        int previousExcessTexture = GL11.glGetInteger(GL30.GL_TEXTURE_BINDING_2D_ARRAY);
         try {
             updateStructureTexture();
             RenderSystem.disableScissor();
             RenderSystem.disableCull();
-            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, selfTestFramebuffer);
-            RenderSystem.viewport(0, 0, SELF_TEST_RAY_COUNT, 1);
-            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SCENE_DEPTH_UNIT);
-            RenderSystem.bindTexture(mainTarget.getDepthTextureId());
             bindFieldTextures();
             boolean shareVolumeBound = prepareShareVolume();
             if (shareVolumeBound) {
                 drawShareVolume(mainTarget);
                 bindShareVolume();
             }
-            fogPass.use();
-            fogPass.setFrameUniforms(mainTarget);
-            fogPass.setShareVolumeInUse(shareVolumeBound);
-            fogPass.setSelfTestUniforms(mode);
-            SkyGlPass.drawFullScreenQuad();
-            GlStateManager._pixelStore(GL11.GL_PACK_ROW_LENGTH, 0);
-            GlStateManager._pixelStore(GL12.GL_PACK_IMAGE_HEIGHT, 0);
-            GlStateManager._pixelStore(GL11.GL_PACK_SKIP_PIXELS, 0);
-            GlStateManager._pixelStore(GL11.GL_PACK_SKIP_ROWS, 0);
-            GlStateManager._pixelStore(GL12.GL_PACK_SKIP_IMAGES, 0);
-            GlStateManager._pixelStore(GL11.GL_PACK_ALIGNMENT, 4);
-            readback.clear();
-            GL11.glReadPixels(0, 0, SELF_TEST_RAY_COUNT, 1, GL11.GL_RGBA, GL11.GL_FLOAT, readback);
+            drawSelfTestInject(mainTarget, sliceCount, shareVolumeBound);
+            drawSelfTestIntegrate(mainTarget, sliceCount);
+            drawSelfTestComposite(mainTarget, sliceCount, shareVolumeBound);
+            readSelfTestTargets(sliceCount, excessReadback, skyReadback);
         } finally {
             if (scissor) {
                 GlStateManager._enableScissorTest();
@@ -1828,11 +2177,105 @@ public final class WeatherFogRenderer {
             GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousFieldTexture);
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + STRUCTURE_UNIT);
             GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousStructureTexture);
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
+            GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, previousExcessTexture);
             GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, previousDrawFramebuffer);
             GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, previousReadFramebuffer);
             RenderSystem.viewport(viewportX, viewportY, viewportWidth, viewportHeight);
             pass.end();
         }
+    }
+
+    /**
+     * Draws the pieces of the 64 rays of the self test into its atlas, with its columns in place of the frame's grid.
+     * @param shareVolumeBound whether the walk may read the share volume that the caller filled
+     */
+    private static void drawSelfTestInject(RenderTarget mainTarget, int sliceCount, boolean shareVolumeBound) {
+        GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, selfTestAtlasFramebuffer);
+        RenderSystem.viewport(0, 0, FogFroxelGrid.atlasWidth(SELF_TEST_RAY_COUNT),
+                FogFroxelGrid.atlasDrawHeight(1, sliceCount));
+        injectPass.use();
+        injectPass.setFrameUniforms(mainTarget);
+        injectPass.setShareVolumeInUse(shareVolumeBound);
+        injectPass.setSelfTestUniforms(sliceCount);
+        SkyGlPass.drawFullScreenQuad();
+    }
+
+    /**
+     * Draws the excess of every boundary of the 64 rays of the self test into its array. A slice count above the 32
+     * boundaries that eight outputs hold takes a second draw into the upper framebuffer, which sums the first 32 pieces
+     * again.
+     */
+    private static void drawSelfTestIntegrate(RenderTarget mainTarget, int sliceCount) {
+        int boundariesPerDraw = FogFroxelGrid.TILES_ACROSS * FogFroxelGrid.SLICES_PER_LAYER;
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + ATLAS_UNIT);
+        RenderSystem.bindTexture(selfTestAtlasTexture);
+        GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, selfTestExcessLowerFramebuffer);
+        integratePass.use();
+        if (froxelTargetFailed) {
+            throw new IllegalStateException("The weather fog integrate writes its slices to unknown outputs");
+        }
+        integratePass.setFrameUniforms(mainTarget);
+        integratePass.setSelfTestUniforms(sliceCount);
+        setExcessDrawBuffers(0, sliceCount);
+        RenderSystem.viewport(0, 0, SELF_TEST_RAY_COUNT, 1);
+        SkyGlPass.drawFullScreenQuad();
+        if (sliceCount > boundariesPerDraw) {
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, selfTestExcessUpperFramebuffer);
+            integratePass.setFirstBoundary(boundariesPerDraw + 1);
+            setExcessDrawBuffers(FogFroxelGrid.TILES_ACROSS, sliceCount);
+            SkyGlPass.drawFullScreenQuad();
+        }
+    }
+
+    /**
+     * Draws the sky value of the 64 rays of the self test into the composite's target, which reads the excess of the
+     * last boundary of each ray from the self test array.
+     * @param shareVolumeBound whether the walk may read the share volume that the caller filled
+     */
+    private static void drawSelfTestComposite(RenderTarget mainTarget, int sliceCount, boolean shareVolumeBound) {
+        createSelfTestTarget();
+        GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, selfTestFramebuffer);
+        RenderSystem.viewport(0, 0, SELF_TEST_RAY_COUNT, 1);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
+        GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, selfTestExcessTexture);
+        compositePass.use();
+        compositePass.setFrameUniforms(mainTarget);
+        compositePass.setShareVolumeInUse(shareVolumeBound);
+        compositePass.setSelfTestUniforms(sliceCount);
+        SkyGlPass.drawFullScreenQuad();
+    }
+
+    /**
+     * Reads the excesses of the layers of the self test array and the sky value of the composite's target back into the
+     * given buffers, and takes the attachment of the read framebuffer off again.
+     * @param sliceCount the depth slices of the run, whose FogFroxelGrid.layerCount layers hold the excesses
+     * @param excessReadback the buffer that receives the layers, four floats per texel and layer after layer
+     * @param skyReadback the buffer that receives the composite's target, four floats per texel
+     */
+    private static void readSelfTestTargets(int sliceCount, FloatBuffer excessReadback, FloatBuffer skyReadback) {
+        GlStateManager._pixelStore(GL11.GL_PACK_ROW_LENGTH, 0);
+        GlStateManager._pixelStore(GL12.GL_PACK_IMAGE_HEIGHT, 0);
+        GlStateManager._pixelStore(GL11.GL_PACK_SKIP_PIXELS, 0);
+        GlStateManager._pixelStore(GL11.GL_PACK_SKIP_ROWS, 0);
+        GlStateManager._pixelStore(GL12.GL_PACK_SKIP_IMAGES, 0);
+        GlStateManager._pixelStore(GL11.GL_PACK_ALIGNMENT, 4);
+        int valuesPerLayer = SELF_TEST_RAY_COUNT * SELF_TEST_VALUES_PER_RAY;
+        int layerCount = FogFroxelGrid.layerCount(sliceCount);
+        GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, selfTestReadFramebuffer);
+        for (int layer = 0; layer < layerCount; layer++) {
+            GL30.glFramebufferTextureLayer(GL30.GL_READ_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, selfTestExcessTexture,
+                    0, layer);
+            // The read buffer follows each attachment, so that the read framebuffer stays complete throughout:
+            GL11.glReadBuffer(GL30.GL_COLOR_ATTACHMENT0);
+            excessReadback.position(layer * valuesPerLayer);
+            GL11.glReadPixels(0, 0, SELF_TEST_RAY_COUNT, 1, GL11.GL_RGBA, GL11.GL_FLOAT, excessReadback);
+        }
+        GL30.glFramebufferTextureLayer(GL30.GL_READ_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, 0, 0, 0);
+        GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, selfTestFramebuffer);
+        GL11.glReadBuffer(GL30.GL_COLOR_ATTACHMENT0);
+        skyReadback.clear();
+        GL11.glReadPixels(0, 0, SELF_TEST_RAY_COUNT, 1, GL11.GL_RGBA, GL11.GL_FLOAT, skyReadback);
     }
 
     /**
@@ -1883,9 +2326,180 @@ public final class WeatherFogRenderer {
     }
 
     /**
-     * The locations of the uniforms of the scene and the walk that every fog program shares, the program itself, and
-     * the setting of them every frame. A program is made again when a resource reload replaced its stage, and its
-     * samplers are set once after it links.
+     * Makes the targets of the froxel stages of the self test on first use and keeps them for the session. A target
+     * that cannot be made is deleted again, and the next call throws without trying.
+     * @throws IllegalStateException when a target cannot be made, which leaves the self test undone for the session
+     */
+    private static void createSelfTestFroxelTargets() {
+        if (selfTestTargetFailed) {
+            throw new IllegalStateException("The weather fog self test targets cannot be made in this session");
+        }
+        if (selfTestAtlasTexture != 0) {
+            return;
+        }
+        try {
+            createSelfTestAtlas();
+            createSelfTestExcessArray();
+            selfTestReadFramebuffer = GL30.glGenFramebuffers();
+        } catch (RuntimeException exception) {
+            deleteSelfTestFroxelTargets();
+            selfTestTargetFailed = true;
+            throw exception;
+        }
+    }
+
+    /**
+     * Makes the atlas of the pieces of the self test, an R32F 2D texture of 512 by 8 texels: the 64 columns of the rays
+     * times the eight tiles across, by the eight rows of the tiles. Its framebuffer holds it on the color attachment 0,
+     * and the bindings that were there before stay bound.
+     * @throws IllegalStateException when the framebuffer is incomplete
+     */
+    private static void createSelfTestAtlas() {
+        int targetTexture = GL11.glGenTextures();
+        int targetFramebuffer = GL30.glGenFramebuffers();
+        try {
+            int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+            try {
+                GL11.glBindTexture(GL11.GL_TEXTURE_2D, targetTexture);
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
+                GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_R32F, FogFroxelGrid.atlasWidth(SELF_TEST_RAY_COUNT),
+                        FogFroxelGrid.atlasHeight(1), 0, GL11.GL_RED, GL11.GL_FLOAT, (FloatBuffer) null);
+            } finally {
+                GL11.glBindTexture(GL11.GL_TEXTURE_2D, previousTexture);
+            }
+            int previousDrawFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
+            try {
+                GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, targetFramebuffer);
+                GL30.glFramebufferTexture2D(GL30.GL_DRAW_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, GL11.GL_TEXTURE_2D,
+                        targetTexture, 0);
+                GL11.glDrawBuffer(GL30.GL_COLOR_ATTACHMENT0);
+                int status = GL30.glCheckFramebufferStatus(GL30.GL_DRAW_FRAMEBUFFER);
+                if (status != GL30.GL_FRAMEBUFFER_COMPLETE) {
+                    throw new IllegalStateException("The weather fog self test inject atlas framebuffer is incomplete "
+                            + "with status " + status);
+                }
+            } finally {
+                GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, previousDrawFramebuffer);
+            }
+        } catch (RuntimeException exception) {
+            GL11.glDeleteTextures(targetTexture);
+            GL30.glDeleteFramebuffers(targetFramebuffer);
+            throw exception;
+        }
+        selfTestAtlasTexture = targetTexture;
+        selfTestAtlasFramebuffer = targetFramebuffer;
+    }
+
+    /**
+     * Makes the array of the excesses of the self test, an RGBA32F 2D array texture of the 64 rays by a single row by
+     * FogFroxelGrid.MAXIMUM_LAYERS, and the two framebuffers that attach its lower and its upper eight layers to the
+     * color attachments 0 to 7. The bindings that were there before stay bound.
+     * @throws IllegalStateException when one of the framebuffers is incomplete
+     */
+    private static void createSelfTestExcessArray() {
+        int targetTexture = GL11.glGenTextures();
+        int lowerFramebuffer = GL30.glGenFramebuffers();
+        int upperFramebuffer = GL30.glGenFramebuffers();
+        try {
+            int previousTexture = GL11.glGetInteger(GL30.GL_TEXTURE_BINDING_2D_ARRAY);
+            try {
+                GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, targetTexture);
+                // The self test reads the array with texelFetch, and filtered reads of 32-bit floats are not core:
+                GL11.glTexParameteri(GL30.GL_TEXTURE_2D_ARRAY, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
+                GL11.glTexParameteri(GL30.GL_TEXTURE_2D_ARRAY, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
+                GL11.glTexParameteri(GL30.GL_TEXTURE_2D_ARRAY, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
+                GL11.glTexParameteri(GL30.GL_TEXTURE_2D_ARRAY, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
+                GL12.glTexImage3D(GL30.GL_TEXTURE_2D_ARRAY, 0, GL30.GL_RGBA32F, SELF_TEST_RAY_COUNT, 1,
+                        FogFroxelGrid.MAXIMUM_LAYERS, 0, GL11.GL_RGBA, GL11.GL_FLOAT, (FloatBuffer) null);
+            } finally {
+                GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, previousTexture);
+            }
+            int previousDrawFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
+            try {
+                GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, lowerFramebuffer);
+                for (int layer = 0; layer < FogFroxelGrid.TILES_ACROSS; layer++) {
+                    GL30.glFramebufferTextureLayer(GL30.GL_DRAW_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0 + layer,
+                            targetTexture, 0, layer);
+                }
+                int lowerStatus = GL30.glCheckFramebufferStatus(GL30.GL_DRAW_FRAMEBUFFER);
+                if (lowerStatus != GL30.GL_FRAMEBUFFER_COMPLETE) {
+                    throw new IllegalStateException("The weather fog self test excess framebuffer of the lower layers "
+                            + "is incomplete with status " + lowerStatus);
+                }
+                GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, upperFramebuffer);
+                for (int layer = 0; layer < FogFroxelGrid.TILES_ACROSS; layer++) {
+                    GL30.glFramebufferTextureLayer(GL30.GL_DRAW_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0 + layer,
+                            targetTexture, 0, layer + FogFroxelGrid.TILES_ACROSS);
+                }
+                int upperStatus = GL30.glCheckFramebufferStatus(GL30.GL_DRAW_FRAMEBUFFER);
+                if (upperStatus != GL30.GL_FRAMEBUFFER_COMPLETE) {
+                    throw new IllegalStateException("The weather fog self test excess framebuffer of the upper layers "
+                            + "is incomplete with status " + upperStatus);
+                }
+            } finally {
+                GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, previousDrawFramebuffer);
+            }
+        } catch (RuntimeException exception) {
+            GL11.glDeleteTextures(targetTexture);
+            GL30.glDeleteFramebuffers(lowerFramebuffer);
+            GL30.glDeleteFramebuffers(upperFramebuffer);
+            throw exception;
+        }
+        selfTestExcessTexture = targetTexture;
+        selfTestExcessLowerFramebuffer = lowerFramebuffer;
+        selfTestExcessUpperFramebuffer = upperFramebuffer;
+    }
+
+    /**
+     * Deletes the targets of the froxel stages of the self test and forgets them.
+     */
+    private static void deleteSelfTestFroxelTargets() {
+        if (selfTestAtlasTexture != 0) {
+            GL11.glDeleteTextures(selfTestAtlasTexture);
+            selfTestAtlasTexture = 0;
+        }
+        if (selfTestAtlasFramebuffer != 0) {
+            GL30.glDeleteFramebuffers(selfTestAtlasFramebuffer);
+            selfTestAtlasFramebuffer = 0;
+        }
+        if (selfTestExcessTexture != 0) {
+            GL11.glDeleteTextures(selfTestExcessTexture);
+            selfTestExcessTexture = 0;
+        }
+        if (selfTestExcessLowerFramebuffer != 0) {
+            GL30.glDeleteFramebuffers(selfTestExcessLowerFramebuffer);
+            selfTestExcessLowerFramebuffer = 0;
+        }
+        if (selfTestExcessUpperFramebuffer != 0) {
+            GL30.glDeleteFramebuffers(selfTestExcessUpperFramebuffer);
+            selfTestExcessUpperFramebuffer = 0;
+        }
+        if (selfTestReadFramebuffer != 0) {
+            GL30.glDeleteFramebuffers(selfTestReadFramebuffer);
+            selfTestReadFramebuffer = 0;
+        }
+    }
+
+    /**
+     * Sets the uniforms of the froxel grid on the program in use: the columns and rows of the grid, the depth slices of
+     * a ray, the range in blocks of its last boundary, and the pixels per side of a column.
+     */
+    private static void setGridUniforms(int columnCountUniform, int rowCountUniform, int sliceCountUniform,
+            int rangeDistanceUniform, int divisorUniform) {
+        GL20.glUniform1i(columnCountUniform, frameColumnCount);
+        GL20.glUniform1i(rowCountUniform, frameRowCount);
+        GL20.glUniform1i(sliceCountUniform, frameSliceCount);
+        GL20.glUniform1f(rangeDistanceUniform, (float) frameRangeDistance);
+        GL20.glUniform1i(divisorUniform, frameFroxelDivisor);
+    }
+
+    /**
+     * The locations of the uniforms of the scene and the walk that the programs extending this class share, the program
+     * itself, and the setting of them every frame. A program is made again when a resource reload replaced its stage,
+     * and its samplers are set once after it links.
      */
     private abstract static class FogProgramBase {
         @Nullable
@@ -1984,8 +2598,9 @@ public final class WeatherFogRenderer {
         /**
          * Sets the uniforms of this frame on the program in use: the inverse view projection, the size of the main
          * target, the extinction at the eye and the fog's height scale, the field and its shown box, the eye as a block
-         * and a fraction, the region, the fade, which parts of the walk run, and the structures of the fog, whose share
-         * is 0 while they are off. The eye's block goes as three ints, so no world coordinate passes through a float.
+         * and a fraction, the region, the fade, which parts of the walk run, and the structures of the fog. The share is
+         * 0 while the structures are off, so the guards of the CPU and the GPU twins cannot disagree. The eye's block
+         * goes as three ints, so no world coordinate passes through a float.
          */
         protected void setFrameUniforms(RenderTarget mainTarget) {
             SnowField field = ClientSnowField.field();
@@ -2030,67 +2645,210 @@ public final class WeatherFogRenderer {
     }
 
     /**
-     * The program of the low-resolution walk, weather_fog.glsl followed by snow_walk.glsl and weather_fog.fsh, and the
-     * uniforms that only it has: the divisor, the size of the full-resolution target, and the self test.
+     * The program of the inject, weather_fog.glsl and snow_walk.glsl followed by weather_fog_inject.fsh, and the
+     * uniforms that only it has: the froxel grid and the self test.
      */
-    private static final class FogProgram extends FogProgramBase {
+    private static final class InjectProgram extends FogProgramBase {
+        private int columnCountUniform;
+        private int rowCountUniform;
+        private int sliceCountUniform;
+        private int rangeDistanceUniform;
         private int divisorUniform;
-        private int fullSizeUniform;
         private int selfTestUniform;
         private int selfTestOffsetsUniform;
 
         @Override
         protected Shader loadFragment() {
-            return FHShaders.getWeatherFog();
+            return FHShaders.getWeatherFogInject();
         }
 
         @Override
         protected void onLinked(ShaderProgram linked) {
-            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "sceneDepth"), SCENE_DEPTH_UNIT);
             GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "snowField"), FIELD_UNIT);
             GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "farHeights"), HEIGHT_UNIT);
             GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "shareTable"), SHARE_TABLE_UNIT);
             GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "fogStructure"), STRUCTURE_UNIT);
+            columnCountUniform = GL20.glGetUniformLocation(linked.programId, "columnCount");
+            rowCountUniform = GL20.glGetUniformLocation(linked.programId, "rowCount");
+            sliceCountUniform = GL20.glGetUniformLocation(linked.programId, "sliceCount");
+            rangeDistanceUniform = GL20.glGetUniformLocation(linked.programId, "rangeDistance");
             divisorUniform = GL20.glGetUniformLocation(linked.programId, "divisor");
-            fullSizeUniform = GL20.glGetUniformLocation(linked.programId, "fullSize");
             selfTestUniform = GL20.glGetUniformLocation(linked.programId, "selfTest");
             selfTestOffsetsUniform = GL20.glGetUniformLocation(linked.programId, "selfTestOffsets");
         }
 
         @Override
         protected void setOwnUniforms(RenderTarget mainTarget) {
-            GL20.glUniform1i(divisorUniform, frameDivisor);
-            GL20.glUniform2i(fullSizeUniform, mainTarget.width, mainTarget.height);
+            setGridUniforms(columnCountUniform, rowCountUniform, sliceCountUniform, rangeDistanceUniform,
+                    divisorUniform);
             GL20.glUniform1i(selfTestUniform, 0);
         }
 
         /**
-         * Sets the offsets of the rays of the self test and the mode that the following draw answers them in, which
-         * walks every part of the segment since that is what it compares.
+         * Sets the uniforms of the rays of the self test in place of the frame's grid: the 64 rays as the columns of a
+         * single row, the depth slices of the run, and every part of the walk, so that no debug view leaves one out.
+         * The range, the divisor and the rest of the frame's uniforms stay as setFrameUniforms set them.
+         * @param sliceCount the depth slices of a ray of the run, from FogFroxelGrid.MINIMUM_SLICES to
+         *        FogFroxelGrid.MAXIMUM_SLICES
          */
-        private void setSelfTestUniforms(int mode) {
-            GL20.glUniform1i(selfTestUniform, mode);
+        private void setSelfTestUniforms(int sliceCount) {
+            GL20.glUniform1i(selfTestUniform, 1);
             GL20.glUniform1i(partMaskUniform, 3);
+            GL20.glUniform1i(columnCountUniform, SELF_TEST_RAY_COUNT);
+            GL20.glUniform1i(rowCountUniform, 1);
+            GL20.glUniform1i(sliceCountUniform, sliceCount);
             GL20.glUniform3fv(selfTestOffsetsUniform, selfTestOffsetBuffer);
         }
     }
 
     /**
-     * The program of the composite, weather_fog.glsl and snow_walk.glsl followed by weather_fog_upsample.fsh, and the
-     * uniforms that only it has: the snow fog color, the debug view, the low-resolution target, and which part of the
-     * fog the draw covers.
+     * The program of the integrate, weather_fog.glsl followed by weather_fog_integrate.fsh, and the uniforms that only
+     * it has: the froxel grid, the inverse view projection, the size of the main target, the extinction at the eye, the
+     * fog's height scale, the boundary that the first of its eight outputs holds, and the self test. The integrate stage
+     * has none of the walk uniforms, so this program is its own wrapper.
      */
-    private static final class UpsampleProgram extends FogProgramBase {
+    private static final class IntegrateProgram {
+        @Nullable
+        private ShaderProgram program;
+        @Nullable
+        private Shader fragment;
+        private int columnCountUniform;
+        private int rowCountUniform;
+        private int sliceCountUniform;
+        private int rangeDistanceUniform;
+        private int divisorUniform;
+        private int firstBoundaryUniform;
+        private int selfTestUniform;
+        private int selfTestOffsetsUniform;
+        private int eyeExtinctionUniform;
+        private int heightScaleUniform;
+        private int screenSizeUniform;
+        private int inverseViewProjectionUniform;
+
+        /**
+         * The fragment stage of this program, which FHShaders makes again after a resource reload.
+         */
+        private Shader loadFragment() {
+            return FHShaders.getWeatherFogIntegrate();
+        }
+
+        /**
+         * Uses the program, making it first if needed, and sets its sampler and the locations of its outputs once after
+         * it links. A link whose outputs are not the eight distinct color attachments leaves the fog off.
+         */
+        private void use() {
+            Shader newFragment = loadFragment();
+            if (program == null || fragment != newFragment) {
+                if (program != null) {
+                    program.delete();
+                    program = null;
+                }
+                ShaderProgram created = new ShaderProgram();
+                try {
+                    created.attach(FHShaders.IMAGE_V).attach(newFragment);
+                } catch (RuntimeException exception) {
+                    created.delete();
+                    throw exception;
+                }
+                program = created;
+                fragment = newFragment;
+                program.use();
+                GL20.glUniform1i(GL20.glGetUniformLocation(program.programId, "pieceAtlas"), ATLAS_UNIT);
+                columnCountUniform = GL20.glGetUniformLocation(program.programId, "columnCount");
+                rowCountUniform = GL20.glGetUniformLocation(program.programId, "rowCount");
+                sliceCountUniform = GL20.glGetUniformLocation(program.programId, "sliceCount");
+                rangeDistanceUniform = GL20.glGetUniformLocation(program.programId, "rangeDistance");
+                divisorUniform = GL20.glGetUniformLocation(program.programId, "divisor");
+                firstBoundaryUniform = GL20.glGetUniformLocation(program.programId, "firstBoundary");
+                selfTestUniform = GL20.glGetUniformLocation(program.programId, "selfTest");
+                selfTestOffsetsUniform = GL20.glGetUniformLocation(program.programId, "selfTestOffsets");
+                eyeExtinctionUniform = GL20.glGetUniformLocation(program.programId, "eyeExtinction");
+                heightScaleUniform = GL20.glGetUniformLocation(program.programId, "heightScale");
+                screenSizeUniform = GL20.glGetUniformLocation(program.programId, "screenSize");
+                inverseViewProjectionUniform = GL20.glGetUniformLocation(program.programId, "inverseViewProjection");
+                // The layer of each slice follows its output's assigned location, which GLSL 1.50 leaves to the
+                // linker:
+                boolean locationsValid = true;
+                for (int output = 0; output < FogFroxelGrid.TILES_ACROSS; output++) {
+                    int location = GL30.glGetFragDataLocation(program.programId, "froxelSlices" + output);
+                    froxelOutputLocations[output] = location;
+                    if (location < 0 || location >= FogFroxelGrid.TILES_ACROSS) {
+                        locationsValid = false;
+                    } else {
+                        for (int earlierOutput = 0; earlierOutput < output; earlierOutput++) {
+                            if (froxelOutputLocations[earlierOutput] == location) {
+                                locationsValid = false;
+                            }
+                        }
+                    }
+                }
+                if (!locationsValid) {
+                    froxelTargetFailed = true;
+                    LOGGER.warn("The weather fog integrate writes its slices to unknown outputs, so the fog is not "
+                            + "drawn for the rest of the session.");
+                }
+            }
+            program.use();
+        }
+
+        /**
+         * Sets the uniforms of this frame on the program in use: the froxel grid, the inverse view projection through
+         * the shared buffer, the size of the main target, the extinction at the eye and the fog's height scale, and the
+         * self test off.
+         */
+        private void setFrameUniforms(RenderTarget mainTarget) {
+            inverseViewProjection.get(matrixBuffer);
+            GL20.glUniformMatrix4fv(inverseViewProjectionUniform, false, matrixBuffer);
+            GL20.glUniform2f(screenSizeUniform, (float) mainTarget.width, (float) mainTarget.height);
+            GL20.glUniform1f(eyeExtinctionUniform, (float) eyeExtinction);
+            GL20.glUniform1f(heightScaleUniform, (float) frameHeightScale);
+            setGridUniforms(columnCountUniform, rowCountUniform, sliceCountUniform, rangeDistanceUniform,
+                    divisorUniform);
+            GL20.glUniform1i(selfTestUniform, 0);
+        }
+
+        /**
+         * Sets the boundary that the first of the eight outputs of the following draw holds.
+         */
+        private void setFirstBoundary(int firstBoundary) {
+            GL20.glUniform1i(firstBoundaryUniform, firstBoundary);
+        }
+
+        /**
+         * Sets the uniforms of the rays of the self test in place of the frame's grid: the 64 rays as the columns of a
+         * single row, the depth slices of the run, and the first boundary at 1. The range, the divisor and the rest of
+         * the frame's uniforms stay as setFrameUniforms set them.
+         * @param sliceCount the depth slices of a ray of the run, from FogFroxelGrid.MINIMUM_SLICES to
+         *        FogFroxelGrid.MAXIMUM_SLICES
+         */
+        private void setSelfTestUniforms(int sliceCount) {
+            GL20.glUniform1i(selfTestUniform, 1);
+            GL20.glUniform1i(columnCountUniform, SELF_TEST_RAY_COUNT);
+            GL20.glUniform1i(rowCountUniform, 1);
+            GL20.glUniform1i(sliceCountUniform, sliceCount);
+            GL20.glUniform1i(firstBoundaryUniform, 1);
+            GL20.glUniform3fv(selfTestOffsetsUniform, selfTestOffsetBuffer);
+        }
+    }
+
+    /**
+     * The program of the composite, weather_fog.glsl and snow_walk.glsl followed by weather_fog_composite.fsh, and the
+     * uniforms that only it has: the snow fog color, the debug view, the froxel grid and the self test.
+     */
+    private static final class CompositeProgram extends FogProgramBase {
         private int snowColorUniform;
         private int debugModeUniform;
-        private int lowSizeUniform;
+        private int columnCountUniform;
+        private int rowCountUniform;
+        private int sliceCountUniform;
+        private int rangeDistanceUniform;
         private int divisorUniform;
-        private int compositePartUniform;
-        private int fallbackAllowedUniform;
+        private int selfTestUniform;
+        private int selfTestOffsetsUniform;
 
         @Override
         protected Shader loadFragment() {
-            return FHShaders.getWeatherFogUpsample();
+            return FHShaders.getWeatherFogComposite();
         }
 
         @Override
@@ -2100,29 +2858,41 @@ public final class WeatherFogRenderer {
             GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "farHeights"), HEIGHT_UNIT);
             GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "shareTable"), SHARE_TABLE_UNIT);
             GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "fogStructure"), STRUCTURE_UNIT);
-            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "lowResolution"), LOW_RESOLUTION_UNIT);
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "excesses"), EXCESS_UNIT);
             snowColorUniform = GL20.glGetUniformLocation(linked.programId, "snowColor");
             debugModeUniform = GL20.glGetUniformLocation(linked.programId, "debugMode");
-            lowSizeUniform = GL20.glGetUniformLocation(linked.programId, "lowSize");
+            columnCountUniform = GL20.glGetUniformLocation(linked.programId, "columnCount");
+            rowCountUniform = GL20.glGetUniformLocation(linked.programId, "rowCount");
+            sliceCountUniform = GL20.glGetUniformLocation(linked.programId, "sliceCount");
+            rangeDistanceUniform = GL20.glGetUniformLocation(linked.programId, "rangeDistance");
             divisorUniform = GL20.glGetUniformLocation(linked.programId, "divisor");
-            compositePartUniform = GL20.glGetUniformLocation(linked.programId, "compositePart");
-            fallbackAllowedUniform = GL20.glGetUniformLocation(linked.programId, "fallbackAllowed");
+            selfTestUniform = GL20.glGetUniformLocation(linked.programId, "selfTest");
+            selfTestOffsetsUniform = GL20.glGetUniformLocation(linked.programId, "selfTestOffsets");
         }
 
         @Override
         protected void setOwnUniforms(RenderTarget mainTarget) {
             GL20.glUniform3f(snowColorUniform, snowColor[0], snowColor[1], snowColor[2]);
             GL20.glUniform1i(debugModeUniform, debugMode);
-            GL20.glUniform2i(lowSizeUniform, frameLowWidth, frameLowHeight);
-            GL20.glUniform1i(divisorUniform, frameDivisor);
+            setGridUniforms(columnCountUniform, rowCountUniform, sliceCountUniform, rangeDistanceUniform,
+                    divisorUniform);
+            GL20.glUniform1i(selfTestUniform, 0);
         }
 
         /**
-         * Sets which part of the fog the following draw covers, and whether the fallback is allowed.
+         * Sets the uniforms of the rays of the self test in place of the frame's grid: the 64 rays as the columns of a
+         * single row and the depth slices of the run. The range, the divisor and the rest of the frame's uniforms stay
+         * as setFrameUniforms set them, since the composite reads the last excess of each ray at the boundary of the
+         * run's slice count.
+         * @param sliceCount the depth slices of a ray of the run, from FogFroxelGrid.MINIMUM_SLICES to
+         *        FogFroxelGrid.MAXIMUM_SLICES
          */
-        private void setPart(int part) {
-            GL20.glUniform1i(compositePartUniform, part);
-            GL20.glUniform1i(fallbackAllowedUniform, fallbackAllowed ? 1 : 0);
+        private void setSelfTestUniforms(int sliceCount) {
+            GL20.glUniform1i(selfTestUniform, 1);
+            GL20.glUniform1i(columnCountUniform, SELF_TEST_RAY_COUNT);
+            GL20.glUniform1i(rowCountUniform, 1);
+            GL20.glUniform1i(sliceCountUniform, sliceCount);
+            GL20.glUniform3fv(selfTestOffsetsUniform, selfTestOffsetBuffer);
         }
     }
 

@@ -55,8 +55,9 @@ public final class FogSettingsGameTests {
         checkNumberSetting(helper, SkySetting.FOG_SNOW_DECAY_LENGTH, "fogSnowDecayLength", 1.5, 0.25, 4.3);
         checkNumberSetting(helper, SkySetting.FOG_BLIZZARD_DECAY_LENGTH, "fogBlizzardDecayLength", 4.0, 0.25, 4.3);
         checkNumberSetting(helper, SkySetting.FOG_FIELD_RADIUS, "fogFieldRadius", 32.0, 12.0, 40.0);
-        checkNumberSetting(helper, SkySetting.FOG_RESOLUTION_DIVISOR, "fogResolutionDivisor", 2.0, 1.0, 4.0);
-        checkNumberSetting(helper, SkySetting.FOG_FALLBACK_CAP, "fogFallbackCap", 0.25, 0.0, 1.0);
+        checkNumberSetting(helper, SkySetting.FOG_FROXEL_DIVISOR, "fogFroxelDivisor", 8.0, 4.0, 16.0);
+        checkNumberSetting(helper, SkySetting.FOG_FROXEL_SLICES, "fogFroxelSlices", 64.0, 32.0, 64.0);
+        checkNumberSetting(helper, SkySetting.FOG_FROXEL_RANGE, "fogFroxelRange", 192.0, 64.0, 512.0);
         checkNumberSetting(helper, SkySetting.FOG_SNOW_STRUCTURE_SHARE, "fogSnowStructureShare", 0.5, 0.0, 1.0);
         checkNumberSetting(helper, SkySetting.FOG_BLIZZARD_STRUCTURE_SHARE, "fogBlizzardStructureShare", 0.75, 0.0, 1.0);
         checkNumberSetting(helper, SkySetting.FOG_STRUCTURE_COVERAGE, "fogStructureCoverage", 0.25, 0.05, 1.0);
@@ -74,8 +75,8 @@ public final class FogSettingsGameTests {
         SkySetting[] fogSettings = {SkySetting.FOG_ENABLED, SkySetting.FOG_SNOW_VISIBILITY,
                 SkySetting.FOG_BLIZZARD_VISIBILITY, SkySetting.FOG_HEIGHT_SCALE, SkySetting.FOG_LEAF_POROSITY,
                 SkySetting.FOG_FIELD_BUDGET_MICROS, SkySetting.FOG_SNOW_DECAY_LENGTH,
-                SkySetting.FOG_BLIZZARD_DECAY_LENGTH, SkySetting.FOG_FIELD_RADIUS, SkySetting.FOG_RESOLUTION_DIVISOR,
-                SkySetting.FOG_FALLBACK_CAP, SkySetting.FOG_SNOW_STRUCTURE_SHARE,
+                SkySetting.FOG_BLIZZARD_DECAY_LENGTH, SkySetting.FOG_FIELD_RADIUS, SkySetting.FOG_FROXEL_DIVISOR,
+                SkySetting.FOG_FROXEL_SLICES, SkySetting.FOG_FROXEL_RANGE, SkySetting.FOG_SNOW_STRUCTURE_SHARE,
                 SkySetting.FOG_BLIZZARD_STRUCTURE_SHARE, SkySetting.FOG_STRUCTURE_COVERAGE,
                 SkySetting.FOG_STRUCTURE_SIZE, SkySetting.FOG_STRUCTURE_STRETCH, SkySetting.FOG_STRUCTURE_EROSION,
                 SkySetting.FOG_STRUCTURE_RANGE, SkySetting.FOG_WIND_SCALE};

@@ -152,12 +152,14 @@ public enum SkySetting {
     FOG_FIELD_RADIUS("fogFieldRadius", "Distance in blocks around the eye within which the fog follows every block of "
             + "shelter. Beyond it, the fog follows the height of the highest block of each column. More costs GPU "
             + "time.", Rebuilds.NOTHING, 32.0, 12.0, 40.0),
-    FOG_RESOLUTION_DIVISOR("fogResolutionDivisor", "Divisor of the resolution that the fog is walked at, where 1 "
-            + "walks every pixel, 2 one pixel of each two by two block and 4 one of each four by four, and the "
-            + "others take their depth from the walked ones.", Rebuilds.NOTHING, 2.0, 1.0, 4.0),
-    FOG_FALLBACK_CAP("fogFallbackCap", "Share of the screen that may walk at full resolution where the fog of its "
-            + "neighbors disagrees, above which such pixels take the nearest neighbor's fog instead. Larger keeps "
-            + "the fog of thin geometry and costs GPU time.", Rebuilds.NOTHING, 0.25, 0.0, 1.0),
+    FOG_FROXEL_DIVISOR("fogFroxelDivisor", "Pixels per side of the columns that the weather fog is walked in. Larger "
+            + "costs less GPU time and blurs the fog of thin shelters; smaller costs more. The fog of open air stays "
+            + "exact at every value.", Rebuilds.NOTHING, 8.0, 4.0, 16.0),
+    FOG_FROXEL_SLICES("fogFroxelSlices", "Depth slices of the fog's grid from the eye out to fogFroxelRange, rounded "
+            + "to a multiple of 8. More keeps the fog's depth profile sharper through structures and costs a little "
+            + "GPU time.", Rebuilds.NOTHING, 64.0, 32.0, 64.0),
+    FOG_FROXEL_RANGE("fogFroxelRange", "Distance in blocks out to which the fog's grid is walked. Beyond it the fog "
+            + "counts as open air, and cover that far away is ignored.", Rebuilds.NOTHING, 192.0, 64.0, 512.0),
     FOG_SNOW_STRUCTURE_SHARE("fogSnowStructureShare", "Share of the fog of snowfall that gathers into moving "
             + "structures, with the rest spread thin as clear air between them. 0 draws fog of an even density, and "
             + "the mean visibility is the same at every share.", Rebuilds.NOTHING, 0.5, 0.0, 1.0),

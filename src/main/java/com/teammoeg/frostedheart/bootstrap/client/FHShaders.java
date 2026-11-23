@@ -71,12 +71,14 @@ public class FHShaders extends Shaders {
     private static Shader DIAMOND_DUST_VERTEX;
     private static Shader DIAMOND_DUST_FRAGMENT;
     private static boolean diamondDustUnloadOnReload;
-    private static Shader WEATHER_FOG;
-    private static boolean weatherFogUnloadOnReload;
-    private static Shader WEATHER_FOG_UPSAMPLE;
-    private static boolean weatherFogUpsampleUnloadOnReload;
     private static Shader WEATHER_FOG_SHARE;
     private static boolean weatherFogShareUnloadOnReload;
+    private static Shader WEATHER_FOG_INJECT;
+    private static boolean weatherFogInjectUnloadOnReload;
+    private static Shader WEATHER_FOG_INTEGRATE;
+    private static boolean weatherFogIntegrateUnloadOnReload;
+    private static Shader WEATHER_FOG_COMPOSITE;
+    private static boolean weatherFogCompositeUnloadOnReload;
     public static Shader getCalculatedSky() {
         if (CALCULATED_SKY == null) {
             runAndAddReloadListener(() -> CALCULATED_SKY = load(Shader.ShaderType.FRAGMENT, FHMain.rl("calculated_sky")));
@@ -211,63 +213,6 @@ public class FHShaders extends Shaders {
     }
 
     /**
-     * The fragment stage of the weather fog, weather_fog.glsl followed by snow_walk.glsl and weather_fog.fsh in one
-     * source, which is compiled on first use.
-     */
-    public static Shader getWeatherFog() {
-        if (!weatherFogUnloadOnReload) {
-            addReloadListener(FHShaders::unloadWeatherFog);
-            weatherFogUnloadOnReload = true;
-        }
-        if (WEATHER_FOG == null) {
-            String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
-                    + readShaderSource(FHMain.rl("shaders/snow_walk.glsl")) + "\n"
-                    + readShaderSource(FHMain.rl("shaders/weather_fog.fsh"));
-            WEATHER_FOG = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
-        }
-        return WEATHER_FOG;
-    }
-
-    /**
-     * Deletes the weather fog stage after a resource reload, so the next use compiles it from the new resources.
-     */
-    private static void unloadWeatherFog() {
-        if (WEATHER_FOG != null) {
-            WEATHER_FOG.deleteShader();
-            WEATHER_FOG = null;
-        }
-    }
-
-    /**
-     * The fragment stage of the composite of the weather fog, weather_fog.glsl followed by snow_walk.glsl and
-     * weather_fog_upsample.fsh in one source, which is compiled on first use.
-     */
-    public static Shader getWeatherFogUpsample() {
-        if (!weatherFogUpsampleUnloadOnReload) {
-            addReloadListener(FHShaders::unloadWeatherFogUpsample);
-            weatherFogUpsampleUnloadOnReload = true;
-        }
-        if (WEATHER_FOG_UPSAMPLE == null) {
-            String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
-                    + readShaderSource(FHMain.rl("shaders/snow_walk.glsl")) + "\n"
-                    + readShaderSource(FHMain.rl("shaders/weather_fog_upsample.fsh"));
-            WEATHER_FOG_UPSAMPLE = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
-        }
-        return WEATHER_FOG_UPSAMPLE;
-    }
-
-    /**
-     * Deletes the composite stage of the weather fog after a resource reload, so the next use compiles it from the new
-     * resources.
-     */
-    private static void unloadWeatherFogUpsample() {
-        if (WEATHER_FOG_UPSAMPLE != null) {
-            WEATHER_FOG_UPSAMPLE.deleteShader();
-            WEATHER_FOG_UPSAMPLE = null;
-        }
-    }
-
-    /**
      * The fragment stage of the pass that fills the share volume of the weather fog, weather_fog.glsl followed by
      * snow_walk.glsl and weather_fog_share.fsh in one source, which is compiled on first use.
      */
@@ -293,6 +238,92 @@ public class FHShaders extends Shaders {
         if (WEATHER_FOG_SHARE != null) {
             WEATHER_FOG_SHARE.deleteShader();
             WEATHER_FOG_SHARE = null;
+        }
+    }
+
+    /**
+     * The fragment stage of the injection of the froxel fog, weather_fog.glsl followed by snow_walk.glsl and
+     * weather_fog_inject.fsh in one source, which is compiled on first use.
+     */
+    public static Shader getWeatherFogInject() {
+        if (!weatherFogInjectUnloadOnReload) {
+            addReloadListener(FHShaders::unloadWeatherFogInject);
+            weatherFogInjectUnloadOnReload = true;
+        }
+        if (WEATHER_FOG_INJECT == null) {
+            String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/snow_walk.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/weather_fog_inject.fsh"));
+            WEATHER_FOG_INJECT = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
+        }
+        return WEATHER_FOG_INJECT;
+    }
+
+    /**
+     * Deletes the injection stage of the froxel fog after a resource reload, so the next use compiles it from the new
+     * resources.
+     */
+    private static void unloadWeatherFogInject() {
+        if (WEATHER_FOG_INJECT != null) {
+            WEATHER_FOG_INJECT.deleteShader();
+            WEATHER_FOG_INJECT = null;
+        }
+    }
+
+    /**
+     * The fragment stage of the integration of the froxel fog, weather_fog.glsl followed by weather_fog_integrate.fsh
+     * in one source, which is compiled on first use.
+     */
+    public static Shader getWeatherFogIntegrate() {
+        if (!weatherFogIntegrateUnloadOnReload) {
+            addReloadListener(FHShaders::unloadWeatherFogIntegrate);
+            weatherFogIntegrateUnloadOnReload = true;
+        }
+        if (WEATHER_FOG_INTEGRATE == null) {
+            String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/weather_fog_integrate.fsh"));
+            WEATHER_FOG_INTEGRATE = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
+        }
+        return WEATHER_FOG_INTEGRATE;
+    }
+
+    /**
+     * Deletes the integration stage of the froxel fog after a resource reload, so the next use compiles it from the new
+     * resources.
+     */
+    private static void unloadWeatherFogIntegrate() {
+        if (WEATHER_FOG_INTEGRATE != null) {
+            WEATHER_FOG_INTEGRATE.deleteShader();
+            WEATHER_FOG_INTEGRATE = null;
+        }
+    }
+
+    /**
+     * The fragment stage of the composite of the froxel fog, weather_fog.glsl followed by snow_walk.glsl and
+     * weather_fog_composite.fsh in one source, which is compiled on first use.
+     */
+    public static Shader getWeatherFogComposite() {
+        if (!weatherFogCompositeUnloadOnReload) {
+            addReloadListener(FHShaders::unloadWeatherFogComposite);
+            weatherFogCompositeUnloadOnReload = true;
+        }
+        if (WEATHER_FOG_COMPOSITE == null) {
+            String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/snow_walk.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/weather_fog_composite.fsh"));
+            WEATHER_FOG_COMPOSITE = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
+        }
+        return WEATHER_FOG_COMPOSITE;
+    }
+
+    /**
+     * Deletes the composite stage of the froxel fog after a resource reload, so the next use compiles it from the new
+     * resources.
+     */
+    private static void unloadWeatherFogComposite() {
+        if (WEATHER_FOG_COMPOSITE != null) {
+            WEATHER_FOG_COMPOSITE.deleteShader();
+            WEATHER_FOG_COMPOSITE = null;
         }
     }
 

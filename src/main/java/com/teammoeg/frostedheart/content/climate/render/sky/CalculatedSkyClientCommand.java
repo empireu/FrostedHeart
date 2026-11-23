@@ -83,10 +83,12 @@ public final class CalculatedSkyClientCommand {
                 .then(literal("fog").executes(CalculatedSkyClientCommand::fog)
                         .then(literal("verify").executes(CalculatedSkyClientCommand::verifyFogTextures))
                         .then(literal("selftest").executes(CalculatedSkyClientCommand::fogSelfTest))
+                        .then(literal("passes").executes(CalculatedSkyClientCommand::fogPasses)
+                                .then(literal("reset").executes(CalculatedSkyClientCommand::resetFogPasses)))
                         .then(literal("debug").then(fogDebugMode("off")).then(fogDebugMode("field"))
-                                .then(fogDebugMode("cells")).then(fogDebugMode("noregion"))
+                                .then(fogDebugMode("froxel")).then(fogDebugMode("noregion"))
                                 .then(fogDebugMode("nofar")).then(fogDebugMode("analytic"))
-                                .then(fogDebugMode("transmittance")).then(fogDebugMode("fallback"))
+                                .then(fogDebugMode("transmittance"))
                                 .then(fogDebugMode("structure"))))
                 .then(set);
         CalculatedSkyScreenshots.addCommands(command);
@@ -218,6 +220,18 @@ public final class CalculatedSkyClientCommand {
         for (String line : WeatherFogRenderer.selfTest()) {
             send(context, line);
         }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int fogPasses(CommandContext<CommandSourceStack> context) {
+        send(context, WeatherFogRenderer.describePasses());
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int resetFogPasses(CommandContext<CommandSourceStack> context) {
+        WeatherFogRenderer.resetPassTimes();
+        send(context, "Fog pass times reset: the following lines measure only the passes of the frames drawn from "
+                + "now on");
         return Command.SINGLE_SUCCESS;
     }
 

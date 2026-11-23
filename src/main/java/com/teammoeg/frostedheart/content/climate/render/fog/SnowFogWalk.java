@@ -20,23 +20,21 @@
 package com.teammoeg.frostedheart.content.climate.render.fog;
 
 /**
- * The walk of the fog along the segment from the eye to a scene point, through the snow field near the eye and through
- * the far heights of the columns beyond it. snow_walk.glsl walks the same segment from the same inputs on the GPU, so
- * that the two can be compared.
+ * The CPU twin of one piece of a column ray, from a start distance to an end distance along a unit direction, through
+ * the snow field near the eye and through the far heights of the columns beyond it, which snow_walk.glsl walks from the
+ * same inputs on the GPU so that the two can be compared. The whole ray sum of opticalDepth, the column excesses of
+ * columnExcesses and the sky depth of skyOpticalDepth are built on that piece walk.
  * The extinction of the fog at a point is the height fog of HeightFog times a snow share in the range 0 to 1, so the
  * optical depth of the segment is the integral of that product. The walk splits the segment into parts on which the
  * share is constant and adds the closed form of HeightFog.opticalDepth at the two ends of each part, which is exact
  * along one ray from the eye and takes no samples, so nothing here samples or crawls.
- * The share follows three rules. Inside the region, the box of half width radius - REGION_MARGIN around the eye, it is
+ * The share follows two rules. Inside the region, the box of half width radius - REGION_MARGIN around the eye, it is
  * the share of the field's cell, blended toward the height share of its column over the last CROSSFADE_WIDTH blocks
- * before the region's edge. Beyond the region it is 1, except for the last stretch of the segment when its scene point
- * lies under cover, which the backward walk over the columns under the segment finds and which gets 0.
+ * before the region's edge. Beyond the region the segment is walked in the world-aligned cells of FAR_CELL blocks,
+ * whose share is the height share of the column under the cell's middle, which is 1 for a column of unknown height.
  * A cell's share is the field's distance byte through the table of buildTable, or its column's height share when the
  * cell has no field value.
- * While the structures of FogStructure are on, each part of the segment is multiplied by their density at its middle.
- * The parts inside the region are the cells, and the far part up to the range of the structures is walked through a
- * coarser grid of COARSE_CELL blocks, which keeps its boundaries fixed in the world. Beyond the range the density is 1,
- * which the rest of the far part takes in closed form.
+ * While the structures of FogStructure are on, each part is multiplied by their density at its middle.
  * The parts are computed on cell offsets from the eye's block, in doubles, so that no world position passes through a
  * float. Not thread safe, and it allocates nothing after the constructor.
  */
@@ -65,20 +63,6 @@ public final class SnowFogWalk {
      */
     public static final double CROSSFADE_WIDTH = 8.0;
     /**
-     * The most cells the cell walk visits. A segment inside a region of half width 38 crosses at most 3 * 39 faces, so
-     * the cap only guards against float trouble, and the rest of the segment then counts as open.
-     */
-    public static final int MAXIMUM_CELL_STEPS = 128;
-    /**
-     * The most columns the backward walk visits, past which the rest of the segment counts as open.
-     */
-    public static final int FAR_WALK_COLUMNS = 32;
-    /**
-     * The horizontal length in blocks below which the segment counts as staying in the column of its scene point,
-     * which keeps the backward walk off a division by a horizontal offset of nearly 0.
-     */
-    public static final double MINIMUM_HORIZONTAL_LENGTH = 1.0e-4;
-    /**
      * The shortest radius in blocks that setRadius takes.
      */
     public static final double MINIMUM_RADIUS = 12.0;
@@ -87,19 +71,25 @@ public final class SnowFogWalk {
      */
     public static final double MAXIMUM_RADIUS = 40.0;
     /**
-     * The side in blocks of the world-aligned cells that the far part of the segment is walked in while the structures
-     * are on, whose parts stay fixed in the world while the eye moves.
+     * The side in blocks of the world-aligned cells that the far part of a piece of the segment is walked in, whose
+     * parts stay fixed in the world while the eye moves.
      */
-    public static final double COARSE_CELL = 4.0;
+    public static final double FAR_CELL = 2.0;
     /**
-     * The most parts that the coarse walk visits, after which the rest of the far part counts as the mean fog.
+     * The most cells that each part of a piece of the segment visits, after which the rest of the piece counts as the
+     * open fog at the density 1.
      */
-    public static final int COARSE_MAXIMUM_STEPS = 64;
+    public static final int PIECE_MAXIMUM_STEPS = 16;
 
     /**
      * The radius in blocks of the region before setRadius, which is the default of fogFieldRadius.
      */
     private static final double DEFAULT_RADIUS = 32.0;
+    /**
+     * The most cells that one part of a whole ray visits, which is far beyond any scene point of a frame, so that a
+     * distance beyond that many cells stops at the open fog instead of running on.
+     */
+    private static final int WHOLE_MAXIMUM_STEPS = 1 << 16;
     /**
      * A boundary past the end of the segment, for an axis the segment never leaves its cell in.
      */
@@ -128,16 +118,10 @@ public final class SnowFogWalk {
     private double halfWidth = DEFAULT_RADIUS - REGION_MARGIN;
     private double fieldFade = 1.0;
     private FogStructure structure;
-    private int lastCellSteps;
-    private int lastColumnSteps;
-    private int lastCoarseSteps;
-    private double lastRegionEnd = 1.0;
-    private double lastFarStop = 1.0;
-    /**
-     * The optical depth from the eye to the end of the region of the last cell walk, which the far part subtracts so
-     * that the walk calls tauAt once per part.
-     */
-    private double regionEndDepth;
+    private int lastNearSteps;
+    private boolean lastNearCapped;
+    private int lastFarSteps;
+    private boolean lastFarCapped;
 
     /**
      * Creates a walk that has no field, no shown box and no heights, whose table is the one of
@@ -310,10 +294,10 @@ public final class SnowFogWalk {
      * depths for the fog of setFog, at most HeightFog.MAXIMUM_OPTICAL_DEPTH.
      * The segment runs from the parameter 0 at the eye to 1 at the scene point, and its optical depth from the eye up
      * to the parameter s is HeightFog.opticalDepth(eyeExtinction, s * |offset|, s * offsetY, heightScale). The region
-     * part is walked cell by cell and the far part is walked through the grid of the structures, and each part adds its
+     * part is walked cell by cell and the far part through the far cells of FAR_CELL blocks, and each part adds its
      * share times the density of the structures at its middle times the closed form of the optical depth between its
      * ends.
-     * The five last getters record what this call walked. Allocates nothing.
+     * The four last getters record what this call walked. Allocates nothing.
      * @param offsetX the offset of the scene point from the eye in x, in blocks
      * @param offsetY the offset of the scene point from the eye in y, in blocks
      * @param offsetZ the offset of the scene point from the eye in z, in blocks
@@ -321,11 +305,7 @@ public final class SnowFogWalk {
      *         length is 0, or when the extinction at the eye is not positive
      */
     public double opticalDepth(double offsetX, double offsetY, double offsetZ) {
-        lastCellSteps = 0;
-        lastColumnSteps = 0;
-        lastCoarseSteps = 0;
-        lastRegionEnd = 1.0;
-        lastFarStop = 1.0;
+        resetLastWalk();
         if (!(eyeExtinction > 0.0) || !Double.isFinite(offsetX) || !Double.isFinite(offsetY)
                 || !Double.isFinite(offsetZ)) {
             return 0.0;
@@ -334,18 +314,10 @@ public final class SnowFogWalk {
         if (!(segmentLength > 0.0)) {
             return 0.0;
         }
-        double largestOffset = Math.max(Math.abs(offsetX), Math.max(Math.abs(offsetY), Math.abs(offsetZ)));
-        double regionEnd = Math.min(1.0, halfWidth / largestOffset);
-        lastRegionEnd = regionEnd;
-        double regionDepth = walkCells(offsetX, offsetY, offsetZ, segmentLength, regionEnd);
-        double farStop = 1.0;
-        double farDepth = 0.0;
-        if (regionEnd < 1.0) {
-            farStop = findFarStop(offsetX, offsetY, offsetZ, regionEnd);
-            farDepth = farPartDepth(offsetX, offsetY, offsetZ, segmentLength, regionEnd, farStop);
-        }
-        lastFarStop = farStop;
-        double total = regionDepth + farDepth;
+        double unitX = offsetX / segmentLength;
+        double unitY = offsetY / segmentLength;
+        double unitZ = offsetZ / segmentLength;
+        double total = walkPiece(unitX, unitY, unitZ, 0.0, segmentLength, WHOLE_MAXIMUM_STEPS);
         if (!(total > 0.0)) {
             return 0.0;
         }
@@ -354,11 +326,11 @@ public final class SnowFogWalk {
 
     /**
      * The optical depth of the snow fog from the eye to infinity along a direction, which is the walk to walkDistance
-     * and the tail past it while the walk ends in the open. The walk follows the ray of the unit direction out to the
-     * point at walkDistance, with the cells, the far columns, the structures and the coarse walk of a scene point there,
-     * and the tail is the height fog from that point to infinity at the snow share 1 and the density 1, which the
-     * structures leave past their range. The five last getters record what that walk walked, and a direction or a
-     * distance that the guards reject leaves them as a zero-length opticalDepth call does. Allocates nothing.
+     * and the tail past it. The walk follows the ray of the unit direction out to the point at walkDistance, with the
+     * cells and the far cells of a scene point there, and the tail is the height fog from that point to infinity at the
+     * snow share 1 and the density 1, which the structures leave past their range. The sum is clamped to
+     * HeightFog.MAXIMUM_OPTICAL_DEPTH. The four last getters record what that walk walked, and a direction or a distance
+     * that the guards reject leaves them as a zero-length opticalDepth call does. Allocates nothing.
      * @param directionX the x of the direction of the ray, which need not be a unit vector
      * @param directionY the y of the direction of the ray, whose sign decides whether the ray leaves the fog
      * @param directionZ the z of the direction of the ray
@@ -377,9 +349,6 @@ public final class SnowFogWalk {
         double unitY = directionY / directionLength;
         double unitZ = directionZ / directionLength;
         double walkedDepth = opticalDepth(unitX * walkDistance, unitY * walkDistance, unitZ * walkDistance);
-        if (lastFarStop < 1.0) {
-            return walkedDepth;
-        }
         double tailDepth = HeightFog.skyTailOpticalDepth(eyeExtinction, walkDistance, unitY, heightScale);
         double totalDepth = walkedDepth + tailDepth;
         if (!(totalDepth > 0.0)) {
@@ -389,117 +358,87 @@ public final class SnowFogWalk {
     }
 
     /**
-     * The optical depth of the far part of the segment, from the region's end to where the covered stretch begins, in
-     * optical depths. Without the structures it is the closed form of the height fog between the two. With them, the
-     * part up to the range of the structures is walked through their grid, and the rest keeps the mean density in closed
-     * form. Allocates nothing.
+     * The optical depth of the piece of the ray (given by any non-zero direction) between two distances along it, in
+     * optical depths, from the near part's cell walk inside the region and the far part's cells of FAR_CELL blocks
+     * beyond it, each part capped at PIECE_MAXIMUM_STEPS cells with the rest of the piece at share 1 and density 1. The
+     * result is clamped to HeightFog.MAXIMUM_OPTICAL_DEPTH.
+     * Guards: a direction or distance that is not finite, a direction of length 0, a start that is not below the end, or
+     * an extinction that is not positive give 0; a start below 0 counts as 0. The four last getters record the parts
+     * this call walked, and a rejected call leaves them at 0. Allocates nothing.
+     * @param directionX the x of the direction of the ray, which need not be a unit vector
+     * @param directionY the y of the direction of the ray, whose sign decides whether the piece rises or falls
+     * @param directionZ the z of the direction of the ray
+     * @param startDistance the distance in blocks from the eye at which the piece begins, where a negative one counts as
+     *        0
+     * @param endDistance the distance in blocks from the eye at which the piece ends, above the start
+     * @return the optical depth of the piece, from 0 to HeightFog.MAXIMUM_OPTICAL_DEPTH
      */
-    private double farPartDepth(double offsetX, double offsetY, double offsetZ, double segmentLength,
-            double regionEnd, double farStop) {
-        FogStructure currentStructure = structure;
-        boolean structureOn = currentStructure != null && currentStructure.isOn();
-        if (!structureOn) {
-            return Math.max(0.0, tauAt(farStop, segmentLength, offsetY) - regionEndDepth);
+    public double pieceOpticalDepth(double directionX, double directionY, double directionZ, double startDistance,
+            double endDistance) {
+        resetLastWalk();
+        if (!(eyeExtinction > 0.0) || !Double.isFinite(startDistance) || !Double.isFinite(endDistance)
+                || !(startDistance < endDistance)) {
+            return 0.0;
         }
-        double coarseEnd = Math.min(farStop, Math.min(1.0, currentStructure.range() / segmentLength));
-        if (!(coarseEnd > regionEnd)) {
-            return Math.max(0.0, tauAt(farStop, segmentLength, offsetY) - regionEndDepth);
+        double directionLength = Math.sqrt(directionX * directionX + directionY * directionY
+                + directionZ * directionZ);
+        if (!(directionLength > 0.0) || !Double.isFinite(directionLength)) {
+            return 0.0;
         }
-        double depth = coarseDepth(offsetX, offsetY, offsetZ, segmentLength, regionEnd, coarseEnd);
-        depth += Math.max(0.0, tauAt(farStop, segmentLength, offsetY) - tauAt(coarseEnd, segmentLength, offsetY));
-        return depth;
+        double unitX = directionX / directionLength;
+        double unitY = directionY / directionLength;
+        double unitZ = directionZ / directionLength;
+        double pieceDepth = walkPiece(unitX, unitY, unitZ, Math.max(startDistance, 0.0), endDistance,
+                PIECE_MAXIMUM_STEPS);
+        if (!(pieceDepth > 0.0)) {
+            return 0.0;
+        }
+        return Math.min(HeightFog.MAXIMUM_OPTICAL_DEPTH, pieceDepth);
     }
 
     /**
-     * The optical depth of the structures along the part of the segment from the start to the end parameter, which is
-     * walked through the world-aligned grid of COARSE_CELL blocks, so that its parts stay fixed in the world while the
-     * eye moves. Each part adds the density at its middle times the closed form of the optical depth between its ends.
-     * A walk that runs out of steps adds the rest at the mean density. Counts its parts, allocates nothing.
+     * The excesses that the integrate pass mirrors: walks the pieces between consecutive distances (the first from 0 to
+     * boundaryDistances[0]) along the direction and fills excesses[k] with the running sum of the pieces up to
+     * boundaryDistances[k] minus HeightFog.opticalDepth(eyeExtinction, boundaryDistances[k],
+     * boundaryDistances[k] * unitDirectionY, heightScale), for k from 0 to boundaryCount - 1. The distance entries must
+     * be positive, strictly increasing and finite. A direction or an extinction the guards of pieceOpticalDepth reject
+     * fills every excess with 0. The four last getters record the last piece walked. Allocates nothing.
+     * @param directionX the x of the direction of the ray, which need not be a unit vector
+     * @param directionY the y of the direction of the ray, whose sign decides whether the pieces rise or fall
+     * @param directionZ the z of the direction of the ray
+     * @param boundaryDistances the distances in blocks of the boundaries 1 to boundaryCount, which hold at least
+     *        boundaryCount entries
+     * @param boundaryCount the boundaries to fill, from 0 up
+     * @param excesses the excesses of those boundaries in optical depths, which hold at least boundaryCount entries
+     * @throws IllegalArgumentException when the boundary count is negative or an array holds fewer entries
      */
-    private double coarseDepth(double offsetX, double offsetY, double offsetZ, double segmentLength,
-            double startParameter, double endParameter) {
-        double localX = (eyeBlockX & 3) + eyeFractionX;
-        double localY = (eyeBlockY & 3) + eyeFractionY;
-        double localZ = (eyeBlockZ & 3) + eyeFractionZ;
-        double startX = localX + startParameter * offsetX;
-        double startY = localY + startParameter * offsetY;
-        double startZ = localZ + startParameter * offsetZ;
-        int cellX = (int) Math.floor(startX / COARSE_CELL);
-        int cellY = (int) Math.floor(startY / COARSE_CELL);
-        int cellZ = (int) Math.floor(startZ / COARSE_CELL);
-        int stepX = 0;
-        int stepY = 0;
-        int stepZ = 0;
-        double nextBoundaryX = NO_BOUNDARY;
-        double nextBoundaryY = NO_BOUNDARY;
-        double nextBoundaryZ = NO_BOUNDARY;
-        double boundaryStepX = NO_BOUNDARY;
-        double boundaryStepY = NO_BOUNDARY;
-        double boundaryStepZ = NO_BOUNDARY;
-        if (offsetX > 0.0) {
-            stepX = 1;
-            nextBoundaryX = startParameter + ((cellX + 1) * COARSE_CELL - startX) / offsetX;
-            boundaryStepX = COARSE_CELL / offsetX;
-        } else if (offsetX < 0.0) {
-            stepX = -1;
-            nextBoundaryX = startParameter + (cellX * COARSE_CELL - startX) / offsetX;
-            boundaryStepX = COARSE_CELL / -offsetX;
+    public void columnExcesses(double directionX, double directionY, double directionZ, double[] boundaryDistances,
+            int boundaryCount, double[] excesses) {
+        if (boundaryCount < 0 || boundaryDistances.length < boundaryCount || excesses.length < boundaryCount) {
+            throw new IllegalArgumentException("The column walk of " + boundaryCount + " boundaries needs "
+                    + boundaryCount + " distances and excesses but has " + boundaryDistances.length + " and "
+                    + excesses.length);
         }
-        if (offsetY > 0.0) {
-            stepY = 1;
-            nextBoundaryY = startParameter + ((cellY + 1) * COARSE_CELL - startY) / offsetY;
-            boundaryStepY = COARSE_CELL / offsetY;
-        } else if (offsetY < 0.0) {
-            stepY = -1;
-            nextBoundaryY = startParameter + (cellY * COARSE_CELL - startY) / offsetY;
-            boundaryStepY = COARSE_CELL / -offsetY;
-        }
-        if (offsetZ > 0.0) {
-            stepZ = 1;
-            nextBoundaryZ = startParameter + ((cellZ + 1) * COARSE_CELL - startZ) / offsetZ;
-            boundaryStepZ = COARSE_CELL / offsetZ;
-        } else if (offsetZ < 0.0) {
-            stepZ = -1;
-            nextBoundaryZ = startParameter + (cellZ * COARSE_CELL - startZ) / offsetZ;
-            boundaryStepZ = COARSE_CELL / -offsetZ;
-        }
-        FogStructure currentStructure = structure;
-        double depth = 0.0;
-        double enterDepth = tauAt(startParameter, segmentLength, offsetY);
-        double enter = startParameter;
-        boolean reachedEnd = false;
-        for (int coarseStep = 0; coarseStep < COARSE_MAXIMUM_STEPS; coarseStep++) {
-            lastCoarseSteps = coarseStep + 1;
-            double exit = Math.min(Math.min(nextBoundaryX, nextBoundaryY), Math.min(nextBoundaryZ, endParameter));
-            double exitDepth = tauAt(exit, segmentLength, offsetY);
-            double middle = (enter + exit) * 0.5;
-            depth += currentStructure.densityAt(middle * offsetX, middle * offsetY, middle * offsetZ)
-                    * Math.max(0.0, exitDepth - enterDepth);
-            enter = exit;
-            enterDepth = exitDepth;
-            if (!(exit < endParameter)) {
-                reachedEnd = true;
-                break;
+        resetLastWalk();
+        double directionLength = Math.sqrt(directionX * directionX + directionY * directionY
+                + directionZ * directionZ);
+        if (!(eyeExtinction > 0.0) || !(directionLength > 0.0) || !Double.isFinite(directionLength)) {
+            for (int boundary = 0; boundary < boundaryCount; boundary++) {
+                excesses[boundary] = 0.0;
             }
-            double smallestBoundary = Math.min(nextBoundaryX, Math.min(nextBoundaryY, nextBoundaryZ));
-            // Ties step every tied axis, as the cell walk does.
-            if (nextBoundaryX <= smallestBoundary) {
-                cellX += stepX;
-                nextBoundaryX += boundaryStepX;
-            }
-            if (nextBoundaryY <= smallestBoundary) {
-                cellY += stepY;
-                nextBoundaryY += boundaryStepY;
-            }
-            if (nextBoundaryZ <= smallestBoundary) {
-                cellZ += stepZ;
-                nextBoundaryZ += boundaryStepZ;
-            }
+            return;
         }
-        if (!reachedEnd) {
-            depth += Math.max(0.0, tauAt(endParameter, segmentLength, offsetY) - enterDepth);
+        double unitX = directionX / directionLength;
+        double unitY = directionY / directionLength;
+        double unitZ = directionZ / directionLength;
+        double runningDepth = 0.0;
+        double previousDistance = 0.0;
+        for (int boundary = 0; boundary < boundaryCount; boundary++) {
+            double boundaryDistance = boundaryDistances[boundary];
+            runningDepth += walkPiece(unitX, unitY, unitZ, previousDistance, boundaryDistance, PIECE_MAXIMUM_STEPS);
+            previousDistance = boundaryDistance;
+            excesses[boundary] = runningDepth - tauAt(boundaryDistance, unitY);
         }
-        return depth;
     }
 
     /**
@@ -559,41 +498,6 @@ public final class SnowFogWalk {
     }
 
     /**
-     * The cells that the cell walk of the last opticalDepth visited, which is the number of parts it summed.
-     * @return the cells walked, from 0 to MAXIMUM_CELL_STEPS
-     */
-    public int lastCellSteps() {
-        return lastCellSteps;
-    }
-
-    /**
-     * The columns that the backward walk of the last opticalDepth visited, which is 0 when its scene point stands in
-     * the open.
-     * @return the columns walked, from 0 to FAR_WALK_COLUMNS
-     */
-    public int lastColumnSteps() {
-        return lastColumnSteps;
-    }
-
-    /**
-     * Where the region part of the last opticalDepth ended on its segment.
-     * @return the parameter of the segment's end, from 0 to 1
-     */
-    public double lastRegionEnd() {
-        return lastRegionEnd;
-    }
-
-    /**
-     * Where the covered stretch at the end of the last opticalDepth's segment begins. The stretch from it to the end of
-     * the segment takes no fog, and the far part before it takes the fog of the open air.
-     * @return the parameter of the segment, from the region's end to 1, which is 1 when there is no far part or the
-     *         scene point stands in the open
-     */
-    public double lastFarStop() {
-        return lastFarStop;
-    }
-
-    /**
      * Keeps the fog structure that the walk reads, which it does not copy. A null structure turns the structures off,
      * and then every depth stays the depth of the fog without them.
      * @param structure the structure that shapes the fog, or null
@@ -603,23 +507,92 @@ public final class SnowFogWalk {
     }
 
     /**
-     * The parts that the coarse walk of the last opticalDepth visited, which is 0 while the structures are off or when
-     * the segment ends before the far part begins.
-     * @return the parts walked, from 0 to COARSE_MAXIMUM_STEPS
+     * The cells that the near part of the last walk visited, which is 0 when the walk began past the region.
+     * @return the cells walked, from 0 up, at most PIECE_MAXIMUM_STEPS for a piece and WHOLE_MAXIMUM_STEPS for the
+     *         whole ray, whose region crosses at most three cells per block of the radius
      */
-    public int lastCoarseSteps() {
-        return lastCoarseSteps;
+    public int lastNearSteps() {
+        return lastNearSteps;
     }
 
     /**
-     * Walks the part of the segment inside the region cell by cell, adding the share of each cell times the density of
-     * the structures at its middle times the optical depth between its two ends, and counts the cells. A walk that runs
-     * out of steps counts the rest of the region as open, which errs toward fog.
+     * Whether the near part of the last piece walk ran out of its PIECE_MAXIMUM_STEPS cells, after which the rest of
+     * the piece counts as the open fog at the density 1.
+     * @return true when the near part was capped
      */
-    private double walkCells(double offsetX, double offsetY, double offsetZ, double segmentLength, double regionEnd) {
-        int cellX = 0;
-        int cellY = 0;
-        int cellZ = 0;
+    public boolean lastNearCapped() {
+        return lastNearCapped;
+    }
+
+    /**
+     * The cells that the far part of the last walk visited, which is 0 when the walk ended inside the region.
+     * @return the cells walked, from 0 up, at most PIECE_MAXIMUM_STEPS for a piece and however many far cells of
+     *         FAR_CELL blocks the whole ray crosses
+     */
+    public int lastFarSteps() {
+        return lastFarSteps;
+    }
+
+    /**
+     * Whether the far part of the last piece walk ran out of its PIECE_MAXIMUM_STEPS cells, after which the rest of the
+     * piece counts as the open fog at the density 1.
+     * @return true when the far part was capped
+     */
+    public boolean lastFarCapped() {
+        return lastFarCapped;
+    }
+
+    /**
+     * Clears the four last values of the walks, which every walk and every rejected call starts with.
+     */
+    private void resetLastWalk() {
+        lastNearSteps = 0;
+        lastNearCapped = false;
+        lastFarSteps = 0;
+        lastFarCapped = false;
+    }
+
+    /**
+     * The optical depth of one piece of the ray of a unit direction from the start to the end distance, which is the
+     * near cells inside the region plus the far cells of FAR_CELL blocks beyond it. Each part visits at most
+     * maximumSteps cells, and the rest of a part that runs out of them counts as the open fog at the share 1 and the
+     * density 1. Records the four last values of the piece. Allocates nothing.
+     */
+    private double walkPiece(double unitX, double unitY, double unitZ, double startDistance, double endDistance,
+            int maximumSteps) {
+        resetLastWalk();
+        double largestComponent = Math.max(Math.abs(unitX), Math.max(Math.abs(unitY), Math.abs(unitZ)));
+        if (!(largestComponent > 0.0)) {
+            return 0.0;
+        }
+        double exitDistance = halfWidth / largestComponent;
+        double depth = 0.0;
+        double nearStart = Math.max(startDistance, 0.0);
+        double nearEnd = Math.min(endDistance, exitDistance);
+        if (nearEnd > nearStart) {
+            depth += walkNearCells(unitX, unitY, unitZ, nearStart, nearEnd, maximumSteps);
+        }
+        double farStart = Math.max(startDistance, exitDistance);
+        if (endDistance > farStart) {
+            depth += walkFarCells(unitX, unitY, unitZ, farStart, endDistance, maximumSteps);
+        }
+        return depth;
+    }
+
+    /**
+     * The optical depth of the stretch of the ray inside the region, cell by cell from the cell that holds the start
+     * distance. Each cell adds its share times the density of the structures at the middle of the part times the closed
+     * form between the two ends of the part, and the rest after maximumSteps cells counts as the open fog at the share
+     * 1 and the density 1. Records the near cells and their cap. Allocates nothing.
+     */
+    private double walkNearCells(double unitX, double unitY, double unitZ, double startDistance, double endDistance,
+            int maximumSteps) {
+        double startX = eyeFractionX + unitX * startDistance;
+        double startY = eyeFractionY + unitY * startDistance;
+        double startZ = eyeFractionZ + unitZ * startDistance;
+        int cellX = (int) Math.floor(startX);
+        int cellY = (int) Math.floor(startY);
+        int cellZ = (int) Math.floor(startZ);
         int stepX = 0;
         int stepY = 0;
         int stepZ = 0;
@@ -629,54 +602,55 @@ public final class SnowFogWalk {
         double boundaryStepX = NO_BOUNDARY;
         double boundaryStepY = NO_BOUNDARY;
         double boundaryStepZ = NO_BOUNDARY;
-        if (offsetX > 0.0) {
+        if (unitX > 0.0) {
             stepX = 1;
-            nextBoundaryX = (1.0 - eyeFractionX) / offsetX;
-            boundaryStepX = 1.0 / offsetX;
-        } else if (offsetX < 0.0) {
+            nextBoundaryX = startDistance + (cellX + 1 - startX) / unitX;
+            boundaryStepX = 1.0 / unitX;
+        } else if (unitX < 0.0) {
             stepX = -1;
-            nextBoundaryX = eyeFractionX / -offsetX;
-            boundaryStepX = 1.0 / -offsetX;
+            nextBoundaryX = startDistance + (cellX - startX) / unitX;
+            boundaryStepX = 1.0 / -unitX;
         }
-        if (offsetY > 0.0) {
+        if (unitY > 0.0) {
             stepY = 1;
-            nextBoundaryY = (1.0 - eyeFractionY) / offsetY;
-            boundaryStepY = 1.0 / offsetY;
-        } else if (offsetY < 0.0) {
+            nextBoundaryY = startDistance + (cellY + 1 - startY) / unitY;
+            boundaryStepY = 1.0 / unitY;
+        } else if (unitY < 0.0) {
             stepY = -1;
-            nextBoundaryY = eyeFractionY / -offsetY;
-            boundaryStepY = 1.0 / -offsetY;
+            nextBoundaryY = startDistance + (cellY - startY) / unitY;
+            boundaryStepY = 1.0 / -unitY;
         }
-        if (offsetZ > 0.0) {
+        if (unitZ > 0.0) {
             stepZ = 1;
-            nextBoundaryZ = (1.0 - eyeFractionZ) / offsetZ;
-            boundaryStepZ = 1.0 / offsetZ;
-        } else if (offsetZ < 0.0) {
+            nextBoundaryZ = startDistance + (cellZ + 1 - startZ) / unitZ;
+            boundaryStepZ = 1.0 / unitZ;
+        } else if (unitZ < 0.0) {
             stepZ = -1;
-            nextBoundaryZ = eyeFractionZ / -offsetZ;
-            boundaryStepZ = 1.0 / -offsetZ;
+            nextBoundaryZ = startDistance + (cellZ - startZ) / unitZ;
+            boundaryStepZ = 1.0 / -unitZ;
         }
-        double depth = 0.0;
-        double enterDepth = 0.0;
-        double enter = 0.0;
-        boolean reachedRegionEnd = false;
         FogStructure currentStructure = structure;
         boolean structureOn = currentStructure != null && currentStructure.isOn();
-        for (int cellStep = 0; cellStep < MAXIMUM_CELL_STEPS; cellStep++) {
-            lastCellSteps = cellStep + 1;
-            double exit = Math.min(Math.min(nextBoundaryX, nextBoundaryY), Math.min(nextBoundaryZ, regionEnd));
-            double exitDepth = tauAt(exit, segmentLength, offsetY);
+        double depth = 0.0;
+        double enter = startDistance;
+        double enterDepth = tauAt(enter, unitY);
+        boolean reachedEnd = false;
+        int cellsWalked = 0;
+        for (int cellStep = 0; cellStep < maximumSteps; cellStep++) {
+            cellsWalked = cellStep + 1;
+            double exit = Math.min(Math.min(nextBoundaryX, nextBoundaryY), Math.min(nextBoundaryZ, endDistance));
+            double exitDepth = tauAt(exit, unitY);
             double share = cellShare(cellX, cellY, cellZ);
             double partDepth = Math.max(0.0, exitDepth - enterDepth);
             if (structureOn && share > 0.0) {
                 double middle = (enter + exit) * 0.5;
-                partDepth *= currentStructure.densityAt(middle * offsetX, middle * offsetY, middle * offsetZ);
+                partDepth *= currentStructure.densityAt(middle * unitX, middle * unitY, middle * unitZ);
             }
             depth += share * partDepth;
-            enterDepth = exitDepth;
             enter = exit;
-            if (!(exit < regionEnd)) {
-                reachedRegionEnd = true;
+            enterDepth = exitDepth;
+            if (!(exit < endDistance)) {
+                reachedEnd = true;
                 break;
             }
             double smallestBoundary = Math.min(nextBoundaryX, Math.min(nextBoundaryY, nextBoundaryZ));
@@ -694,108 +668,115 @@ public final class SnowFogWalk {
                 nextBoundaryZ += boundaryStepZ;
             }
         }
-        if (!reachedRegionEnd) {
-            double endDepth = tauAt(regionEnd, segmentLength, offsetY);
-            depth += Math.max(0.0, endDepth - enterDepth);
-            enterDepth = endDepth;
+        if (!reachedEnd) {
+            depth += Math.max(0.0, tauAt(endDistance, unitY) - enterDepth);
         }
-        regionEndDepth = enterDepth;
+        lastNearSteps = cellsWalked;
+        lastNearCapped = !reachedEnd;
         return depth;
     }
 
     /**
-     * Finds where the covered stretch at the end of the segment begins, by walking the columns under the segment's
-     * horizontal projection backward from the scene point toward the eye, and counts them. The walk stops at the first
-     * column that leaves the cover, at the height the segment crosses in a column it descends in, at the region's edge,
-     * or at the last column it may visit, after which the rest of the segment counts as open.
+     * The optical depth of the stretch of the ray beyond the region, cell by cell through the world-aligned grid of
+     * FAR_CELL blocks from the cell that holds the start distance. A cell adds the height share of the column under its
+     * middle times the density of the structures at the middle of the part times the closed form between the two ends
+     * of the part, which is nothing under cover, and the rest after maximumSteps cells counts as the open fog at the
+     * share 1 and the density 1. Records the far cells and their cap. Allocates nothing.
      */
-    private double findFarStop(double offsetX, double offsetY, double offsetZ, double regionEnd) {
-        int columnX = (int) Math.floor(eyeFractionX + offsetX);
-        int columnZ = (int) Math.floor(eyeFractionZ + offsetZ);
-        if (!isCovered(1.0, columnX, columnZ, offsetY)) {
-            return 1.0;
-        }
-        double walkEnd = 1.0 - regionEnd;
+    private double walkFarCells(double unitX, double unitY, double unitZ, double startDistance, double endDistance,
+            int maximumSteps) {
+        double startX = (eyeBlockX & 1) + eyeFractionX + unitX * startDistance;
+        double startY = (eyeBlockY & 1) + eyeFractionY + unitY * startDistance;
+        double startZ = (eyeBlockZ & 1) + eyeFractionZ + unitZ * startDistance;
+        int cellX = (int) Math.floor(startX / FAR_CELL);
+        int cellY = (int) Math.floor(startY / FAR_CELL);
+        int cellZ = (int) Math.floor(startZ / FAR_CELL);
         int stepX = 0;
+        int stepY = 0;
         int stepZ = 0;
         double nextBoundaryX = NO_BOUNDARY;
+        double nextBoundaryY = NO_BOUNDARY;
         double nextBoundaryZ = NO_BOUNDARY;
         double boundaryStepX = NO_BOUNDARY;
+        double boundaryStepY = NO_BOUNDARY;
         double boundaryStepZ = NO_BOUNDARY;
-        if (Math.sqrt(offsetX * offsetX + offsetZ * offsetZ) >= MINIMUM_HORIZONTAL_LENGTH) {
-            double sceneFractionX = eyeFractionX + offsetX - columnX;
-            double sceneFractionZ = eyeFractionZ + offsetZ - columnZ;
-            if (offsetX > 0.0) {
-                stepX = -1;
-                nextBoundaryX = sceneFractionX / offsetX;
-                boundaryStepX = 1.0 / offsetX;
-            } else if (offsetX < 0.0) {
-                stepX = 1;
-                nextBoundaryX = (1.0 - sceneFractionX) / -offsetX;
-                boundaryStepX = 1.0 / -offsetX;
-            }
-            if (offsetZ > 0.0) {
-                stepZ = -1;
-                nextBoundaryZ = sceneFractionZ / offsetZ;
-                boundaryStepZ = 1.0 / offsetZ;
-            } else if (offsetZ < 0.0) {
-                stepZ = 1;
-                nextBoundaryZ = (1.0 - sceneFractionZ) / -offsetZ;
-                boundaryStepZ = 1.0 / -offsetZ;
-            }
+        if (unitX > 0.0) {
+            stepX = 1;
+            nextBoundaryX = startDistance + ((cellX + 1) * FAR_CELL - startX) / unitX;
+            boundaryStepX = FAR_CELL / unitX;
+        } else if (unitX < 0.0) {
+            stepX = -1;
+            nextBoundaryX = startDistance + (cellX * FAR_CELL - startX) / unitX;
+            boundaryStepX = FAR_CELL / -unitX;
         }
-        double enter = 0.0;
-        while (true) {
-            lastColumnSteps++;
-            double exit = Math.min(Math.min(nextBoundaryX, nextBoundaryZ), walkEnd);
-            double startParameter = 1.0 - enter;
-            double endParameter = 1.0 - exit;
-            if (lastColumnSteps > 1 && !isCovered(startParameter, columnX, columnZ, offsetY)) {
-                return clampToFarPart(startParameter, regionEnd);
-            }
-            if (offsetY < 0.0) {
-                double cross = (heightAt(columnX, columnZ) - eyeBlockY - eyeFractionY) / offsetY;
-                if (cross > endParameter) {
-                    return clampToFarPart(cross, regionEnd);
+        if (unitY > 0.0) {
+            stepY = 1;
+            nextBoundaryY = startDistance + ((cellY + 1) * FAR_CELL - startY) / unitY;
+            boundaryStepY = FAR_CELL / unitY;
+        } else if (unitY < 0.0) {
+            stepY = -1;
+            nextBoundaryY = startDistance + (cellY * FAR_CELL - startY) / unitY;
+            boundaryStepY = FAR_CELL / -unitY;
+        }
+        if (unitZ > 0.0) {
+            stepZ = 1;
+            nextBoundaryZ = startDistance + ((cellZ + 1) * FAR_CELL - startZ) / unitZ;
+            boundaryStepZ = FAR_CELL / unitZ;
+        } else if (unitZ < 0.0) {
+            stepZ = -1;
+            nextBoundaryZ = startDistance + (cellZ * FAR_CELL - startZ) / unitZ;
+            boundaryStepZ = FAR_CELL / -unitZ;
+        }
+        FogStructure currentStructure = structure;
+        boolean structureOn = currentStructure != null && currentStructure.isOn();
+        double depth = 0.0;
+        double enter = startDistance;
+        double enterDepth = tauAt(enter, unitY);
+        boolean reachedEnd = false;
+        int cellsWalked = 0;
+        for (int cellStep = 0; cellStep < maximumSteps; cellStep++) {
+            cellsWalked = cellStep + 1;
+            double exit = Math.min(Math.min(nextBoundaryX, nextBoundaryY), Math.min(nextBoundaryZ, endDistance));
+            double exitDepth = tauAt(exit, unitY);
+            int columnOffsetX = (int) Math.floor((cellX + 0.5) * FAR_CELL) - (eyeBlockX & 1);
+            int columnOffsetY = (int) Math.floor((cellY + 0.5) * FAR_CELL) - (eyeBlockY & 1);
+            int columnOffsetZ = (int) Math.floor((cellZ + 0.5) * FAR_CELL) - (eyeBlockZ & 1);
+            double share = heightShare(columnOffsetX, columnOffsetY, columnOffsetZ);
+            if (share > 0.0) {
+                double partDepth = Math.max(0.0, exitDepth - enterDepth);
+                if (structureOn) {
+                    double middle = (enter + exit) * 0.5;
+                    partDepth *= currentStructure.densityAt(middle * unitX, middle * unitY, middle * unitZ);
                 }
-            }
-            if (exit >= walkEnd) {
-                return regionEnd;
-            }
-            if (lastColumnSteps == FAR_WALK_COLUMNS) {
-                return endParameter;
-            }
-            double smallestBoundary = Math.min(nextBoundaryX, nextBoundaryZ);
-            // Ties step both axes at once, as the cell walk does.
-            if (nextBoundaryX <= smallestBoundary) {
-                columnX += stepX;
-                nextBoundaryX += boundaryStepX;
-            }
-            if (nextBoundaryZ <= smallestBoundary) {
-                columnZ += stepZ;
-                nextBoundaryZ += boundaryStepZ;
+                depth += share * partDepth;
             }
             enter = exit;
+            enterDepth = exitDepth;
+            if (!(exit < endDistance)) {
+                reachedEnd = true;
+                break;
+            }
+            double smallestBoundary = Math.min(nextBoundaryX, Math.min(nextBoundaryY, nextBoundaryZ));
+            // Every axis whose boundary is the next one steps, so a segment through a cell edge enters both neighbors.
+            if (nextBoundaryX <= smallestBoundary) {
+                cellX += stepX;
+                nextBoundaryX += boundaryStepX;
+            }
+            if (nextBoundaryY <= smallestBoundary) {
+                cellY += stepY;
+                nextBoundaryY += boundaryStepY;
+            }
+            if (nextBoundaryZ <= smallestBoundary) {
+                cellZ += stepZ;
+                nextBoundaryZ += boundaryStepZ;
+            }
         }
-    }
-
-    /**
-     * Keeps a stop of the backward walk inside the far part of the segment.
-     */
-    private static double clampToFarPart(double stop, double regionEnd) {
-        if (!(stop > regionEnd)) {
-            return regionEnd;
+        if (!reachedEnd) {
+            depth += Math.max(0.0, tauAt(endDistance, unitY) - enterDepth);
         }
-        return Math.min(1.0, stop);
-    }
-
-    /**
-     * Whether a point of the segment lies under cover in a column, which is the case when it stands below the motion
-     * height of that column. It compares the point's height over the eye's block against the column's height over that
-     * block, in integers, so the cover is exact far from the origin.
-     */
-    private boolean isCovered(double parameter, int columnX, int columnZ, double verticalOffset) {
-        return eyeFractionY + parameter * verticalOffset < heightAt(columnX, columnZ) - eyeBlockY;
+        lastFarSteps = cellsWalked;
+        lastFarCapped = !reachedEnd;
+        return depth;
     }
 
     /**
@@ -811,10 +792,10 @@ public final class SnowFogWalk {
     }
 
     /**
-     * The optical depth from the eye up to the given parameter of the segment, as HeightFog.opticalDepth gives it.
+     * The optical depth from the eye up to the given distance along the ray of the unit direction whose upward
+     * component is unitY, as HeightFog.opticalDepth gives it.
      */
-    private double tauAt(double parameter, double segmentLength, double verticalOffset) {
-        return HeightFog.opticalDepth(eyeExtinction, parameter * segmentLength, parameter * verticalOffset,
-                heightScale);
+    private double tauAt(double distance, double unitY) {
+        return HeightFog.opticalDepth(eyeExtinction, distance, distance * unitY, heightScale);
     }
 }

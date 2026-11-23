@@ -1,15 +1,22 @@
-// The walk of the fog along the segment from the eye to a scene point, through the snow field near the eye and through
-// the far heights of the columns beyond it, which SnowFogWalk does a second time on the CPU so that the two can be
-// compared. FHShaders prepends weather_fog.glsl before it, for fogOpticalDepth.
+// The walk of the fog along one piece of a column ray, from a start distance to an end distance along a unit direction,
+// through the snow field near the eye and the far heights of the columns beyond it, which SnowFogWalk repeats on the CPU
+// so that the two can be compared. FHShaders prepends weather_fog.glsl before it, for fogOpticalDepth.
 // The fog's extinction at a point is the height fog times a snow share in the range 0 to 1 times the density of the fog
 // structures, so the optical depth of the segment is the integral of that product. The walk splits the segment into
-// parts on which the share is constant and adds the closed form of fogOpticalDepth at the two ends of each part times the
+// parts on which the share is constant and adds the closed form of fogOpticalDepth
+// at the two ends of each part times the
 // density of the structures at its middle, which is exact along one ray from the eye and takes no samples.
-// While the structures are on, the parts inside the region are the cells, and the far part up to the range of the
-// structures is walked through a coarser grid of SNOW_WALK_COARSE_CELL blocks, which stays fixed in the world. Beyond
-// the range the density is 1, which the rest of the far part takes in closed form.
+// While the structures are on, the parts inside the region are the cells, and the parts beyond it are the
+// SNOW_WALK_FAR_CELL cells with the height share of the column under the cell's middle. Past the structure range the
+// density is 1, which the rest of the far part takes in closed form.
+// A piece of a ray, which the froxel stages walk, is the stretch between two distances along a unit direction, which the
+// inject cuts at the slice boundaries. Its near stretch inside the region is the cell walk from the cell that holds the
+// start distance, and its far stretch beyond it is the world-aligned grid of SNOW_WALK_FAR_CELL blocks, whose share is
+// the height share of the column under the cell's middle. Each stretch visits at most SNOW_WALK_PIECE_MAXIMUM_STEPS
+// cells, and the rest of a stretch that runs out of them counts as the open fog at the share 1 and the density 1.
 // Every position here is a cell offset from the eye's block, so no world position passes through a float.
-// The field of the snow near the eye, a cube of size fieldMask + 1 cells whose bytes are distances in eighths of a block:
+// The field of the snow near the eye, a cube of size fieldMask + 1 cells
+// whose bytes are distances in eighths of a block:
 uniform sampler3D snowField;
 // The motion heights of the columns of FarHeights, as integers, which the far rule compares its scene points against:
 uniform isampler2D farHeights;
@@ -53,10 +60,10 @@ uniform vec3 structureAlong;
 uniform vec3 structureUp;
 uniform vec3 structureAcross;
 
-// The size of the side in blocks of the world-aligned cells that the far part is walked in, and the most parts of that
-// walk, as SnowFogWalk.COARSE_CELL and SnowFogWalk.COARSE_MAXIMUM_STEPS:
-const float SNOW_WALK_COARSE_CELL = 4.0;
-const int SNOW_WALK_COARSE_MAXIMUM_STEPS = 64;
+// The side in blocks of the world-aligned cells that the far stretch of a piece is walked in, and the most cells that
+// each stretch of a piece visits, as SnowFogWalk.FAR_CELL and SnowFogWalk.PIECE_MAXIMUM_STEPS:
+const float SNOW_WALK_FAR_CELL = 2.0;
+const int SNOW_WALK_PIECE_MAXIMUM_STEPS = 16;
 // The structure constants that shape the density, as FogStructure:
 const float SNOW_WALK_EDGE_WIDTH = 0.5;
 const int SNOW_WALK_DETAIL_REPEAT = 4;
@@ -80,12 +87,6 @@ const int SNOW_WALK_SHARE_ATLAS_WIDTH = 800;
 const int SNOW_WALK_SHARE_ATLAS_HEIGHT = 640;
 // The distance in blocks before the region's edge over which a cell's share blends toward its height share:
 const float SNOW_WALK_CROSSFADE_WIDTH = 8.0;
-// The most cells the cell walk visits, as SnowFogWalk.MAXIMUM_CELL_STEPS:
-const int SNOW_WALK_MAXIMUM_CELL_STEPS = 128;
-// The most columns the backward walk visits, as SnowFogWalk.FAR_WALK_COLUMNS:
-const int SNOW_WALK_FAR_WALK_COLUMNS = 32;
-// The horizontal length in blocks below which the segment counts as staying in the column of its scene point:
-const float SNOW_WALK_MINIMUM_HORIZONTAL_LENGTH = 1.0e-4;
 // A boundary past the end of the segment, for an axis the segment never leaves its cell in:
 const float SNOW_WALK_NO_BOUNDARY = 1.0e30;
 
@@ -123,87 +124,6 @@ float snowWalkStructureDensity(vec3 offset) {
     return 1.0 + rangeWeight * structureShare * (shape / max(mean, SNOW_WALK_MINIMUM_MEAN) - 1.0);
 }
 
-// The optical depth of the fog structures along the part of the segment from the start to the end parameter, which is
-// walked through the world-aligned grid of SNOW_WALK_COARSE_CELL blocks, so that its parts stay fixed in the world
-// while the eye moves, as SnowFogWalk.coarseDepth. Each part adds the density at its middle times the closed form of the
-// optical depth between its ends, and a walk that runs out of steps adds the rest at the mean density. The eye's place
-// in the grid is its fraction plus its block taken modulo the side of a cell, which holds for negative blocks too:
-float snowWalkCoarseDepth(vec3 offset, float segmentLength, float startParameter, float endParameter,
-        out int coarseSteps) {
-    coarseSteps = 0;
-    if (!(endParameter > startParameter) || !(structureShare > 0.0)) {
-        return 0.0;
-    }
-    vec3 local = vec3(eyeBlock & ivec3(3)) + eyeFraction;
-    vec3 position = local + startParameter * offset;
-    ivec3 cell = ivec3(floor(position / SNOW_WALK_COARSE_CELL));
-    ivec3 cellStep = ivec3(0);
-    vec3 nextBoundary = vec3(SNOW_WALK_NO_BOUNDARY);
-    vec3 boundaryStep = vec3(SNOW_WALK_NO_BOUNDARY);
-    if (offset.x > 0.0) {
-        cellStep.x = 1;
-        nextBoundary.x = startParameter + (float(cell.x + 1) * SNOW_WALK_COARSE_CELL - position.x) / offset.x;
-        boundaryStep.x = SNOW_WALK_COARSE_CELL / offset.x;
-    } else if (offset.x < 0.0) {
-        cellStep.x = -1;
-        nextBoundary.x = startParameter + (float(cell.x) * SNOW_WALK_COARSE_CELL - position.x) / offset.x;
-        boundaryStep.x = SNOW_WALK_COARSE_CELL / -offset.x;
-    }
-    if (offset.y > 0.0) {
-        cellStep.y = 1;
-        nextBoundary.y = startParameter + (float(cell.y + 1) * SNOW_WALK_COARSE_CELL - position.y) / offset.y;
-        boundaryStep.y = SNOW_WALK_COARSE_CELL / offset.y;
-    } else if (offset.y < 0.0) {
-        cellStep.y = -1;
-        nextBoundary.y = startParameter + (float(cell.y) * SNOW_WALK_COARSE_CELL - position.y) / offset.y;
-        boundaryStep.y = SNOW_WALK_COARSE_CELL / -offset.y;
-    }
-    if (offset.z > 0.0) {
-        cellStep.z = 1;
-        nextBoundary.z = startParameter + (float(cell.z + 1) * SNOW_WALK_COARSE_CELL - position.z) / offset.z;
-        boundaryStep.z = SNOW_WALK_COARSE_CELL / offset.z;
-    } else if (offset.z < 0.0) {
-        cellStep.z = -1;
-        nextBoundary.z = startParameter + (float(cell.z) * SNOW_WALK_COARSE_CELL - position.z) / offset.z;
-        boundaryStep.z = SNOW_WALK_COARSE_CELL / -offset.z;
-    }
-    float depth = 0.0;
-    float enter = startParameter;
-    float enterDepth = snowWalkTauAt(startParameter, segmentLength, offset.y);
-    bool reachedEnd = false;
-    for (int step = 0; step < SNOW_WALK_COARSE_MAXIMUM_STEPS && !reachedEnd; step++) {
-        coarseSteps = step + 1;
-        float exit = min(min(nextBoundary.x, nextBoundary.y), min(nextBoundary.z, endParameter));
-        float exitDepth = snowWalkTauAt(exit, segmentLength, offset.y);
-        float middle = (enter + exit) * 0.5;
-        depth += snowWalkStructureDensity(middle * offset) * max(0.0, exitDepth - enterDepth);
-        enter = exit;
-        enterDepth = exitDepth;
-        if (!(exit < endParameter)) {
-            reachedEnd = true;
-        } else {
-            float smallestBoundary = min(nextBoundary.x, min(nextBoundary.y, nextBoundary.z));
-            // Ties step every tied axis, as the cell walk does.
-            if (nextBoundary.x <= smallestBoundary) {
-                cell.x += cellStep.x;
-                nextBoundary.x += boundaryStep.x;
-            }
-            if (nextBoundary.y <= smallestBoundary) {
-                cell.y += cellStep.y;
-                nextBoundary.y += boundaryStep.y;
-            }
-            if (nextBoundary.z <= smallestBoundary) {
-                cell.z += cellStep.z;
-                nextBoundary.z += boundaryStep.z;
-            }
-        }
-    }
-    if (!reachedEnd) {
-        depth += max(0.0, snowWalkTauAt(endParameter, segmentLength, offset.y) - enterDepth);
-    }
-    return depth;
-}
-
 // The motion height of the column of a cell, which FarHeights.UNKNOWN makes open. The texel wraps with a bitwise and,
 // since the modulo of a negative value is undefined.
 int snowWalkColumnHeight(int columnOffsetX, int columnOffsetZ) {
@@ -211,18 +131,18 @@ int snowWalkColumnHeight(int columnOffsetX, int columnOffsetZ) {
             & ivec2(FAR_HEIGHTS_MASK), 0).r;
 }
 
-// Whether a point of the segment lies under cover in a column, which compares its height over the eye's block against
-// the column's height over that block, both in the relative form, so the cover does not depend on the distance from the
-// origin. The cell of the point is the eye's block plus its offset, as everywhere in this file:
-bool snowWalkCovered(int columnOffsetX, int columnOffsetZ, float parameter, float verticalOffset) {
-    return eyeFraction.y + parameter * verticalOffset
-            < float(snowWalkColumnHeight(columnOffsetX, columnOffsetZ) - eyeBlock.y);
-}
-
 // The height share of a cell: 1 at or above the motion height of its column and 0 below it, so a column whose height is
 // FarHeights.UNKNOWN, which stands below every cell, counts as open:
 float snowWalkHeightShare(ivec3 cell) {
     return float(eyeBlock.y + cell.y) >= float(snowWalkColumnHeight(cell.x, cell.z)) ? 1.0 : 0.0;
+}
+
+// The share of a far cell of SNOW_WALK_FAR_CELL blocks, which is the height share of the 1-block cell that holds its
+// middle, counted from the eye's block as SnowFogWalk.walkFarCells counts it. The eye's place in the far grid is its low
+// block bit on every axis plus its fraction, so eyeBlock & ivec3(1) subtracts that bit from the cell's middle:
+float snowWalkFarShare(ivec3 farCell) {
+    ivec3 columnCell = ivec3(floor((vec3(farCell) + vec3(0.5)) * SNOW_WALK_FAR_CELL)) - (eyeBlock & ivec3(1));
+    return snowWalkHeightShare(columnCell);
 }
 
 // The share of a cell, which is its distance byte through the share table, or its height share when it has no field
@@ -267,176 +187,70 @@ float snowWalkCellShare(ivec3 cell) {
     return texelFetch(shareVolume, ivec2(shareVolumeX, shareVolumeY), 0).r;
 }
 
-// Where the covered stretch at the end of the segment begins, found by walking the columns under the segment's
-// horizontal projection backward from the scene point toward the eye, and the columns walked. The walk stops at the
-// first column that leaves the cover, at the height the segment crosses in a column it descends in, at the region's
-// edge, or at the last column it may visit, after which the rest of the segment counts as open.
-float snowWalkFarStop(vec3 offset, float regionEnd, out int columnsWalked) {
-    columnsWalked = 0;
-    int sceneColumnX = int(floor(eyeFraction.x + offset.x));
-    int sceneColumnZ = int(floor(eyeFraction.z + offset.z));
-    if (!snowWalkCovered(sceneColumnX, sceneColumnZ, 1.0, offset.y)) {
-        return 1.0;
-    }
-    float walkEnd = 1.0 - regionEnd;
-    int columnX = sceneColumnX;
-    int columnZ = sceneColumnZ;
-    int columnStepX = 0;
-    int columnStepZ = 0;
-    float nextBoundaryX = SNOW_WALK_NO_BOUNDARY;
-    float nextBoundaryZ = SNOW_WALK_NO_BOUNDARY;
-    float boundaryStepX = SNOW_WALK_NO_BOUNDARY;
-    float boundaryStepZ = SNOW_WALK_NO_BOUNDARY;
-    if (length(offset.xz) >= SNOW_WALK_MINIMUM_HORIZONTAL_LENGTH) {
-        float sceneFractionX = eyeFraction.x + offset.x - float(sceneColumnX);
-        float sceneFractionZ = eyeFraction.z + offset.z - float(sceneColumnZ);
-        if (offset.x > 0.0) {
-            columnStepX = -1;
-            nextBoundaryX = sceneFractionX / offset.x;
-            boundaryStepX = 1.0 / offset.x;
-        } else if (offset.x < 0.0) {
-            columnStepX = 1;
-            nextBoundaryX = (1.0 - sceneFractionX) / -offset.x;
-            boundaryStepX = 1.0 / -offset.x;
-        }
-        if (offset.z > 0.0) {
-            columnStepZ = -1;
-            nextBoundaryZ = sceneFractionZ / offset.z;
-            boundaryStepZ = 1.0 / offset.z;
-        } else if (offset.z < 0.0) {
-            columnStepZ = 1;
-            nextBoundaryZ = (1.0 - sceneFractionZ) / -offset.z;
-            boundaryStepZ = 1.0 / -offset.z;
-        }
-    }
-    float stop = 1.0;
-    float enter = 0.0;
-    bool isStopped = false;
-    for (int columnIndex = 0; columnIndex < SNOW_WALK_FAR_WALK_COLUMNS && !isStopped; columnIndex++) {
-        columnsWalked = columnIndex + 1;
-        float exit = min(min(nextBoundaryX, nextBoundaryZ), walkEnd);
-        float startParameter = 1.0 - enter;
-        float endParameter = 1.0 - exit;
-        bool descends = offset.y < 0.0;
-        // The column's height over the eye's block, fetched once for the coverage test and the crossing:
-        float relativeHeight = float(snowWalkColumnHeight(columnX, columnZ) - eyeBlock.y);
-        float crossParameter = 0.0;
-        if (descends) {
-            crossParameter = (relativeHeight - eyeFraction.y) / offset.y;
-        }
-        if (columnsWalked > 1 && !(eyeFraction.y + startParameter * offset.y < relativeHeight)) {
-            stop = startParameter;
-            isStopped = true;
-        } else if (descends && crossParameter > endParameter) {
-            stop = crossParameter;
-            isStopped = true;
-        } else if (exit >= walkEnd) {
-            stop = regionEnd;
-            isStopped = true;
-        } else if (columnsWalked == SNOW_WALK_FAR_WALK_COLUMNS) {
-            stop = endParameter;
-            isStopped = true;
-        } else {
-            float smallestBoundary = min(nextBoundaryX, nextBoundaryZ);
-            if (nextBoundaryX <= smallestBoundary) {
-                columnX += columnStepX;
-                nextBoundaryX += boundaryStepX;
-            }
-            if (nextBoundaryZ <= smallestBoundary) {
-                columnZ += columnStepZ;
-                nextBoundaryZ += boundaryStepZ;
-            }
-            enter = exit;
-        }
-    }
-    return clamp(stop, regionEnd, 1.0);
-}
-
-// The optical depth of the fog along the segment from the eye to the scene point at the given offset, as
-// SnowFogWalk.opticalDepth, with the cells and the columns that the walk visited, the parts of the coarse walk, and
-// where the covered stretch at the end of the segment begins. Bit 0 of partMask runs the cell walk, without which the
-// region part takes the analytic fog, and bit 1 runs the backward walk, without which the far part counts as open. The
-// normal fog passes 3.
-float snowWalkOpticalDepth(vec3 offset, int partMask, out int cellsWalked, out int columnsWalked, out float farStop,
-        out int coarseSteps) {
-    cellsWalked = 0;
-    columnsWalked = 0;
-    coarseSteps = 0;
-    farStop = 1.0;
-    if (!(eyeExtinction > 0.0)) {
-        return 0.0;
-    }
-    if (any(isnan(offset)) || any(isinf(offset))) {
-        return 0.0;
-    }
-    float segmentLength = length(offset);
-    if (!(segmentLength > 0.0)) {
-        return 0.0;
-    }
-    float largestOffset = max(abs(offset.x), max(abs(offset.y), abs(offset.z)));
-    float regionEnd = min(1.0, regionHalfWidth / largestOffset);
-    ivec3 cell = ivec3(0);
+// The optical depth of the stretch of a ray inside the region, from the cell that holds the start distance, as
+// SnowFogWalk.walkNearCells: each cell adds its share times the density of the structures
+// at the middle of the part times
+// the closed form between the two ends of the part, and the rest after maximumSteps cells counts as the open fog at the
+// share 1 and the density 1. Records the near cells and their cap.
+float snowWalkNearCells(vec3 unit, float startDistance, float endDistance, int maximumSteps, out int cellsWalked,
+        out bool capped) {
+    vec3 start = eyeFraction + unit * startDistance;
+    ivec3 cell = ivec3(floor(start));
     ivec3 cellStep = ivec3(0);
     vec3 nextBoundary = vec3(SNOW_WALK_NO_BOUNDARY);
     vec3 boundaryStep = vec3(SNOW_WALK_NO_BOUNDARY);
-    if (offset.x > 0.0) {
+    if (unit.x > 0.0) {
         cellStep.x = 1;
-        nextBoundary.x = (1.0 - eyeFraction.x) / offset.x;
-        boundaryStep.x = 1.0 / offset.x;
-    } else if (offset.x < 0.0) {
+        nextBoundary.x = startDistance + (float(cell.x + 1) - start.x) / unit.x;
+        boundaryStep.x = 1.0 / unit.x;
+    } else if (unit.x < 0.0) {
         cellStep.x = -1;
-        nextBoundary.x = eyeFraction.x / -offset.x;
-        boundaryStep.x = 1.0 / -offset.x;
+        nextBoundary.x = startDistance + (float(cell.x) - start.x) / unit.x;
+        boundaryStep.x = 1.0 / -unit.x;
     }
-    if (offset.y > 0.0) {
+    if (unit.y > 0.0) {
         cellStep.y = 1;
-        nextBoundary.y = (1.0 - eyeFraction.y) / offset.y;
-        boundaryStep.y = 1.0 / offset.y;
-    } else if (offset.y < 0.0) {
+        nextBoundary.y = startDistance + (float(cell.y + 1) - start.y) / unit.y;
+        boundaryStep.y = 1.0 / unit.y;
+    } else if (unit.y < 0.0) {
         cellStep.y = -1;
-        nextBoundary.y = eyeFraction.y / -offset.y;
-        boundaryStep.y = 1.0 / -offset.y;
+        nextBoundary.y = startDistance + (float(cell.y) - start.y) / unit.y;
+        boundaryStep.y = 1.0 / -unit.y;
     }
-    if (offset.z > 0.0) {
+    if (unit.z > 0.0) {
         cellStep.z = 1;
-        nextBoundary.z = (1.0 - eyeFraction.z) / offset.z;
-        boundaryStep.z = 1.0 / offset.z;
-    } else if (offset.z < 0.0) {
+        nextBoundary.z = startDistance + (float(cell.z + 1) - start.z) / unit.z;
+        boundaryStep.z = 1.0 / unit.z;
+    } else if (unit.z < 0.0) {
         cellStep.z = -1;
-        nextBoundary.z = eyeFraction.z / -offset.z;
-        boundaryStep.z = 1.0 / -offset.z;
+        nextBoundary.z = startDistance + (float(cell.z) - start.z) / unit.z;
+        boundaryStep.z = 1.0 / -unit.z;
     }
-    bool walksRegion = (partMask & 1) != 0;
     bool structureOn = structureShare > 0.0;
-    float regionDepth = 0.0;
-    float enterDepth = 0.0;
-    float enter = 0.0;
-    bool reachedRegionEnd = false;
-    // Without the cell walk, the region takes the analytic fog in one part, so the timing modes leave out its cost:
-    if (!walksRegion) {
-        enterDepth = snowWalkTauAt(regionEnd, segmentLength, offset.y);
-        regionDepth = enterDepth;
-        reachedRegionEnd = true;
-    }
-    for (int cellIndex = 0; cellIndex < SNOW_WALK_MAXIMUM_CELL_STEPS && walksRegion; cellIndex++) {
+    float depth = 0.0;
+    float enter = startDistance;
+    float enterDepth = snowWalkTauAt(enter, 1.0, unit.y);
+    bool reachedEnd = false;
+    cellsWalked = 0;
+    for (int cellIndex = 0; cellIndex < maximumSteps; cellIndex++) {
         cellsWalked = cellIndex + 1;
-        float exit = min(min(nextBoundary.x, nextBoundary.y), min(nextBoundary.z, regionEnd));
-        float exitDepth = snowWalkTauAt(exit, segmentLength, offset.y);
+        float exit = min(min(nextBoundary.x, nextBoundary.y), min(nextBoundary.z, endDistance));
+        float exitDepth = snowWalkTauAt(exit, 1.0, unit.y);
         float share = snowWalkCellShare(cell);
         float partDepth = max(0.0, exitDepth - enterDepth);
         if (structureOn && share > 0.0) {
             float middle = (enter + exit) * 0.5;
-            partDepth *= snowWalkStructureDensity(middle * offset);
+            partDepth *= snowWalkStructureDensity(middle * unit);
         }
-        regionDepth += share * partDepth;
-        enterDepth = exitDepth;
+        depth += share * partDepth;
         enter = exit;
-        if (!(exit < regionEnd)) {
-            reachedRegionEnd = true;
+        enterDepth = exitDepth;
+        if (!(exit < endDistance)) {
+            reachedEnd = true;
             break;
         }
         float smallestBoundary = min(nextBoundary.x, min(nextBoundary.y, nextBoundary.z));
-        // Every axis whose boundary is the next one steps, so a segment through a cell edge enters both neighbors:
+        // Every axis whose boundary is the next one steps, so a segment through a cell edge enters both neighbors.
         if (nextBoundary.x <= smallestBoundary) {
             cell.x += cellStep.x;
             nextBoundary.x += boundaryStep.x;
@@ -450,60 +264,163 @@ float snowWalkOpticalDepth(vec3 offset, int partMask, out int cellsWalked, out i
             nextBoundary.z += boundaryStep.z;
         }
     }
-    // A walk that ran out of steps counts the rest of the region as open, which errs toward fog:
-    if (!reachedRegionEnd) {
-        float endDepth = snowWalkTauAt(regionEnd, segmentLength, offset.y);
-        regionDepth += max(0.0, endDepth - enterDepth);
-        enterDepth = endDepth;
+    if (!reachedEnd) {
+        depth += max(0.0, snowWalkTauAt(endDistance, 1.0, unit.y) - enterDepth);
     }
-    float farDepth = 0.0;
-    if (regionEnd < 1.0) {
-        if ((partMask & 2) != 0) {
-            farStop = snowWalkFarStop(offset, regionEnd, columnsWalked);
+    capped = !reachedEnd;
+    return depth;
+}
+
+// The optical depth of the stretch of a ray beyond the region, from the far cell that holds the start distance, as
+// SnowFogWalk.walkFarCells: a cell adds the height share of the column under its middle times the density of the
+// structures at the middle of the part times the closed form between the two ends of the part, which is nothing under
+// cover, and the rest after maximumSteps cells counts as the open fog at the share 1 and the density 1. The grid is
+// world aligned, so the eye's place in it is its low block bit on every axis plus its fraction.
+float snowWalkFarCells(vec3 unit, float startDistance, float endDistance, int maximumSteps, out int cellsWalked,
+        out bool capped) {
+    vec3 start = vec3(eyeBlock & ivec3(1)) + eyeFraction + unit * startDistance;
+    ivec3 cell = ivec3(floor(start / SNOW_WALK_FAR_CELL));
+    ivec3 cellStep = ivec3(0);
+    vec3 nextBoundary = vec3(SNOW_WALK_NO_BOUNDARY);
+    vec3 boundaryStep = vec3(SNOW_WALK_NO_BOUNDARY);
+    if (unit.x > 0.0) {
+        cellStep.x = 1;
+        nextBoundary.x = startDistance + (float(cell.x + 1) * SNOW_WALK_FAR_CELL - start.x) / unit.x;
+        boundaryStep.x = SNOW_WALK_FAR_CELL / unit.x;
+    } else if (unit.x < 0.0) {
+        cellStep.x = -1;
+        nextBoundary.x = startDistance + (float(cell.x) * SNOW_WALK_FAR_CELL - start.x) / unit.x;
+        boundaryStep.x = SNOW_WALK_FAR_CELL / -unit.x;
+    }
+    if (unit.y > 0.0) {
+        cellStep.y = 1;
+        nextBoundary.y = startDistance + (float(cell.y + 1) * SNOW_WALK_FAR_CELL - start.y) / unit.y;
+        boundaryStep.y = SNOW_WALK_FAR_CELL / unit.y;
+    } else if (unit.y < 0.0) {
+        cellStep.y = -1;
+        nextBoundary.y = startDistance + (float(cell.y) * SNOW_WALK_FAR_CELL - start.y) / unit.y;
+        boundaryStep.y = SNOW_WALK_FAR_CELL / -unit.y;
+    }
+    if (unit.z > 0.0) {
+        cellStep.z = 1;
+        nextBoundary.z = startDistance + (float(cell.z + 1) * SNOW_WALK_FAR_CELL - start.z) / unit.z;
+        boundaryStep.z = SNOW_WALK_FAR_CELL / unit.z;
+    } else if (unit.z < 0.0) {
+        cellStep.z = -1;
+        nextBoundary.z = startDistance + (float(cell.z) * SNOW_WALK_FAR_CELL - start.z) / unit.z;
+        boundaryStep.z = SNOW_WALK_FAR_CELL / -unit.z;
+    }
+    bool structureOn = structureShare > 0.0;
+    float depth = 0.0;
+    float enter = startDistance;
+    float enterDepth = snowWalkTauAt(enter, 1.0, unit.y);
+    bool reachedEnd = false;
+    cellsWalked = 0;
+    for (int cellIndex = 0; cellIndex < maximumSteps; cellIndex++) {
+        cellsWalked = cellIndex + 1;
+        float exit = min(min(nextBoundary.x, nextBoundary.y), min(nextBoundary.z, endDistance));
+        float exitDepth = snowWalkTauAt(exit, 1.0, unit.y);
+        float share = snowWalkFarShare(cell);
+        if (share > 0.0) {
+            float partDepth = max(0.0, exitDepth - enterDepth);
+            if (structureOn) {
+                float middle = (enter + exit) * 0.5;
+                partDepth *= snowWalkStructureDensity(middle * unit);
+            }
+            depth += share * partDepth;
         }
-        float baseDepth = max(0.0, snowWalkTauAt(farStop, segmentLength, offset.y) - enterDepth);
-        if (!structureOn) {
-            farDepth = baseDepth;
-        } else {
-            float coarseEnd = min(farStop, min(1.0, structureRange / segmentLength));
-            if (coarseEnd > regionEnd) {
-                farDepth = snowWalkCoarseDepth(offset, segmentLength, regionEnd, coarseEnd, coarseSteps);
-                farDepth += max(0.0, snowWalkTauAt(farStop, segmentLength, offset.y)
-                        - snowWalkTauAt(coarseEnd, segmentLength, offset.y));
+        enter = exit;
+        enterDepth = exitDepth;
+        if (!(exit < endDistance)) {
+            reachedEnd = true;
+            break;
+        }
+        float smallestBoundary = min(nextBoundary.x, min(nextBoundary.y, nextBoundary.z));
+        // Every axis whose boundary is the next one steps, so a segment through a cell edge enters both neighbors.
+        if (nextBoundary.x <= smallestBoundary) {
+            cell.x += cellStep.x;
+            nextBoundary.x += boundaryStep.x;
+        }
+        if (nextBoundary.y <= smallestBoundary) {
+            cell.y += cellStep.y;
+            nextBoundary.y += boundaryStep.y;
+        }
+        if (nextBoundary.z <= smallestBoundary) {
+            cell.z += cellStep.z;
+            nextBoundary.z += boundaryStep.z;
+        }
+    }
+    if (!reachedEnd) {
+        depth += max(0.0, snowWalkTauAt(endDistance, 1.0, unit.y) - enterDepth);
+    }
+    capped = !reachedEnd;
+    return depth;
+}
+
+// The optical depth of a piece of the ray of a unit direction from the start to the end distance, as
+// SnowFogWalk.walkPiece, whose near stretch inside the region and far stretch beyond it are cut at
+// regionHalfWidth / largestComponent. Bit 0 of partMask runs the near walk and bit 1 the far one, and a stretch that is
+// off takes the closed form of the open fog instead, with no cells, no share and no density, and reports 0 steps and no
+// cap; with both off the piece is the height fog of the whole stretch, which is the analytic timing mode. Rejected
+// inputs give 0 and leave the four out values at 0 and false, and the depth is not clamped, since the composite clamps
+// the total of the column. Every closed form of the piece starts at the eye, as the analytic depth of a boundary does.
+float snowWalkPiece(vec3 unit, float startDistance, float endDistance, int partMask, out int nearSteps,
+        out bool nearCapped, out int farSteps, out bool farCapped) {
+    nearSteps = 0;
+    nearCapped = false;
+    farSteps = 0;
+    farCapped = false;
+    if (!(eyeExtinction > 0.0) || any(isnan(unit)) || any(isinf(unit))) {
+        return 0.0;
+    }
+    float directionLength = length(unit);
+    if (!(directionLength > 0.0) || isnan(directionLength) || isinf(directionLength)) {
+        return 0.0;
+    }
+    if (isnan(startDistance) || isinf(startDistance) || isnan(endDistance) || isinf(endDistance)
+            || !(startDistance < endDistance)) {
+        return 0.0;
+    }
+    float largestComponent = max(abs(unit.x), max(abs(unit.y), abs(unit.z)));
+    if (!(largestComponent > 0.0)) {
+        return 0.0;
+    }
+    float exitDistance = regionHalfWidth / largestComponent;
+    float nearStart = max(startDistance, 0.0);
+    float nearEnd = min(endDistance, exitDistance);
+    float farStart = max(startDistance, exitDistance);
+    bool runsNear = (partMask & 1) != 0;
+    bool runsFar = (partMask & 2) != 0;
+    float depth;
+    if (!runsNear && !runsFar) {
+        depth = max(0.0, snowWalkTauAt(endDistance, 1.0, unit.y) - snowWalkTauAt(nearStart, 1.0, unit.y));
+    } else {
+        depth = 0.0;
+        if (nearEnd > nearStart) {
+            if (runsNear) {
+                int steps;
+                bool isCapped;
+                depth += snowWalkNearCells(unit, nearStart, nearEnd, SNOW_WALK_PIECE_MAXIMUM_STEPS, steps, isCapped);
+                nearSteps = steps;
+                nearCapped = isCapped;
             } else {
-                farDepth = baseDepth;
+                depth += max(0.0, snowWalkTauAt(nearEnd, 1.0, unit.y) - snowWalkTauAt(nearStart, 1.0, unit.y));
+            }
+        }
+        if (endDistance > farStart) {
+            if (runsFar) {
+                int steps;
+                bool isCapped;
+                depth += snowWalkFarCells(unit, farStart, endDistance, SNOW_WALK_PIECE_MAXIMUM_STEPS, steps, isCapped);
+                farSteps = steps;
+                farCapped = isCapped;
+            } else {
+                depth += max(0.0, snowWalkTauAt(endDistance, 1.0, unit.y) - snowWalkTauAt(farStart, 1.0, unit.y));
             }
         }
     }
-    float total = regionDepth + farDepth;
-    if (!(total > 0.0)) {
+    if (!(depth > 0.0)) {
         return 0.0;
     }
-    return min(FOG_MAXIMUM_OPTICAL_DEPTH, total);
-}
-
-// The optical depth of the snow fog from the eye to infinity along a direction, as SnowFogWalk.skyOpticalDepth, which is
-// the walk to walkDistance along the unit direction and the tail past it while the walk ends in the open. The tail is
-// the height fog from the point at walkDistance to infinity at the snow share 1 and the density 1, which the structures
-// leave past their range. A direction of zero length or one that is not finite, and a distance that is not positive or
-// not finite, give 0 and leave the outputs as a walk of length 0 does:
-float snowWalkSkyOpticalDepth(vec3 direction, float walkDistance, int partMask, out int cellsWalked,
-        out int columnsWalked, out float farStop, out int coarseSteps) {
-    cellsWalked = 0;
-    columnsWalked = 0;
-    coarseSteps = 0;
-    farStop = 1.0;
-    float directionLength = length(direction);
-    if (!(directionLength > 0.0) || isnan(directionLength) || isinf(directionLength) || !(walkDistance > 0.0)
-            || isnan(walkDistance) || isinf(walkDistance)) {
-        return 0.0;
-    }
-    vec3 unit = direction / directionLength;
-    float walkedDepth = snowWalkOpticalDepth(unit * walkDistance, partMask, cellsWalked, columnsWalked, farStop,
-            coarseSteps);
-    if (!(farStop >= 1.0)) {
-        return walkedDepth;
-    }
-    float tailDepth = fogSkyTailOpticalDepth(eyeExtinction, walkDistance, unit.y, heightScale);
-    return min(FOG_MAXIMUM_OPTICAL_DEPTH, walkedDepth + tailDepth);
+    return depth;
 }
