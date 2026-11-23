@@ -61,8 +61,11 @@ uniform vec3 structureUp;
 uniform vec3 structureAcross;
 
 // The side in blocks of the world-aligned cells that the far stretch of a piece is walked in, and the most cells that
-// each stretch of a piece visits, as SnowFogWalk.FAR_CELL and SnowFogWalk.PIECE_MAXIMUM_STEPS:
-const float SNOW_WALK_FAR_CELL = 2.0;
+// each stretch of a piece visits, as SnowFogWalk.FAR_CELL_BLOCKS and SnowFogWalk.PIECE_MAXIMUM_STEPS.
+// The far cell must be a power of two, because the eye's place in the far grid is its block masked with the mask:
+const int SNOW_WALK_FAR_CELL_BLOCKS = 2;
+const int SNOW_WALK_FAR_CELL_MASK = SNOW_WALK_FAR_CELL_BLOCKS - 1;
+const float SNOW_WALK_FAR_CELL = float(SNOW_WALK_FAR_CELL_BLOCKS);
 const int SNOW_WALK_PIECE_MAXIMUM_STEPS = 16;
 // The structure constants that shape the density, as FogStructure:
 const float SNOW_WALK_EDGE_WIDTH = 0.5;
@@ -138,10 +141,11 @@ float snowWalkHeightShare(ivec3 cell) {
 }
 
 // The share of a far cell of SNOW_WALK_FAR_CELL blocks, which is the height share of the 1-block cell that holds its
-// middle, counted from the eye's block as SnowFogWalk.walkFarCells counts it. The eye's place in the far grid is its low
-// block bit on every axis plus its fraction, so eyeBlock & ivec3(1) subtracts that bit from the cell's middle:
+// middle, counted from the eye's block as SnowFogWalk.walkFarCells counts it. The eye's place in the far grid is its
+// block masked with SNOW_WALK_FAR_CELL_MASK on every axis plus its fraction, so the mask is subtracted from the middle:
 float snowWalkFarShare(ivec3 farCell) {
-    ivec3 columnCell = ivec3(floor((vec3(farCell) + vec3(0.5)) * SNOW_WALK_FAR_CELL)) - (eyeBlock & ivec3(1));
+    ivec3 columnCell = ivec3(floor((vec3(farCell) + vec3(0.5)) * SNOW_WALK_FAR_CELL))
+            - (eyeBlock & ivec3(SNOW_WALK_FAR_CELL_MASK));
     return snowWalkHeightShare(columnCell);
 }
 
@@ -275,10 +279,10 @@ float snowWalkNearCells(vec3 unit, float startDistance, float endDistance, int m
 // SnowFogWalk.walkFarCells: a cell adds the height share of the column under its middle times the density of the
 // structures at the middle of the part times the closed form between the two ends of the part, which is nothing under
 // cover, and the rest after maximumSteps cells counts as the open fog at the share 1 and the density 1. The grid is
-// world aligned, so the eye's place in it is its low block bit on every axis plus its fraction.
+// world aligned, so the eye's place in it is its block masked with SNOW_WALK_FAR_CELL_MASK plus its fraction.
 float snowWalkFarCells(vec3 unit, float startDistance, float endDistance, int maximumSteps, out int cellsWalked,
         out bool capped) {
-    vec3 start = vec3(eyeBlock & ivec3(1)) + eyeFraction + unit * startDistance;
+    vec3 start = vec3(eyeBlock & ivec3(SNOW_WALK_FAR_CELL_MASK)) + eyeFraction + unit * startDistance;
     ivec3 cell = ivec3(floor(start / SNOW_WALK_FAR_CELL));
     ivec3 cellStep = ivec3(0);
     vec3 nextBoundary = vec3(SNOW_WALK_NO_BOUNDARY);

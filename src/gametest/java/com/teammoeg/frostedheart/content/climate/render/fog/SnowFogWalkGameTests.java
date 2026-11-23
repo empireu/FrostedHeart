@@ -893,16 +893,16 @@ public final class SnowFogWalkGameTests {
     /**
      * The share of a point beyond the region, which is the far rule: the height share of the far cell of FAR_CELL
      * blocks that contains the point, whose middle point decides, and which is 1 for a column of unknown height.
-     * The cell is found in the frame of the grid, which starts at the even block below the eye's block, and its middle
-     * is turned into a world point before the column under it and the height it stands at are read.
+     * The cell is found in the frame of the grid, which starts at the grid line at or below the eye's block, and its
+     * middle is turned into a world point before the column under it and the height it stands at are read.
      */
     private static double referenceFarShare(ReferenceLayout layout, double pointX, double pointY, double pointZ) {
-        int gridOriginX = layout.eyeBlockX & ~1;
-        int gridOriginY = layout.eyeBlockY & ~1;
-        int gridOriginZ = layout.eyeBlockZ & ~1;
-        double localX = (layout.eyeBlockX & 1) + pointX;
-        double localY = (layout.eyeBlockY & 1) + pointY;
-        double localZ = (layout.eyeBlockZ & 1) + pointZ;
+        int gridOriginX = Math.floorDiv(layout.eyeBlockX, SnowFogWalk.FAR_CELL_BLOCKS) * SnowFogWalk.FAR_CELL_BLOCKS;
+        int gridOriginY = Math.floorDiv(layout.eyeBlockY, SnowFogWalk.FAR_CELL_BLOCKS) * SnowFogWalk.FAR_CELL_BLOCKS;
+        int gridOriginZ = Math.floorDiv(layout.eyeBlockZ, SnowFogWalk.FAR_CELL_BLOCKS) * SnowFogWalk.FAR_CELL_BLOCKS;
+        double localX = layout.eyeBlockX - gridOriginX + pointX;
+        double localY = layout.eyeBlockY - gridOriginY + pointY;
+        double localZ = layout.eyeBlockZ - gridOriginZ + pointZ;
         double middleX = (Math.floor(localX / SnowFogWalk.FAR_CELL) + 0.5) * SnowFogWalk.FAR_CELL;
         double middleY = (Math.floor(localY / SnowFogWalk.FAR_CELL) + 0.5) * SnowFogWalk.FAR_CELL;
         double middleZ = (Math.floor(localZ / SnowFogWalk.FAR_CELL) + 0.5) * SnowFogWalk.FAR_CELL;

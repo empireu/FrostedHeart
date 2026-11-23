@@ -72,9 +72,18 @@ public final class SnowFogWalk {
     public static final double MAXIMUM_RADIUS = 40.0;
     /**
      * The side in blocks of the world-aligned cells that the far part of a piece of the segment is walked in, whose
-     * parts stay fixed in the world while the eye moves.
+     * parts stay fixed in the world while the eye moves. It must be a power of two, because the eye's place in the grid
+     * is its block masked with FAR_CELL_MASK, and it must match SNOW_WALK_FAR_CELL_BLOCKS in snow_walk.glsl.
      */
-    public static final double FAR_CELL = 2.0;
+    public static final int FAR_CELL_BLOCKS = 2;
+    /**
+     * The mask that gives a block's place in the far grid, which is the floor modulo by FAR_CELL_BLOCKS.
+     */
+    public static final int FAR_CELL_MASK = FAR_CELL_BLOCKS - 1;
+    /**
+     * FAR_CELL_BLOCKS as a double, for the walk's distances.
+     */
+    public static final double FAR_CELL = FAR_CELL_BLOCKS;
     /**
      * The most cells that each part of a piece of the segment visits, after which the rest of the piece counts as the
      * open fog at the density 1.
@@ -685,9 +694,9 @@ public final class SnowFogWalk {
      */
     private double walkFarCells(double unitX, double unitY, double unitZ, double startDistance, double endDistance,
             int maximumSteps) {
-        double startX = (eyeBlockX & 1) + eyeFractionX + unitX * startDistance;
-        double startY = (eyeBlockY & 1) + eyeFractionY + unitY * startDistance;
-        double startZ = (eyeBlockZ & 1) + eyeFractionZ + unitZ * startDistance;
+        double startX = (eyeBlockX & FAR_CELL_MASK) + eyeFractionX + unitX * startDistance;
+        double startY = (eyeBlockY & FAR_CELL_MASK) + eyeFractionY + unitY * startDistance;
+        double startZ = (eyeBlockZ & FAR_CELL_MASK) + eyeFractionZ + unitZ * startDistance;
         int cellX = (int) Math.floor(startX / FAR_CELL);
         int cellY = (int) Math.floor(startY / FAR_CELL);
         int cellZ = (int) Math.floor(startZ / FAR_CELL);
@@ -738,9 +747,9 @@ public final class SnowFogWalk {
             cellsWalked = cellStep + 1;
             double exit = Math.min(Math.min(nextBoundaryX, nextBoundaryY), Math.min(nextBoundaryZ, endDistance));
             double exitDepth = tauAt(exit, unitY);
-            int columnOffsetX = (int) Math.floor((cellX + 0.5) * FAR_CELL) - (eyeBlockX & 1);
-            int columnOffsetY = (int) Math.floor((cellY + 0.5) * FAR_CELL) - (eyeBlockY & 1);
-            int columnOffsetZ = (int) Math.floor((cellZ + 0.5) * FAR_CELL) - (eyeBlockZ & 1);
+            int columnOffsetX = (int) Math.floor((cellX + 0.5) * FAR_CELL) - (eyeBlockX & FAR_CELL_MASK);
+            int columnOffsetY = (int) Math.floor((cellY + 0.5) * FAR_CELL) - (eyeBlockY & FAR_CELL_MASK);
+            int columnOffsetZ = (int) Math.floor((cellZ + 0.5) * FAR_CELL) - (eyeBlockZ & FAR_CELL_MASK);
             double share = heightShare(columnOffsetX, columnOffsetY, columnOffsetZ);
             if (share > 0.0) {
                 double partDepth = Math.max(0.0, exitDepth - enterDepth);

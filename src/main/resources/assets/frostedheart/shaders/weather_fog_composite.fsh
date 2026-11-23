@@ -50,8 +50,11 @@ const int DEBUG_MODE_STRUCTURE = 4;
 // takes no excess:
 const float FOG_FROXEL_NEAR = 1.0;
 // The side in blocks of the cells of the density walk of the structure view and its most steps, which belong to the
-// view alone and share nothing with the walk of the fog:
-const float DEBUG_STRUCTURE_CELL = 4.0;
+// view alone and share nothing with the walk of the fog. The cell must be a power of two, because the eye's place in
+// the grid is its block masked with the mask:
+const int DEBUG_STRUCTURE_CELL_BLOCKS = 4;
+const int DEBUG_STRUCTURE_CELL_MASK = DEBUG_STRUCTURE_CELL_BLOCKS - 1;
+const float DEBUG_STRUCTURE_CELL = float(DEBUG_STRUCTURE_CELL_BLOCKS);
 const int DEBUG_STRUCTURE_MAXIMUM_STEPS = 64;
 // The smallest analytic depth that the ratio of the structure view divides by:
 const float DEBUG_STRUCTURE_MINIMUM_ANALYTIC_DEPTH = 1.0e-6;
@@ -156,7 +159,7 @@ vec4 debugField(vec3 offset) {
     float offsetLength = length(offset);
     vec3 point = offsetLength < 0.5 ? offset : offset * (1.0 - 0.25 / offsetLength);
     if (abs(point.x) > regionHalfWidth || abs(point.y) > regionHalfWidth || abs(point.z) > regionHalfWidth) {
-        vec3 localPosition = vec3(eyeBlock & ivec3(1)) + eyeFraction + point;
+        vec3 localPosition = vec3(eyeBlock & ivec3(SNOW_WALK_FAR_CELL_MASK)) + eyeFraction + point;
         ivec3 farCell = ivec3(floor(localPosition / SNOW_WALK_FAR_CELL));
         float share = (partMask & 2) != 0 && offsetLength < rangeDistance ? snowWalkFarShare(farCell) : 1.0;
         return vec4(mix(vec3(0.6, 0.0, 0.6), vec3(0.9), share), DEBUG_FIELD_OPACITY);
@@ -198,7 +201,7 @@ float debugStructureDepth(vec3 offset, float segmentLength, float startParameter
     if (!(endParameter > startParameter) || !(structureShare > 0.0)) {
         return 0.0;
     }
-    vec3 local = vec3(eyeBlock & ivec3(3)) + eyeFraction;
+    vec3 local = vec3(eyeBlock & ivec3(DEBUG_STRUCTURE_CELL_MASK)) + eyeFraction;
     vec3 position = local + startParameter * offset;
     ivec3 cell = ivec3(floor(position / DEBUG_STRUCTURE_CELL));
     ivec3 cellStep = ivec3(0);
