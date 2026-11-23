@@ -1,4 +1,4 @@
-// FHShaders prepends the version line, weather_fog.glsl and snow_walk.glsl.
+// FHShaders prepends the version line, weather_fog.glsl, snow_walk.glsl and weather_fog_excess.glsl.
 // Draws the fog of snow and blizzards over the frame at full resolution: a pixel reads the depth of the main target,
 // takes the analytic height fog along its own ray, adds the excess that weather_fog_integrate.fsh stored at the
 // boundaries around its distance, which is the walk of the froxels of its column, and writes the fog color with the
@@ -20,15 +20,6 @@ uniform mat4 inverseViewProjection;
 uniform int debugMode;
 // Which stretches of a piece walk run, as snowWalkPiece reads them:
 uniform int partMask;
-// The excess of every boundary of the froxel grid, four boundaries to a layer, one channel each:
-uniform sampler2DArray excesses;
-// The columns and rows of the froxel grid, the depth slices of a ray, the range in blocks of its last boundary, and the
-// pixels per side of a column:
-uniform int columnCount;
-uniform int rowCount;
-uniform int sliceCount;
-uniform float rangeDistance;
-uniform int divisor;
 // Whether to answer the self test instead of drawing, and the directions of its rays, one per texel of its 64 texel wide
 // target:
 uniform int selfTest;
@@ -46,9 +37,6 @@ const int DEBUG_MODE_FIELD = 1;
 const int DEBUG_MODE_FROXEL = 2;
 const int DEBUG_MODE_TRANSMITTANCE = 3;
 const int DEBUG_MODE_STRUCTURE = 4;
-// The distance in blocks of the first slice boundary from the eye, as FogFroxelGrid.NEAR, below which the composite
-// takes no excess:
-const float FOG_FROXEL_NEAR = 1.0;
 // The side in blocks of the cells of the density walk of the structure view and its most steps, which belong to the
 // view alone and share nothing with the walk of the fog. The cell must be a power of two, because the eye's place in
 // the grid is its block masked with the mask:
@@ -77,70 +65,6 @@ vec3 fogFroxelColumnDirection(int column, int row) {
         return vec3(0.0);
     }
     return offset / offsetLength;
-}
-
-// The continuous boundary index of a distance along a ray, as FogFroxelGrid.slicePosition: 0 at or below
-// FOG_FROXEL_NEAR and sliceCount at or past the range.
-float fogFroxelSlicePosition(float distance, int sliceCount, float rangeDistance) {
-    if (!(sliceCount > 0) || isnan(distance) || isinf(distance) || !(rangeDistance > FOG_FROXEL_NEAR)) {
-        return 0.0;
-    }
-    if (!(distance > FOG_FROXEL_NEAR)) {
-        return 0.0;
-    }
-    if (distance >= rangeDistance) {
-        return float(sliceCount);
-    }
-    return float(sliceCount) * log(distance / FOG_FROXEL_NEAR) / log(rangeDistance / FOG_FROXEL_NEAR);
-}
-
-// The channel of an excess texel that holds a boundary, as FogFroxelGrid.channelOf: the red, green, blue or alpha of the
-// texel for the channel 0, 1, 2 or 3:
-float froxelChannel(vec4 texel, int channel) {
-    if (channel == 0) {
-        return texel.r;
-    }
-    if (channel == 1) {
-        return texel.g;
-    }
-    if (channel == 2) {
-        return texel.b;
-    }
-    return texel.a;
-}
-
-// The excess of a boundary of the froxel grid, which is the channel (boundaryIndex - 1) % 4 of the layer
-// (boundaryIndex - 1) / 4, as FogFroxelGrid.layerOf and channelOf place it. The read is filtered across the columns of
-// the grid and clamped to the array. The boundary must be 1 or a later one:
-float froxelBoundaryExcess(vec2 uv, int boundaryIndex) {
-    int layer = (boundaryIndex - 1) / 4;
-    int channel = (boundaryIndex - 1) % 4;
-    vec4 texel = texture(excesses, vec3(uv, float(layer)));
-    return froxelChannel(texel, channel);
-}
-
-// The excess of the walked optical depth over the analytic height fog at a distance along a ray, as
-// FogFroxelGrid.excessAtDistance: 0 at or below FOG_FROXEL_NEAR, the last boundary at or past the range, and else the
-// linear blend between the boundaries that surround the distance. The read takes the columns of the grid bilinearly at
-// uv:
-float froxelExcessAtDistance(float distance, vec2 uv) {
-    if (!(distance > FOG_FROXEL_NEAR)) {
-        return 0.0;
-    }
-    if (distance >= rangeDistance) {
-        return froxelBoundaryExcess(uv, sliceCount);
-    }
-    float position = min(float(sliceCount), fogFroxelSlicePosition(distance, sliceCount, rangeDistance));
-    if (!(position > 0.0)) {
-        return 0.0;
-    }
-    int lowBoundary = int(floor(position));
-    if (!(position > float(lowBoundary))) {
-        return froxelBoundaryExcess(uv, lowBoundary);
-    }
-    float belowExcess = lowBoundary > 0 ? froxelBoundaryExcess(uv, lowBoundary) : 0.0;
-    float aboveExcess = froxelBoundaryExcess(uv, lowBoundary + 1);
-    return belowExcess + (position - float(lowBoundary)) * (aboveExcess - belowExcess);
 }
 
 // The optical depth of the sky along a unit direction whose last boundary holds the given excess: the analytic height

@@ -285,6 +285,10 @@ public final class WeatherFogRenderer {
      */
     private static long lastFrameNanos;
     /**
+     * The seconds that the wind advanced by in this frame, capped as WeatherWind caps them, and 0 while paused.
+     */
+    private static double frameStepSeconds;
+    /**
      * The froxel grid of this frame: the pixels per side of a column, the depth slices of a ray, the range in blocks of
      * its last boundary, and its columns and rows.
      */
@@ -794,6 +798,7 @@ public final class WeatherFogRenderer {
         if (Minecraft.getInstance().isPaused()) {
             seconds = 0.0;
         }
+        frameStepSeconds = seconds > 0.0 ? Math.min(seconds, WeatherWind.MAXIMUM_STEP_SECONDS) : 0.0;
         wind.advance(seconds, weather().windSpeed(), weather().windDirection());
     }
 
@@ -1549,6 +1554,90 @@ public final class WeatherFogRenderer {
      */
     public static double eyeExtinction() {
         return eyeExtinction;
+    }
+
+    /**
+     * The fog's height scale in blocks of the frame the fog was last drawn in.
+     */
+    static double heightScale() {
+        return frameHeightScale;
+    }
+
+    /**
+     * The wind that the fog's structures follow, which the caller must not advance.
+     */
+    static WeatherWind wind() {
+        return wind;
+    }
+
+    /**
+     * The seconds that the wind advanced by in the last frame the fog was drawn in, 0 while paused.
+     */
+    static double frameStepSeconds() {
+        return frameStepSeconds;
+    }
+
+    /**
+     * A channel of the snow fog color of the frame, as display sRGB from 0 to 1.
+     */
+    static float snowColor(int channel) {
+        return snowColor[channel];
+    }
+
+    /**
+     * A component of the fog's eye as an offset from the camera, which view bobbing moves.
+     */
+    static float eyeOffset(int component) {
+        return eyeOffset.get(component);
+    }
+
+    /**
+     * The place of the fog's eye inside its block, from 0 to 1, along x, y and z.
+     */
+    static double eyeFractionX() {
+        return eyeFractionX;
+    }
+
+    static double eyeFractionY() {
+        return eyeFractionY;
+    }
+
+    static double eyeFractionZ() {
+        return eyeFractionZ;
+    }
+
+    /**
+     * The share volume that the fog filled in this frame, or 0 when it has none.
+     */
+    static int shareVolumeTexture() {
+        return shareVolumeFailed ? 0 : shareVolumeTexture;
+    }
+
+    /**
+     * The excess array of the froxel grid of the frame and the grid's shape, which the snowflakes read the fog through.
+     */
+    static int excessTexture() {
+        return excessTexture;
+    }
+
+    static int froxelColumnCount() {
+        return frameColumnCount;
+    }
+
+    static int froxelRowCount() {
+        return frameRowCount;
+    }
+
+    static int froxelSliceCount() {
+        return frameSliceCount;
+    }
+
+    static double froxelRangeDistance() {
+        return frameRangeDistance;
+    }
+
+    static int froxelDivisor() {
+        return frameFroxelDivisor;
     }
 
     /**

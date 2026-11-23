@@ -28,6 +28,7 @@ import com.mojang.brigadier.context.CommandContext;
 import com.teammoeg.frostedheart.FHMain;
 import com.teammoeg.frostedheart.content.climate.render.fog.ClientSnowField;
 import com.teammoeg.frostedheart.content.climate.render.fog.SnowFieldTextures;
+import com.teammoeg.frostedheart.content.climate.render.fog.SnowfallRenderer;
 import com.teammoeg.frostedheart.content.climate.render.fog.WeatherFogRenderer;
 import com.teammoeg.frostedheart.infrastructure.config.FHConfig;
 import net.minecraft.client.Minecraft;
@@ -80,6 +81,7 @@ public final class CalculatedSkyClientCommand {
                                 IntegerArgumentType.integer(0, LightPillarRenderer.LAST_DEBUG_MODE))
                                 .executes(CalculatedSkyClientCommand::setDebugMode))))
                 .then(literal("dust").executes(CalculatedSkyClientCommand::dust))
+                .then(literal("snow").executes(CalculatedSkyClientCommand::snow))
                 .then(literal("fog").executes(CalculatedSkyClientCommand::fog)
                         .then(literal("verify").executes(CalculatedSkyClientCommand::verifyFogTextures))
                         .then(literal("selftest").executes(CalculatedSkyClientCommand::fogSelfTest))
@@ -124,6 +126,7 @@ public final class CalculatedSkyClientCommand {
             LightPillarRenderer.clearFailure();
             DustGlitterRenderer.clearFailure();
             WeatherFogRenderer.clearFailure();
+            SnowfallRenderer.clearFailure();
         }
         return status(context);
     }
@@ -186,6 +189,11 @@ public final class CalculatedSkyClientCommand {
         send(context, DustGlitterRenderer.describe());
         send(context, DustColumns.describe());
         send(context, DustLights.describe());
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int snow(CommandContext<CommandSourceStack> context) {
+        send(context, SnowfallRenderer.describe());
         return Command.SINGLE_SUCCESS;
     }
 

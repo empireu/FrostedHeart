@@ -127,6 +127,23 @@ public enum SkySetting {
             + "within 16 blocks, as many as dustGlitterPlainShare. 0 draws none.", Rebuilds.NOTHING, 1.0, 0.0, 10.0),
     TEXEL_DEGREES("texelDegrees", "Size of the sky's square texels in degrees. They are fixed to the sky like the "
             + "sun's texture. 0 draws a smooth sky.", Rebuilds.HALOS, 0.5, 0.0, 5.0),
+    SNOW_ENABLED("snowEnabled", "Draws the falling snow near the eye with the weather fog, in place of vanilla's snow. "
+            + "It draws only while the weather fog draws.", true, null),
+    SNOW_FLAKE_SHARE("snowFlakeShare", "Share of the fog's extinction at the eye that the snowflakes near the eye "
+            + "cover, which sets how many draw. They follow the snowfall, the storm and the height as the fog does.",
+            Rebuilds.NOTHING, 0.5, 0.0, 1.0),
+    SNOW_FLAKE_SIZE("snowFlakeSize", "Mean width of a snowflake in blocks. Larger flakes are fewer at the same "
+            + "share.", Rebuilds.NOTHING, 0.08, 0.01, 0.5),
+    SNOW_FALL_SPEED("snowFallSpeed", "Median speed in blocks per second at which snowflakes fall, give or take a "
+            + "third.", Rebuilds.NOTHING, 0.6, 0.05, 5.0),
+    SNOW_FLUTTER("snowFlutter", "Mean radius in blocks of the circles that snowflakes trace while they fall. 0 makes "
+            + "them fall straight.", Rebuilds.NOTHING, 0.15, 0.0, 1.0),
+    SNOW_STREAK_SECONDS("snowStreakSeconds", "Seconds of motion that a snowflake is smeared over, like a camera's "
+            + "shutter. 0 draws round flakes.", Rebuilds.NOTHING, 0.02, 0.0, 0.2),
+    SNOW_FLAKE_BRIGHTNESS("snowFlakeBrightness", "Brightness of snowflakes as a factor on the fog's color. Above 1 "
+            + "they show against the fog.", Rebuilds.NOTHING, 1.0, 0.0, 4.0),
+    SNOW_NEAR_RADIUS("snowNearRadius", "Distance in blocks from the eye out to which snowflakes are drawn. Larger "
+            + "draws more flakes at the same share.", Rebuilds.NOTHING, 20.0, 8.0, 32.0),
     FOG_ENABLED("fogEnabled", "Draws the fog of snow and blizzards with the calculated sky, thicker in valleys "
             + "and thinner on hills, and as far at every render distance. Off keeps the older fog, which is a share "
             + "of the render distance.", true, null),

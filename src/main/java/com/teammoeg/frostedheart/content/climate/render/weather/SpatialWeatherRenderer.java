@@ -28,6 +28,7 @@ import com.teammoeg.frostedheart.FHMain;
 import com.teammoeg.frostedheart.bootstrap.reference.FHParticleTypes;
 import com.teammoeg.frostedheart.content.climate.gamedata.climate.MutableVisualWeatherSample;
 import com.teammoeg.frostedheart.content.climate.gamedata.climate.WhiteCurtainFieldModel;
+import com.teammoeg.frostedheart.content.climate.render.fog.SnowfallRenderer;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.ParticleStatus;
@@ -127,7 +128,7 @@ public final class SpatialWeatherRenderer {
                 RenderSystem.setShaderTexture(0, WHITE_CURTAIN_TEXTURE);
                 renderWalls(frame, level, frustum, brightness);
             }
-            if (frame.ownsPrecipitation()) {
+            if (frame.ownsPrecipitation() && !SnowfallRenderer.ownsPrecipitation()) {
                 RenderSystem.setShaderTexture(0, SNOW_TEXTURE);
                 renderSnow(frame, brightness);
             }

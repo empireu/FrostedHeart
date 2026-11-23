@@ -25,6 +25,7 @@ import com.teammoeg.frostedheart.infrastructure.config.FHConfig;
 import com.teammoeg.frostedheart.bootstrap.reference.FHParticleTypes;
 import com.teammoeg.frostedheart.bootstrap.reference.FHSoundEvents;
 import com.teammoeg.frostedheart.content.climate.render.InfraredViewRenderer;
+import com.teammoeg.frostedheart.content.climate.render.fog.SnowfallRenderer;
 import com.teammoeg.frostedheart.content.climate.render.sky.CalculatedSkyRenderer;
 import com.teammoeg.frostedheart.content.climate.render.weather.ClientWeatherFrame;
 import com.teammoeg.frostedheart.content.climate.render.weather.ClientWeatherState;
@@ -97,7 +98,7 @@ public abstract class LevelRendererMixin {
     @Inject(method = "renderSnowAndRain", at = @At("HEAD"), cancellable = true)
     private void frostedheart$selectPrecipitationOwner(LightTexture manager, float partialTicks,
                                                        double x, double y, double z, CallbackInfo ci) {
-        if (ClientWeatherFrame.INSTANCE.ownsPrecipitation()) {
+        if (ClientWeatherFrame.INSTANCE.ownsPrecipitation() || SnowfallRenderer.ownsPrecipitation()) {
             ci.cancel();
         }
     }
@@ -249,7 +250,9 @@ public abstract class LevelRendererMixin {
     @Inject(method = "tickRain", at = @At("HEAD"), cancellable = true)
     private void addExtraSnowParticlesAndSounds(Camera camera, CallbackInfo ci) {
         if (ClientWeatherState.INSTANCE.tickOwnsPrecipitation()) {
-            SpatialWeatherRenderer.INSTANCE.tickGroundEffects(minecraft, level, camera);
+            if (!SnowfallRenderer.ownsPrecipitation()) {
+                SpatialWeatherRenderer.INSTANCE.tickGroundEffects(minecraft, level, camera);
+            }
             ci.cancel();
             return;
         }
@@ -285,7 +288,9 @@ public abstract class LevelRendererMixin {
                     final double fluidY = fluid.getHeight(level, pos);
                     final ParticleOptions particle = !fluid.is(FluidTags.LAVA) && !state.is(Blocks.MAGMA_BLOCK) && !CampfireBlock.isLitCampfire(state) ? FHParticleTypes.SNOW.get() : ParticleTypes.SMOKE;
 
-                    level.addParticle(particle, pos.getX() + dx, pos.getY() + Math.max(blockY, fluidY), pos.getZ() + dz, 0d, 0d, 0d);
+                    if (!SnowfallRenderer.ownsPrecipitation()) {
+                        level.addParticle(particle, pos.getX() + dx, pos.getY() + Math.max(blockY, fluidY), pos.getZ() + dz, 0d, 0d, 0d);
+                    }
                 }
             }
 

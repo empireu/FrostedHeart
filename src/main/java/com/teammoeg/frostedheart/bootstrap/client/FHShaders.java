@@ -79,6 +79,11 @@ public class FHShaders extends Shaders {
     private static boolean weatherFogIntegrateUnloadOnReload;
     private static Shader WEATHER_FOG_COMPOSITE;
     private static boolean weatherFogCompositeUnloadOnReload;
+    private static Shader SNOW_FLAKE_UPDATE;
+    private static boolean snowFlakeUpdateUnloadOnReload;
+    private static Shader SNOW_FLAKES_VERTEX;
+    private static Shader SNOW_FLAKES_FRAGMENT;
+    private static boolean snowFlakesUnloadOnReload;
     public static Shader getCalculatedSky() {
         if (CALCULATED_SKY == null) {
             runAndAddReloadListener(() -> CALCULATED_SKY = load(Shader.ShaderType.FRAGMENT, FHMain.rl("calculated_sky")));
@@ -299,8 +304,8 @@ public class FHShaders extends Shaders {
     }
 
     /**
-     * The fragment stage of the composite of the froxel fog, weather_fog.glsl followed by snow_walk.glsl and
-     * weather_fog_composite.fsh in one source, which is compiled on first use.
+     * The fragment stage of the composite of the froxel fog, weather_fog.glsl followed by snow_walk.glsl,
+     * weather_fog_excess.glsl and weather_fog_composite.fsh in one source, which is compiled on first use.
      */
     public static Shader getWeatherFogComposite() {
         if (!weatherFogCompositeUnloadOnReload) {
@@ -310,6 +315,7 @@ public class FHShaders extends Shaders {
         if (WEATHER_FOG_COMPOSITE == null) {
             String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
                     + readShaderSource(FHMain.rl("shaders/snow_walk.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/weather_fog_excess.glsl")) + "\n"
                     + readShaderSource(FHMain.rl("shaders/weather_fog_composite.fsh"));
             WEATHER_FOG_COMPOSITE = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
         }
@@ -324,6 +330,84 @@ public class FHShaders extends Shaders {
         if (WEATHER_FOG_COMPOSITE != null) {
             WEATHER_FOG_COMPOSITE.deleteShader();
             WEATHER_FOG_COMPOSITE = null;
+        }
+    }
+
+    /**
+     * The fragment stage of the pass that moves the snowflakes, snow_flakes.glsl followed by snow_flake_update.fsh in
+     * one source, which is compiled on first use.
+     */
+    public static Shader getSnowFlakeUpdate() {
+        if (!snowFlakeUpdateUnloadOnReload) {
+            addReloadListener(FHShaders::unloadSnowFlakeUpdate);
+            snowFlakeUpdateUnloadOnReload = true;
+        }
+        if (SNOW_FLAKE_UPDATE == null) {
+            String source = readShaderSource(FHMain.rl("shaders/snow_flakes.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/snow_flake_update.fsh"));
+            SNOW_FLAKE_UPDATE = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
+        }
+        return SNOW_FLAKE_UPDATE;
+    }
+
+    /**
+     * Deletes the update stage of the snowflakes after a resource reload, so the next use compiles it from the new
+     * resources.
+     */
+    private static void unloadSnowFlakeUpdate() {
+        if (SNOW_FLAKE_UPDATE != null) {
+            SNOW_FLAKE_UPDATE.deleteShader();
+            SNOW_FLAKE_UPDATE = null;
+        }
+    }
+
+    /**
+     * The vertex stage of the snowflake draw. Both stages are weather_fog.glsl, weather_fog_excess.glsl and
+     * snow_flakes.glsl followed by snow_flakes_draw.glsl, compiled with a define for each.
+     */
+    public static Shader getSnowFlakesVertex() {
+        loadSnowFlakes();
+        return SNOW_FLAKES_VERTEX;
+    }
+
+    public static Shader getSnowFlakesFragment() {
+        loadSnowFlakes();
+        return SNOW_FLAKES_FRAGMENT;
+    }
+
+    private static void loadSnowFlakes() {
+        if (!snowFlakesUnloadOnReload) {
+            addReloadListener(FHShaders::unloadSnowFlakes);
+            snowFlakesUnloadOnReload = true;
+        }
+        if (SNOW_FLAKES_VERTEX == null) {
+            String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/weather_fog_excess.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/snow_flakes.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/snow_flakes_draw.glsl"));
+            Shader vertex = Shader.loadShader(Shader.ShaderType.VERTEX, "#version 150\n#define VERTEX_SHADER\n" + source);
+            Shader fragment;
+            try {
+                fragment = Shader.loadShader(Shader.ShaderType.FRAGMENT,
+                        "#version 150\n#define FRAGMENT_SHADER\n" + source);
+            } catch (RuntimeException exception) {
+                vertex.deleteShader();
+                throw exception;
+            }
+            SNOW_FLAKES_VERTEX = vertex;
+            SNOW_FLAKES_FRAGMENT = fragment;
+        }
+    }
+
+    /**
+     * Deletes the snowflake draw stages after a resource reload, so the next use compiles them from the new resources.
+     */
+    private static void unloadSnowFlakes() {
+        if (SNOW_FLAKES_VERTEX != null) {
+            SNOW_FLAKES_VERTEX.deleteShader();
+            SNOW_FLAKES_FRAGMENT.deleteShader();
+            SNOW_FLAKES_VERTEX = null;
+            SNOW_FLAKES_FRAGMENT = null;
         }
     }
 
