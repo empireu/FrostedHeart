@@ -33,6 +33,7 @@ import com.teammoeg.frostedheart.content.climate.render.sky.SkyDrawTimer;
 import com.teammoeg.frostedheart.content.climate.render.sky.SkyGlPass;
 import com.teammoeg.frostedheart.content.climate.render.sky.SkySetting;
 import net.minecraft.client.Minecraft;
+import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
@@ -58,10 +59,11 @@ import java.util.Locale;
 /**
  * Draws the falling snow near the eye after the weather, in frames where the weather fog was drawn, in place of
  * vanilla's snow, as SnowFlakes describes it.
- * The flakes live on the GPU in two RGBA32F state textures that take turns: each frame one full screen pass over the
- * state moves every flake by the wind and its own fall speed into the other texture, and one instanced draw of quads
- * without vertex data draws the flakes from it, with the fog's transmittance to each flake and the snow share of its
- * place. The draw tests against the depth of the main target, blends over it and writes no depth.
+ * The flakes live on the GPU in two pairs of RGBA32F textures that take turns, the flakes' state and their splats: each
+ * frame one full screen pass over the state moves every flake by the wind and its own fall speed into the other pair,
+ * stopping it where it hits a shape of SnowShapeVolume and leaving a splat there. Two instanced draws of quads without
+ * vertex data then draw the splats and the moving flakes, with the fog's transmittance to each and the snow share of its
+ * place. The draws test against the depth of the main target, blend over it and write no depth.
  * A paused game does not move the flakes. Everything the passes change is set back after them.
  * Render thread only.
  */
@@ -75,7 +77,13 @@ public final class SnowfallRenderer {
      */
     private static final int EXCESS_UNIT = 1;
     private static final int SHARE_VOLUME_UNIT = 2;
-    private static final int TEXTURE_UNITS = 3;
+    private static final int SPLAT_UNIT = 3;
+    /**
+     * The unit of the shape ids, a 3D texture.
+     */
+    private static final int SHAPE_VOLUME_UNIT = 4;
+    private static final int SHAPE_ROWS_UNIT = 5;
+    private static final int TEXTURE_UNITS = 6;
     /**
      * The blocks before the faces of the box over which the flakes fade out.
      */
@@ -85,7 +93,13 @@ public final class SnowfallRenderer {
     private static final Matrix4f viewProjection = new Matrix4f();
     private static final int[] previousTextures = new int[TEXTURE_UNITS];
     private static final int[] stateTextures = new int[2];
+    private static final int[] splatTextures = new int[2];
+    /**
+     * The framebuffers of the two pairs, each with its state texture as the first color attachment and its splat
+     * texture as the second.
+     */
     private static final int[] stateFramebuffers = new int[2];
+    private static final IntBuffer updateDrawBuffers = BufferUtils.createIntBuffer(2);
     private static final SkyDrawTimer updateTimer = new SkyDrawTimer();
     private static final SkyDrawTimer drawTimer = new SkyDrawTimer();
     private static final UpdateProgram updateProgram = new UpdateProgram();
@@ -96,6 +110,17 @@ public final class SnowfallRenderer {
      */
     private static int currentState;
     private static boolean stateFilled;
+    /**
+     * The side of the box the state was filled for, since positions of another side mean other places.
+     */
+    private static double filledBoxSide;
+    /**
+     * The camera's position at the last update, which tells the update how far the camera moved since.
+     */
+    private static double lastUpdateCameraX;
+    private static double lastUpdateCameraY;
+    private static double lastUpdateCameraZ;
+    private static boolean lastCollided;
     /**
      * An empty vertex array, which a core profile needs to draw without vertex data.
      */
@@ -181,12 +206,14 @@ public final class SnowfallRenderer {
         }
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
         int previousExcessTexture = GL11.glGetInteger(GL30.GL_TEXTURE_BINDING_2D_ARRAY);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SHAPE_VOLUME_UNIT);
+        int previousShapeVolumeTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
         try {
             RenderSystem.disableScissor();
             RenderSystem.disableCull();
             updateTimer.begin();
             try {
-                update(boxSide);
+                update(camera, boxSide);
             } finally {
                 updateTimer.end();
             }
@@ -227,6 +254,8 @@ public final class SnowfallRenderer {
             RenderSystem.viewport(viewportX, viewportY, viewportWidth, viewportHeight);
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
             GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, previousExcessTexture);
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SHAPE_VOLUME_UNIT);
+            GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousShapeVolumeTexture);
             for (int unit = 0; unit < TEXTURE_UNITS; unit++) {
                 RenderSystem.activeTexture(GL13.GL_TEXTURE0 + unit);
                 RenderSystem.bindTexture(previousTextures[unit]);
@@ -238,31 +267,54 @@ public final class SnowfallRenderer {
     }
 
     /**
-     * Moves every flake by the seconds of this frame into the other state texture, or places every flake from its
-     * hashes when the state was not filled yet. A paused frame moves nothing.
+     * Moves every flake by the seconds of this frame into the other pair of textures, colliding with the shape volume
+     * when the setting is on and the volume has a position, or places every flake from its hashes when the state was not
+     * filled yet or the box changed its side. A paused frame moves nothing.
      */
-    private static void update(double boxSide) {
+    private static void update(Vec3 camera, double boxSide) {
         double stepSeconds = WeatherFogRenderer.frameStepSeconds();
-        if (stateFilled && !(stepSeconds > 0.0)) {
+        boolean fill = !stateFilled || boxSide != filledBoxSide;
+        if (!fill && !(stepSeconds > 0.0)) {
             return;
         }
+        if (fill) {
+            lastUpdateCameraX = camera.x;
+            lastUpdateCameraY = camera.y;
+            lastUpdateCameraZ = camera.z;
+            filledBoxSide = boxSide;
+        }
+        SnowShapeVolume volume = SkySetting.SNOW_COLLISION.isOn() ? ClientSnowField.shapeVolume() : null;
+        if (volume != null && !volume.hasPosition()) {
+            volume = null;
+        }
+        if (volume != null) {
+            SnowShapeTextures.upload(volume);
+        }
+        lastCollided = volume != null;
         int next = 1 - currentState;
         GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, stateFramebuffers[next]);
         RenderSystem.viewport(0, 0, SnowFlakes.STATE_WIDTH, SnowFlakes.STATE_HEIGHT);
         RenderSystem.disableBlend();
         RenderSystem.disableDepthTest();
         bindTexture(STATE_UNIT, stateTextures[currentState]);
+        bindTexture(SPLAT_UNIT, splatTextures[currentState]);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SHAPE_VOLUME_UNIT);
+        GL11.glBindTexture(GL12.GL_TEXTURE_3D, SnowShapeTextures.volumeTexture());
+        bindTexture(SHAPE_ROWS_UNIT, SnowShapeTextures.rowsTexture());
         updateProgram.use();
-        WeatherWind wind = WeatherFogRenderer.wind();
-        updateProgram.setUniforms(!stateFilled, stepSeconds, wind, SkySetting.SNOW_FALL_SPEED.get(), boxSide);
+        updateProgram.setDrawBuffers();
+        updateProgram.setUniforms(fill, stepSeconds, WeatherFogRenderer.wind(), boxSide, camera, volume);
         SkyGlPass.drawFullScreenQuad();
+        lastUpdateCameraX = camera.x;
+        lastUpdateCameraY = camera.y;
+        lastUpdateCameraZ = camera.z;
         currentState = next;
         stateFilled = true;
     }
 
     /**
-     * Draws the flakes into the main target, binding its framebuffer for drawing, with the depth test of the scene and
-     * no depth writes. Face culling is off, since the quads' winding is not kept.
+     * Draws the splats and then the flakes into the main target, binding its framebuffer for drawing, with the depth
+     * test of the scene and no depth writes. Face culling is off, since the quads' winding is not kept.
      */
     private static void draw(Vec3 camera, double boxSide, double flakeSize, double drawnCount, int instances,
             float pixelsPerBlock) {
@@ -276,16 +328,24 @@ public final class SnowfallRenderer {
         RenderSystem.blendEquation(GL14.GL_FUNC_ADD);
         RenderSystem.blendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ZERO, GL11.GL_ONE);
         bindTexture(STATE_UNIT, stateTextures[currentState]);
+        bindTexture(SPLAT_UNIT, splatTextures[currentState]);
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
         GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, WeatherFogRenderer.excessTexture());
         int shareVolume = WeatherFogRenderer.shareVolumeTexture();
         bindTexture(SHARE_VOLUME_UNIT, shareVolume);
         drawProgram.use();
-        drawProgram.setUniforms(mainTarget, camera, boxSide, flakeSize, drawnCount, pixelsPerBlock, shareVolume != 0);
+        double splatSeconds = SkySetting.SNOW_SPLAT_SECONDS.get();
+        drawProgram.setUniforms(mainTarget, camera, boxSide, flakeSize, drawnCount, pixelsPerBlock, shareVolume != 0,
+                splatSeconds);
         if (vertexArray == 0) {
             vertexArray = GL30.glGenVertexArrays();
         }
         GL30.glBindVertexArray(vertexArray);
+        if (splatSeconds > 0.0) {
+            drawProgram.setSplatPass(true);
+            GL31.glDrawArraysInstanced(GL11.GL_TRIANGLE_STRIP, 0, 4, instances);
+            drawProgram.setSplatPass(false);
+        }
         GL31.glDrawArraysInstanced(GL11.GL_TRIANGLE_STRIP, 0, 4, instances);
     }
 
@@ -295,34 +355,38 @@ public final class SnowfallRenderer {
     }
 
     /**
-     * Makes the two state textures and their framebuffers on first use and keeps them for the session. Textures that
-     * cannot be made are deleted again, and the snowfall stops with a log line, so vanilla's snow draws instead.
+     * Makes the two pairs of state and splat textures and their framebuffers on first use and keeps them for the
+     * session. Textures that cannot be made are deleted again, and the snowfall stops with a log line, so vanilla's snow
+     * draws instead.
      * @return whether the state textures exist
      */
     private static boolean prepareState() {
         if (stateTextures[0] != 0) {
             return true;
         }
-        int[] textures = new int[2];
+        int[] textures = new int[4];
         int[] framebuffers = new int[2];
         int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
         int previousDrawFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
         int previousReadFramebuffer = GL11.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING);
         try {
-            for (int state = 0; state < 2; state++) {
-                textures[state] = GL11.glGenTextures();
-                GL11.glBindTexture(GL11.GL_TEXTURE_2D, textures[state]);
+            for (int texture = 0; texture < textures.length; texture++) {
+                textures[texture] = GL11.glGenTextures();
+                GL11.glBindTexture(GL11.GL_TEXTURE_2D, textures[texture]);
                 GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
                 GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
                 GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
                 GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
                 GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_RGBA32F, SnowFlakes.STATE_WIDTH,
                         SnowFlakes.STATE_HEIGHT, 0, GL11.GL_RGBA, GL11.GL_FLOAT, (FloatBuffer) null);
+            }
+            for (int state = 0; state < 2; state++) {
                 framebuffers[state] = GL30.glGenFramebuffers();
                 GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, framebuffers[state]);
                 GL30.glFramebufferTexture2D(GL30.GL_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, GL11.GL_TEXTURE_2D,
                         textures[state], 0);
-                GL11.glDrawBuffer(GL30.GL_COLOR_ATTACHMENT0);
+                GL30.glFramebufferTexture2D(GL30.GL_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT1, GL11.GL_TEXTURE_2D,
+                        textures[2 + state], 0);
                 int status = GL30.glCheckFramebufferStatus(GL30.GL_FRAMEBUFFER);
                 if (status != GL30.GL_FRAMEBUFFER_COMPLETE) {
                     throw new IllegalStateException("The snowflake state framebuffer is incomplete with status "
@@ -330,8 +394,10 @@ public final class SnowfallRenderer {
                 }
             }
         } catch (RuntimeException exception) {
+            for (int texture = 0; texture < textures.length; texture++) {
+                GL11.glDeleteTextures(textures[texture]);
+            }
             for (int state = 0; state < 2; state++) {
-                GL11.glDeleteTextures(textures[state]);
                 GL30.glDeleteFramebuffers(framebuffers[state]);
             }
             failed = true;
@@ -344,6 +410,8 @@ public final class SnowfallRenderer {
         }
         stateTextures[0] = textures[0];
         stateTextures[1] = textures[1];
+        splatTextures[0] = textures[2];
+        splatTextures[1] = textures[3];
         stateFramebuffers[0] = framebuffers[0];
         stateFramebuffers[1] = framebuffers[1];
         currentState = 0;
@@ -370,14 +438,33 @@ public final class SnowfallRenderer {
                 ? String.format(Locale.ROOT, "%d bytes allocated in the last frame", lastFrameAllocatedBytes)
                 : "allocations not counted by this JVM";
         return String.format(Locale.ROOT, "Snowfall: %d flakes drawn in the last frame, %.0f asked by snowFlakeShare "
-                        + "of %d at most%s; update %s; draw %s; %s", lastInstances, lastAskedCount, SnowFlakes.CAPACITY,
-                lastAskedCount > SnowFlakes.CAPACITY ? " (capped)" : "", updateTimer.describe(), drawTimer.describe(),
-                allocated);
+                        + "of %d at most%s; update %s; draw %s; %s; %s", lastInstances, lastAskedCount,
+                SnowFlakes.CAPACITY, lastAskedCount > SnowFlakes.CAPACITY ? " (capped)" : "", updateTimer.describe(),
+                drawTimer.describe(), allocated, describeCollision());
     }
 
     /**
-     * The program of the update, IMAGE_V and snow_flake_update.fsh, and the locations of its uniforms. It is made again
-     * when a resource reload replaced its stage.
+     * Whether the last update collided, and the state of the shape volume.
+     */
+    private static String describeCollision() {
+        if (!SkySetting.SNOW_COLLISION.isOn()) {
+            return "collision off";
+        }
+        SnowShapeVolume volume = ClientSnowField.shapeVolume();
+        if (volume == null || !volume.hasPosition()) {
+            return "collision waits for the shape volume";
+        }
+        return String.format(Locale.ROOT, "collision %s with %d shapes, %d cells read in all, %d fills, %d box "
+                        + "overflows, %s, %d bricks uploaded since the last report",
+                lastCollided ? "on" : "not run yet", volume.shapes().shapeCount(), volume.cellsRead(),
+                volume.fillCount(), volume.boxOverflowCount(),
+                volume.isIdle() ? "every cell read" : volume.queuedBoxCount() + " boxes waiting",
+                SnowShapeTextures.takeBrickUploads());
+    }
+
+    /**
+     * The program of the update, IMAGE_V and snow_flake_update.fsh, the locations of its uniforms, and the locations of
+     * its two outputs. It is made again when a resource reload replaced its stage.
      */
     private static final class UpdateProgram {
         @Nullable
@@ -389,6 +476,18 @@ public final class SnowfallRenderer {
         private int windVelocityUniform;
         private int fallSpeedUniform;
         private int boxSideUniform;
+        private int flutterRadiusUniform;
+        private int previousCameraInBoxUniform;
+        private int cameraInBoxUniform;
+        private int cameraStepUniform;
+        private int collidesUniform;
+        private int cameraBlockUniform;
+        private int cameraFractionUniform;
+        private int volumeCornerUniform;
+        private int leafPorosityUniform;
+        private int splatSecondsUniform;
+        private int stateOutput;
+        private int splatOutput;
 
         private void use() {
             Shader newFragment = FHShaders.getSnowFlakeUpdate();
@@ -398,33 +497,97 @@ public final class SnowfallRenderer {
                     program = null;
                 }
                 ShaderProgram created = new ShaderProgram();
+                int createdStateOutput;
+                int createdSplatOutput;
                 try {
                     created.attach(FHShaders.IMAGE_V).attach(newFragment);
+                    created.linkProgram();
+                    // GLSL 1.50 leaves the locations of the two outputs to the linker:
+                    createdStateOutput = GL30.glGetFragDataLocation(created.programId, "nextState");
+                    createdSplatOutput = GL30.glGetFragDataLocation(created.programId, "nextSplat");
+                    if (createdStateOutput < 0 || createdStateOutput > 1 || createdSplatOutput < 0
+                            || createdSplatOutput > 1 || createdStateOutput == createdSplatOutput) {
+                        throw new IllegalStateException("The snowflake update writes its outputs to the locations "
+                                + createdStateOutput + " and " + createdSplatOutput + " instead of 0 and 1");
+                    }
                 } catch (RuntimeException exception) {
                     created.delete();
                     throw exception;
                 }
                 program = created;
                 fragment = newFragment;
+                stateOutput = createdStateOutput;
+                splatOutput = createdSplatOutput;
                 program.use();
-                GL20.glUniform1i(GL20.glGetUniformLocation(program.programId, "previousState"), STATE_UNIT);
-                fillStateUniform = GL20.glGetUniformLocation(program.programId, "fillState");
-                stepSecondsUniform = GL20.glGetUniformLocation(program.programId, "stepSeconds");
-                windVelocityUniform = GL20.glGetUniformLocation(program.programId, "windVelocity");
-                fallSpeedUniform = GL20.glGetUniformLocation(program.programId, "fallSpeed");
-                boxSideUniform = GL20.glGetUniformLocation(program.programId, "boxSide");
+                int programId = program.programId;
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "previousState"), STATE_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "previousSplats"), SPLAT_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "shapeVolume"), SHAPE_VOLUME_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "shapeRows"), SHAPE_ROWS_UNIT);
+                fillStateUniform = GL20.glGetUniformLocation(programId, "fillState");
+                stepSecondsUniform = GL20.glGetUniformLocation(programId, "stepSeconds");
+                windVelocityUniform = GL20.glGetUniformLocation(programId, "windVelocity");
+                fallSpeedUniform = GL20.glGetUniformLocation(programId, "fallSpeed");
+                boxSideUniform = GL20.glGetUniformLocation(programId, "boxSide");
+                flutterRadiusUniform = GL20.glGetUniformLocation(programId, "flutterRadius");
+                previousCameraInBoxUniform = GL20.glGetUniformLocation(programId, "previousCameraInBox");
+                cameraInBoxUniform = GL20.glGetUniformLocation(programId, "cameraInBox");
+                cameraStepUniform = GL20.glGetUniformLocation(programId, "cameraStep");
+                collidesUniform = GL20.glGetUniformLocation(programId, "collides");
+                cameraBlockUniform = GL20.glGetUniformLocation(programId, "cameraBlock");
+                cameraFractionUniform = GL20.glGetUniformLocation(programId, "cameraFraction");
+                volumeCornerUniform = GL20.glGetUniformLocation(programId, "volumeCorner");
+                leafPorosityUniform = GL20.glGetUniformLocation(programId, "leafPorosity");
+                splatSecondsUniform = GL20.glGetUniformLocation(programId, "splatSeconds");
             }
             program.use();
         }
 
-        private void setUniforms(boolean fill, double stepSeconds, WeatherWind wind, double fallSpeed,
-                double boxSide) {
+        /**
+         * Lists the state texture and the splat texture of the bound framebuffer at the locations of the outputs that
+         * write them.
+         */
+        private void setDrawBuffers() {
+            updateDrawBuffers.clear();
+            updateDrawBuffers.put(stateOutput, GL30.GL_COLOR_ATTACHMENT0);
+            updateDrawBuffers.put(splatOutput, GL30.GL_COLOR_ATTACHMENT1);
+            GL20.glDrawBuffers(updateDrawBuffers);
+        }
+
+        /**
+         * Sets the uniforms of this update. The camera reaches the program as its place in the periodic box, wrapped in
+         * double precision, as its block and the place inside it, and as its motion since the last update.
+         * @param volume the shapes to collide with, or null for flakes that fall through blocks
+         */
+        private void setUniforms(boolean fill, double stepSeconds, WeatherWind wind, double boxSide, Vec3 camera,
+                @Nullable SnowShapeVolume volume) {
             GL20.glUniform1i(fillStateUniform, fill ? 1 : 0);
             GL20.glUniform1f(stepSecondsUniform, (float) stepSeconds);
             GL20.glUniform2f(windVelocityUniform, (float) (wind.speed() * Math.cos(wind.direction())),
                     (float) (wind.speed() * Math.sin(wind.direction())));
-            GL20.glUniform1f(fallSpeedUniform, (float) fallSpeed);
+            GL20.glUniform1f(fallSpeedUniform, (float) SkySetting.SNOW_FALL_SPEED.get());
             GL20.glUniform1f(boxSideUniform, (float) boxSide);
+            GL20.glUniform1f(flutterRadiusUniform, (float) SkySetting.SNOW_FLUTTER.get());
+            GL20.glUniform3f(previousCameraInBoxUniform, (float) SnowFlakes.wrap(lastUpdateCameraX, boxSide),
+                    (float) SnowFlakes.wrap(lastUpdateCameraY, boxSide),
+                    (float) SnowFlakes.wrap(lastUpdateCameraZ, boxSide));
+            GL20.glUniform3f(cameraInBoxUniform, (float) SnowFlakes.wrap(camera.x, boxSide),
+                    (float) SnowFlakes.wrap(camera.y, boxSide), (float) SnowFlakes.wrap(camera.z, boxSide));
+            GL20.glUniform3f(cameraStepUniform, (float) (camera.x - lastUpdateCameraX),
+                    (float) (camera.y - lastUpdateCameraY), (float) (camera.z - lastUpdateCameraZ));
+            int blockX = Mth.floor(camera.x);
+            int blockY = Mth.floor(camera.y);
+            int blockZ = Mth.floor(camera.z);
+            GL20.glUniform1i(collidesUniform, volume != null ? 1 : 0);
+            GL20.glUniform3i(cameraBlockUniform, blockX, blockY, blockZ);
+            GL20.glUniform3f(cameraFractionUniform, (float) (camera.x - blockX), (float) (camera.y - blockY),
+                    (float) (camera.z - blockZ));
+            if (volume != null) {
+                GL20.glUniform3i(volumeCornerUniform, volume.originX() - blockX, volume.originY() - blockY,
+                        volume.originZ() - blockZ);
+            }
+            GL20.glUniform1f(leafPorosityUniform, (float) SkySetting.FOG_LEAF_POROSITY.get());
+            GL20.glUniform1f(splatSecondsUniform, (float) SkySetting.SNOW_SPLAT_SECONDS.get());
         }
     }
 
@@ -462,6 +625,8 @@ public final class SnowfallRenderer {
         private int sliceCountUniform;
         private int rangeDistanceUniform;
         private int divisorUniform;
+        private int splatPassUniform;
+        private int splatSecondsUniform;
 
         private void use() {
             Shader newVertex = FHShaders.getSnowFlakesVertex();
@@ -486,6 +651,7 @@ public final class SnowfallRenderer {
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "flakeState"), STATE_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "excesses"), EXCESS_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "shareVolume"), SHARE_VOLUME_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "splatState"), SPLAT_UNIT);
                 GL20.glUniform3i(GL20.glGetUniformLocation(programId, "shareLayout"), FogShareVolume.SIDE,
                         FogShareVolume.ORIGIN, FogShareVolume.TILES_ACROSS);
                 GL20.glUniform1f(GL20.glGetUniformLocation(programId, "boxFadeWidth"), BOX_FADE_WIDTH);
@@ -512,8 +678,17 @@ public final class SnowfallRenderer {
                 sliceCountUniform = GL20.glGetUniformLocation(programId, "sliceCount");
                 rangeDistanceUniform = GL20.glGetUniformLocation(programId, "rangeDistance");
                 divisorUniform = GL20.glGetUniformLocation(programId, "divisor");
+                splatPassUniform = GL20.glGetUniformLocation(programId, "splatPass");
+                splatSecondsUniform = GL20.glGetUniformLocation(programId, "splatSeconds");
             }
             program.use();
+        }
+
+        /**
+         * Makes the next draw draw the splats instead of the flakes, or the flakes again.
+         */
+        private void setSplatPass(boolean splats) {
+            GL20.glUniform1i(splatPassUniform, splats ? 1 : 0);
         }
 
         /**
@@ -521,7 +696,8 @@ public final class SnowfallRenderer {
          * box, wrapped in double precision, so no world position passes through a float.
          */
         private void setUniforms(RenderTarget mainTarget, Vec3 camera, double boxSide, double flakeSize,
-                double drawnCount, float pixelsPerBlock, boolean hasShareVolume) {
+                double drawnCount, float pixelsPerBlock, boolean hasShareVolume, double splatSeconds) {
+            GL20.glUniform1f(splatSecondsUniform, (float) splatSeconds);
             viewProjection.get(matrixBuffer);
             GL20.glUniformMatrix4fv(viewProjectionUniform, false, matrixBuffer);
             GL20.glUniform2f(screenSizeUniform, (float) mainTarget.width, (float) mainTarget.height);

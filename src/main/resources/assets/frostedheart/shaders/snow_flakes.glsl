@@ -20,6 +20,13 @@ const uint SNOW_SALT_SHELTER = 11u;
 const uint SNOW_SALT_SHAPE = 12u;
 const uint SNOW_SALT_TURN = 13u;
 const uint SNOW_SALT_TILT = 14u;
+const uint SNOW_SALT_LEAVES = 15u;
+// What the angle of a flake's flutter circle in its state is raised by while the flake is stopped, more than a full
+// circle, as SnowFlakes.STOPPED_PHASE:
+const float SNOW_STOPPED_PHASE = 8.0;
+// The step between faces in the w of a splat, which holds the seconds since the hit below it, as
+// SnowFlakes.SPLAT_FACE_STRIDE:
+const float SNOW_SPLAT_FACE_STRIDE = 16.0;
 // The spreads of a flake's own values around the settings, as SnowFlakes:
 const float SNOW_SLOWEST_FALL_SHARE = 0.6666667;
 const float SNOW_FASTEST_FALL_SHARE = 1.3333333;
@@ -91,4 +98,15 @@ float snowFlakeShelterThreshold(uint flake) {
 // A position wrapped into the box of the given side, from 0 up to the side:
 vec3 snowWrap(vec3 position, float side) {
     return position - side * floor(position / side);
+}
+
+// The offset of the copy nearest the camera, given a position minus the camera's position in the box, as
+// SnowFlakes.nearestCopyOffset:
+vec3 snowNearestOffset(vec3 offset, float side) {
+    return offset - side * floor(offset / side + 0.5);
+}
+
+// Where a flake sits on its flutter circle, from the point its path passes:
+vec3 snowFlutterOffset(float phase, float circleRadius) {
+    return vec3(cos(phase), 0.0, sin(phase)) * circleRadius;
 }

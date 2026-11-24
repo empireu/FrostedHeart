@@ -25,6 +25,7 @@ import net.minecraft.world.level.chunk.Palette;
 import net.minecraft.world.level.chunk.PalettedContainer;
 
 import javax.annotation.Nullable;
+import java.util.function.ToIntFunction;
 
 /**
  * The mask sets of the palette of one chunk section, in a table indexed by palette index, so that reading a cell of the
@@ -38,6 +39,8 @@ import javax.annotation.Nullable;
  * only has to be extended, and a new data object only cleared.
  * A chunk sent again reads its palettes in place and keeps the data object when the palette's bits are unchanged, so
  * the caller must call forget or load again after a chunk is sent again.
+ * Another id of block states, such as the shape ids of SnowShapes, takes the place of the mask sets when the instance is
+ * made with that id's function.
  * After the first lookup of each block state, nothing allocates. Not thread safe.
  */
 public final class SnowSectionMasks {
@@ -47,7 +50,7 @@ public final class SnowSectionMasks {
      */
     public static final int TABLE_SIZE = 256;
 
-    private final SnowFaces faces;
+    private final ToIntFunction<BlockState> idOfState;
     /**
      * The mask set of each palette index, or -1 for an entry that was not looked up yet.
      */
@@ -64,7 +67,16 @@ public final class SnowSectionMasks {
      * @param faces the table the mask set ids come from, which this instance does not modify
      */
     public SnowSectionMasks(SnowFaces faces) {
-        this.faces = faces;
+        this(faces::maskSetOf);
+    }
+
+    /**
+     * Creates the ids of a section, with no section loaded.
+     * @param idOfState the id of a block state, which must not be negative and must stay the same for a state while
+     *        this instance keeps it in its table
+     */
+    public SnowSectionMasks(ToIntFunction<BlockState> idOfState) {
+        this.idOfState = idOfState;
     }
 
     /**
@@ -95,7 +107,7 @@ public final class SnowSectionMasks {
      * @param localX the local x of the cell, from 0 to 15
      * @param localY the local y of the cell, from 0 to 15
      * @param localZ the local z of the cell, from 0 to 15
-     * @return the mask set id, from SnowFaces
+     * @return the mask set id, from SnowFaces, or the id of the function this instance was made with
      * @throws IllegalStateException when no section was loaded
      */
     public int maskSetAt(int localX, int localY, int localZ) {
@@ -112,11 +124,11 @@ public final class SnowSectionMasks {
         Palette<BlockState> palette = data.palette();
         int index = data.storage().get((localY << 8) | (localZ << 4) | localX);
         if (!usesTable) {
-            return faces.maskSetOf(palette.valueFor(index));
+            return idOfState.applyAsInt(palette.valueFor(index));
         }
         if (index >= paletteSize) {
             if (index >= TABLE_SIZE) {
-                return faces.maskSetOf(palette.valueFor(index));
+                return idOfState.applyAsInt(palette.valueFor(index));
             }
             // A linear or hash map palette appended entries in place, which keeps the entries they had and adds
             // unmapped ones:
@@ -128,7 +140,7 @@ public final class SnowSectionMasks {
         }
         int maskSet = maskSets[index];
         if (maskSet < 0) {
-            maskSet = faces.maskSetOf(palette.valueFor(index));
+            maskSet = idOfState.applyAsInt(palette.valueFor(index));
             maskSets[index] = maskSet;
         }
         return maskSet;

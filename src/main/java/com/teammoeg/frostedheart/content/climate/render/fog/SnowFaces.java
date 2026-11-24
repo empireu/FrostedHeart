@@ -392,9 +392,9 @@ public final class SnowFaces {
 
     /**
      * The first voxel index along an axis whose center lies strictly above the given lower bound of a box, or
-     * PIXEL_COUNT when no voxel does.
+     * PIXEL_COUNT when no voxel does. SnowShapes rasterizes with the same rule.
      */
-    private static int firstVoxelIndex(double lowerBound) {
+    static int firstVoxelIndex(double lowerBound) {
         double scaledBound = lowerBound * PIXEL_COUNT - 0.5;
         if (Double.isNaN(scaledBound)) {
             return PIXEL_COUNT;
@@ -410,9 +410,9 @@ public final class SnowFaces {
 
     /**
      * The last voxel index along an axis whose center lies strictly below the given upper bound of a box, or -1 when
-     * no voxel does.
+     * no voxel does. SnowShapes rasterizes with the same rule.
      */
-    private static int lastVoxelIndex(double upperBound) {
+    static int lastVoxelIndex(double upperBound) {
         double scaledBound = upperBound * PIXEL_COUNT - 0.5;
         if (Double.isNaN(scaledBound)) {
             return -1;

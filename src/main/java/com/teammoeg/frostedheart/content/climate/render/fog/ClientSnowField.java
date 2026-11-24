@@ -53,6 +53,9 @@ import java.util.Locale;
  * that arrives from the server clears the masks of the states and fills the field again.
  * The window of far heights follows the eye on the same ticks, and the two textures that the fog reads are uploaded
  * for the frame that asks for them with prepareTextures.
+ * While the falling snow is on, a SnowShapeVolume of the shapes the snowflakes collide with follows the eye on the same
+ * ticks and hears of the same block changes and chunks, and each frame reads up to SHAPE_CELLS_PER_FRAME of its cells
+ * before the field's budget is spent.
  * An error turns the field off, and it comes back once the fog is turned off and on again.
  * Client thread only.
  */
@@ -68,6 +71,11 @@ public final class ClientSnowField {
      * move of one chunk and a thirtysecond of the window after a fill.
      */
     private static final int FAR_TILES_PER_TICK = 128;
+    /**
+     * The cells of the shape volume that one frame reads, which covers the cells that a move of one block brings in,
+     * and fills the volume in 16 frames.
+     */
+    private static final int SHAPE_CELLS_PER_FRAME = 16384;
     private static final double NANOSECONDS_PER_MICROSECOND = 1000.0;
     private static final double NANOSECONDS_PER_MILLISECOND = 1.0e6;
 
@@ -81,6 +89,8 @@ public final class ClientSnowField {
     private static SnowFieldReader reader;
     @Nullable
     private static FarHeights farHeights;
+    @Nullable
+    private static SnowShapeVolume shapeVolume;
     @Nullable
     private static ClientLevel trackedLevel;
     /**
@@ -177,6 +187,10 @@ public final class ClientSnowField {
         long deadline = start + (long) (budgetMicros * NANOSECONDS_PER_MICROSECOND);
         int solverSteps = 0;
         try {
+            SnowShapeVolume currentShapeVolume = shapeVolume;
+            if (currentShapeVolume != null && !currentShapeVolume.isIdle()) {
+                currentShapeVolume.read(lookup, SHAPE_CELLS_PER_FRAME);
+            }
             while (true) {
                 boolean worked = false;
                 if (!currentReader.isIdle()) {
@@ -218,6 +232,9 @@ public final class ClientSnowField {
             return;
         }
         faces.clearStateCache();
+        if (shapeVolume != null) {
+            shapeVolume.shapes().clearStateCache();
+        }
         fillRequested = true;
     }
 
@@ -237,6 +254,10 @@ public final class ClientSnowField {
         long start = System.nanoTime();
         try {
             currentReader.onBlockChanged(lookup, pos.getX(), pos.getY(), pos.getZ(), newState);
+            SnowShapeVolume currentShapeVolume = shapeVolume;
+            if (currentShapeVolume != null) {
+                currentShapeVolume.onBlockChanged(pos.getX(), pos.getY(), pos.getZ(), newState);
+            }
             FarHeights currentFarHeights = farHeights;
             if (currentFarHeights != null) {
                 currentFarHeights.onBlockChanged(lookup, pos.getX(), pos.getZ());
@@ -264,6 +285,9 @@ public final class ClientSnowField {
         FarHeights currentFarHeights = farHeights;
         if (level == trackedLevel && currentReader != null) {
             currentReader.queueChunk(chunkX, chunkZ);
+            if (shapeVolume != null) {
+                shapeVolume.queueChunk(chunkX, chunkZ);
+            }
             if (currentFarHeights != null) {
                 currentFarHeights.onChunkLoaded(lookup, chunkX, chunkZ);
             }
@@ -357,6 +381,19 @@ public final class ClientSnowField {
     }
 
     /**
+     * The shapes the snowflakes collide with, while the field follows the level of the game and the falling snow is on.
+     * @return the volume, or null otherwise, and a volume without a position before the first tick that places it
+     */
+    @Nullable
+    public static SnowShapeVolume shapeVolume() {
+        ClientLevel level = trackedLevel;
+        if (failed || level == null || level != Minecraft.getInstance().level) {
+            return null;
+        }
+        return shapeVolume;
+    }
+
+    /**
      * The upper height of the vanilla fog bound: the largest surface height of the window of far heights, or the
      * maximum build height of the tracked level while its reads are pending.
      * @return the height in blocks, or Integer.MAX_VALUE while the tracked level is not the level of the game
@@ -404,21 +441,30 @@ public final class ClientSnowField {
             field = createdField;
             reader = new SnowFieldReader(createdField, createdFaces);
             farHeights = new FarHeights();
+            shapeVolume = new SnowShapeVolume(new SnowShapes());
             leafPorosity = porosity;
         }
         if (level != trackedLevel) {
             trackedLevel = level;
             lookup.setLevel(level);
             faces.clearStateCache();
+            shapeVolume.shapes().clearStateCache();
+            shapeVolume.forget();
             applyLeafPorosity();
             fillRequested = false;
             farHeights.forget();
             reader.fill(eyeX, eyeY, eyeZ);
         } else if (fillRequested) {
             fillRequested = false;
+            shapeVolume.forget();
             reader.fill(eyeX, eyeY, eyeZ);
         } else {
             reader.follow(eyeX, eyeY, eyeZ);
+        }
+        if (SkySetting.SNOW_ENABLED.isOn()) {
+            shapeVolume.follow(eyeX, eyeY, eyeZ);
+        } else {
+            shapeVolume.forget();
         }
         if (Double.compare(SkySetting.FOG_LEAF_POROSITY.get(), leafPorosity) != 0) {
             applyLeafPorosity();
