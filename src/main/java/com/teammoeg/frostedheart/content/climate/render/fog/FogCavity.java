@@ -25,13 +25,15 @@ package com.teammoeg.frostedheart.content.climate.render.fog;
  * <p>
  * Deep narrow open-sky cavities such as ravines and walled alleys hold less blowing snow than exposed plains, so the
  * weather fog thins toward fogCavityShare and its moving wisps fade out below the cavity's enclosure surface while
- * falling snow brakes horizontally and settles onto the floor. The enclosure surface h_cav(x, z) and its lower opposing
- * rim are scanned from FarHeights no-leaves heights on a world-aligned 512 by 512 grid (1 block per texel, +-256 blocks
- * around the window center) along four axes (+-X, +-Z, +-(X+Z), +-(X-Z)) up to about 32 blocks at ENCLOSURE_SLOPE =
- * 0.65. Along each axis, a 3-texel perpendicular minimum erases thin posts narrower than 3 blocks on both sloped and
- * raw wall heights, and combining min(min(rawPos, rawNeg), 0.5 * (h_pos + h_neg)) produces a wall-to-wall flat surface
- * clamped to the lower rim while giving single cliff feet, wide valleys and gentle V-valleys no thinning. Taking the
- * maximum over all four axes keeps ravines nearly isotropic at 0, 22.5 and 45 degrees.
+ * falling snow brakes horizontally and settles onto the floor. The enclosure surface h_cav(x, z) and the lower lip of
+ * the two walls that define it are scanned from FarHeights no-leaves heights on a world-aligned 512 by 512 grid (1
+ * block per texel, +-256 blocks around the window center) along four axes (+-X, +-Z, +-(X+Z), +-(X-Z)) up to about 32
+ * blocks at ENCLOSURE_SLOPE = 0.65. Each direction's wall is the column with the highest sloped height h - 0.65 * d,
+ * the nearest one on a tie, and its lip is that column's own height. Along each axis, a 3-texel perpendicular minimum
+ * erases thin posts narrower than 3 blocks, and combining min(lowerLip, 0.5 * (h_pos + h_neg)) of the sloped heights
+ * produces a wall-to-wall flat surface clamped to the lower lip while giving single cliff feet, wide valleys and gentle
+ * V-valleys no thinning. Taking the maximum over all four axes keeps ravines nearly isotropic at 0, 22.5 and 45
+ * degrees.
  * <p>
  * Below h_cav, the fog density decays exponentially with depth over the weather's decay length toward an effective
  * floor that ramps smoothly from 1.0 in calm wind to fogCavityShare in windy weather, and fog structure contrast fades
@@ -233,6 +235,14 @@ public final class FogCavity {
     }
 
     /**
+     * Whether the wall with sloped maximum sloped at distance steps is lower than the wall bestSloped at bestDistance,
+     * or as low and nearer, matching lowerWall in fog_cavity_build.fsh.
+     */
+    public static boolean isLowerWall(float sloped, float distance, float bestSloped, float bestDistance) {
+        return sloped < bestSloped || (sloped == bestSloped && distance < bestDistance);
+    }
+
+    /**
      * Runs the exact 12-pass GPU cavity enclosure scan (6 cardinal plus 6 diagonal) on the CPU in single precision,
      * writing mapSize by mapSize flat enclosure heights into output (z outer, x inner), matching fog_cavity_build.fsh.
      */
@@ -245,25 +255,26 @@ public final class FogCavity {
 
     /**
      * Runs the exact 12-pass GPU cavity enclosure scan (6 cardinal plus 6 diagonal) on the CPU in single precision,
-     * writing mapSize by mapSize flat enclosure heights into output and the winning axis's lower opposing rim height
-     * into rimOutput (when non-null), matching fog_cavity_build.fsh.
+     * writing mapSize by mapSize flat enclosure heights into output and the lower lip of the winning axis's two walls
+     * into lipOutput (when non-null), matching fog_cavity_build.fsh.
      */
     public static void scan(int mapSize, int[] cardinalStrides, int[] diagonalStrides, SnowLee.HeightLookup heights,
             int minX, int minZ, int windowMinX, int windowMinZ, int windowSize, double slope, boolean applyPerpMin,
-            float[] output, float[] rimOutput) {
+            float[] output, float[] lipOutput) {
         int texelCount = mapSize * mapSize;
         float[] workA = new float[texelCount * 4];
         float[] workB = new float[texelCount * 4];
-        float[] rawWorkA = new float[texelCount * 4];
-        float[] rawWorkB = new float[texelCount * 4];
+        float[] distanceWorkA = new float[texelCount * 4];
+        float[] distanceWorkB = new float[texelCount * 4];
         float[] cardinal = new float[texelCount];
-        float[] cardinalRim = new float[texelCount];
+        float[] cardinalLip = new float[texelCount];
+        float[] wall = new float[2];
         float floatSlope = (float) slope;
         float diagSlope = (float) (slope * DIAGONAL_STEP);
         float noHeight = (float) NO_HEIGHT;
         float threshold = (float) NO_HEIGHT_THRESHOLD;
 
-        // Pass 0: cardinal resample at t = 1 along +X (0), -X (1), +Z (2), -Z (3) for both sloped and raw heights:
+        // Pass 0: cardinal resample one step along +X (0), -X (1), +Z (2), -Z (3):
         for (int iz = 0; iz < mapSize; iz++) {
             int worldZ = minZ + iz;
             for (int ix = 0; ix < mapSize; ix++) {
@@ -277,22 +288,17 @@ public final class FogCavity {
                         floatSlope, noHeight, threshold);
                 workA[base + 3] = sampleWithDrop(heights, windowMinX, windowMinZ, windowSize, worldX, worldZ - 1,
                         floatSlope, noHeight, threshold);
-                rawWorkA[base] = sampleWithDrop(heights, windowMinX, windowMinZ, windowSize, worldX + 1, worldZ,
-                        0.0F, noHeight, threshold);
-                rawWorkA[base + 1] = sampleWithDrop(heights, windowMinX, windowMinZ, windowSize, worldX - 1, worldZ,
-                        0.0F, noHeight, threshold);
-                rawWorkA[base + 2] = sampleWithDrop(heights, windowMinX, windowMinZ, windowSize, worldX, worldZ + 1,
-                        0.0F, noHeight, threshold);
-                rawWorkA[base + 3] = sampleWithDrop(heights, windowMinX, windowMinZ, windowSize, worldX, worldZ - 1,
-                        0.0F, noHeight, threshold);
+                for (int channel = 0; channel < 4; channel++) {
+                    distanceWorkA[base + channel] = 1.0F;
+                }
             }
         }
 
         // Passes 1..cardinalStrides.length: cardinal doubling scan; final pass applies 3-texel perp min and combines:
         float[] source = workA;
         float[] target = workB;
-        float[] rawSource = rawWorkA;
-        float[] rawTarget = rawWorkB;
+        float[] distanceSource = distanceWorkA;
+        float[] distanceTarget = distanceWorkB;
         for (int pass = 0; pass < cardinalStrides.length; pass++) {
             int stride = cardinalStrides[pass];
             boolean finalPass = pass == cardinalStrides.length - 1;
@@ -301,68 +307,50 @@ public final class FogCavity {
                 for (int ix = 0; ix < mapSize; ix++) {
                     if (!finalPass) {
                         int base = (iz * mapSize + ix) * 4;
-                        target[base] = scanDirection(source, mapSize, ix, iz, stride, 0, 0, drop, threshold);
-                        target[base + 1] = scanDirection(source, mapSize, ix, iz, -stride, 0, 1, drop, threshold);
-                        target[base + 2] = scanDirection(source, mapSize, ix, iz, 0, stride, 2, drop, threshold);
-                        target[base + 3] = scanDirection(source, mapSize, ix, iz, 0, -stride, 3, drop, threshold);
-                        rawTarget[base] = scanDirection(rawSource, mapSize, ix, iz, stride, 0, 0, 0.0F, threshold);
-                        rawTarget[base + 1] = scanDirection(rawSource, mapSize, ix, iz, -stride, 0, 1, 0.0F, threshold);
-                        rawTarget[base + 2] = scanDirection(rawSource, mapSize, ix, iz, 0, stride, 2, 0.0F, threshold);
-                        rawTarget[base + 3] = scanDirection(rawSource, mapSize, ix, iz, 0, -stride, 3, 0.0F, threshold);
+                        scanStep(source, distanceSource, target, distanceTarget, mapSize, ix, iz, stride, 0, 0, base,
+                                drop, stride, threshold, wall);
+                        scanStep(source, distanceSource, target, distanceTarget, mapSize, ix, iz, -stride, 0, 1, base,
+                                drop, stride, threshold, wall);
+                        scanStep(source, distanceSource, target, distanceTarget, mapSize, ix, iz, 0, stride, 2, base,
+                                drop, stride, threshold, wall);
+                        scanStep(source, distanceSource, target, distanceTarget, mapSize, ix, iz, 0, -stride, 3, base,
+                                drop, stride, threshold, wall);
                         continue;
                     }
-                    float plusX = scanDirection(source, mapSize, ix, iz, stride, 0, 0, drop, threshold);
-                    float minusX = scanDirection(source, mapSize, ix, iz, -stride, 0, 1, drop, threshold);
-                    float plusZ = scanDirection(source, mapSize, ix, iz, 0, stride, 2, drop, threshold);
-                    float minusZ = scanDirection(source, mapSize, ix, iz, 0, -stride, 3, drop, threshold);
-                    float rawPlusX = scanDirection(rawSource, mapSize, ix, iz, stride, 0, 0, 0.0F, threshold);
-                    float rawMinusX = scanDirection(rawSource, mapSize, ix, iz, -stride, 0, 1, 0.0F, threshold);
-                    float rawPlusZ = scanDirection(rawSource, mapSize, ix, iz, 0, stride, 2, 0.0F, threshold);
-                    float rawMinusZ = scanDirection(rawSource, mapSize, ix, iz, 0, -stride, 3, 0.0F, threshold);
-                    if (applyPerpMin) {
-                        int zMinus = Math.max(iz - 1, 0);
-                        int zPlus = Math.min(iz + 1, mapSize - 1);
-                        plusX = Math.min(plusX, Math.min(
-                                scanDirection(source, mapSize, ix, zMinus, stride, 0, 0, drop, threshold),
-                                scanDirection(source, mapSize, ix, zPlus, stride, 0, 0, drop, threshold)));
-                        minusX = Math.min(minusX, Math.min(
-                                scanDirection(source, mapSize, ix, zMinus, -stride, 0, 1, drop, threshold),
-                                scanDirection(source, mapSize, ix, zPlus, -stride, 0, 1, drop, threshold)));
-                        rawPlusX = Math.min(rawPlusX, Math.min(
-                                scanDirection(rawSource, mapSize, ix, zMinus, stride, 0, 0, 0.0F, threshold),
-                                scanDirection(rawSource, mapSize, ix, zPlus, stride, 0, 0, 0.0F, threshold)));
-                        rawMinusX = Math.min(rawMinusX, Math.min(
-                                scanDirection(rawSource, mapSize, ix, zMinus, -stride, 0, 1, 0.0F, threshold),
-                                scanDirection(rawSource, mapSize, ix, zPlus, -stride, 0, 1, 0.0F, threshold)));
-                        int xMinus = Math.max(ix - 1, 0);
-                        int xPlus = Math.min(ix + 1, mapSize - 1);
-                        plusZ = Math.min(plusZ, Math.min(
-                                scanDirection(source, mapSize, xMinus, iz, 0, stride, 2, drop, threshold),
-                                scanDirection(source, mapSize, xPlus, iz, 0, stride, 2, drop, threshold)));
-                        minusZ = Math.min(minusZ, Math.min(
-                                scanDirection(source, mapSize, xMinus, iz, 0, -stride, 3, drop, threshold),
-                                scanDirection(source, mapSize, xPlus, iz, 0, -stride, 3, drop, threshold)));
-                        rawPlusZ = Math.min(rawPlusZ, Math.min(
-                                scanDirection(rawSource, mapSize, xMinus, iz, 0, stride, 2, 0.0F, threshold),
-                                scanDirection(rawSource, mapSize, xPlus, iz, 0, stride, 2, 0.0F, threshold)));
-                        rawMinusZ = Math.min(rawMinusZ, Math.min(
-                                scanDirection(rawSource, mapSize, xMinus, iz, 0, -stride, 3, 0.0F, threshold),
-                                scanDirection(rawSource, mapSize, xPlus, iz, 0, -stride, 3, 0.0F, threshold)));
-                    }
-                    float surfX = combineAxisSurface(plusX, minusX, rawPlusX, rawMinusX, noHeight, threshold);
-                    float rimX = combineAxisRim(plusX, minusX, rawPlusX, rawMinusX, noHeight, threshold);
-                    float surfZ = combineAxisSurface(plusZ, minusZ, rawPlusZ, rawMinusZ, noHeight, threshold);
-                    float rimZ = combineAxisRim(plusZ, minusZ, rawPlusZ, rawMinusZ, noHeight, threshold);
+                    finalWall(source, distanceSource, mapSize, ix, iz, stride, 0, 0, drop, stride, applyPerpMin, 0, 1,
+                            threshold, wall);
+                    float plusX = wall[0];
+                    float plusXDistance = wall[1];
+                    finalWall(source, distanceSource, mapSize, ix, iz, -stride, 0, 1, drop, stride, applyPerpMin, 0,
+                            1, threshold, wall);
+                    float minusX = wall[0];
+                    float minusXDistance = wall[1];
+                    finalWall(source, distanceSource, mapSize, ix, iz, 0, stride, 2, drop, stride, applyPerpMin, 1, 0,
+                            threshold, wall);
+                    float plusZ = wall[0];
+                    float plusZDistance = wall[1];
+                    finalWall(source, distanceSource, mapSize, ix, iz, 0, -stride, 3, drop, stride, applyPerpMin, 1,
+                            0, threshold, wall);
+                    float minusZ = wall[0];
+                    float minusZDistance = wall[1];
+                    float surfX = combineAxisSurface(plusX, plusXDistance, minusX, minusXDistance, floatSlope,
+                            noHeight, threshold);
+                    float lipX = combineAxisLip(plusX, plusXDistance, minusX, minusXDistance, floatSlope, noHeight,
+                            threshold);
+                    float surfZ = combineAxisSurface(plusZ, plusZDistance, minusZ, minusZDistance, floatSlope,
+                            noHeight, threshold);
+                    float lipZ = combineAxisLip(plusZ, plusZDistance, minusZ, minusZDistance, floatSlope, noHeight,
+                            threshold);
                     int index = iz * mapSize + ix;
                     if (surfZ > surfX) {
                         cardinal[index] = surfZ;
-                        cardinalRim[index] = rimZ;
+                        cardinalLip[index] = lipZ;
                     } else if (surfX > surfZ) {
                         cardinal[index] = surfX;
-                        cardinalRim[index] = rimX;
+                        cardinalLip[index] = lipX;
                     } else {
                         cardinal[index] = surfX;
-                        cardinalRim[index] = Math.max(rimX, rimZ);
+                        cardinalLip[index] = Math.max(lipX, lipZ);
                     }
                 }
             }
@@ -370,17 +358,17 @@ public final class FogCavity {
                 float[] swap = source;
                 source = target;
                 target = swap;
-                float[] rawSwap = rawSource;
-                rawSource = rawTarget;
-                rawTarget = rawSwap;
+                float[] distanceSwap = distanceSource;
+                distanceSource = distanceTarget;
+                distanceTarget = distanceSwap;
             }
         }
 
-        // Diagonal resample at t = 1 along (+1,+1), (-1,-1), (+1,-1), (-1,+1):
+        // Diagonal resample one step along (+1,+1), (-1,-1), (+1,-1), (-1,+1):
         source = workA;
         target = workB;
-        rawSource = rawWorkA;
-        rawTarget = rawWorkB;
+        distanceSource = distanceWorkA;
+        distanceTarget = distanceWorkB;
         for (int iz = 0; iz < mapSize; iz++) {
             int worldZ = minZ + iz;
             for (int ix = 0; ix < mapSize; ix++) {
@@ -394,18 +382,13 @@ public final class FogCavity {
                         diagSlope, noHeight, threshold);
                 source[base + 3] = sampleWithDrop(heights, windowMinX, windowMinZ, windowSize, worldX - 1, worldZ + 1,
                         diagSlope, noHeight, threshold);
-                rawSource[base] = sampleWithDrop(heights, windowMinX, windowMinZ, windowSize, worldX + 1, worldZ + 1,
-                        0.0F, noHeight, threshold);
-                rawSource[base + 1] = sampleWithDrop(heights, windowMinX, windowMinZ, windowSize, worldX - 1,
-                        worldZ - 1, 0.0F, noHeight, threshold);
-                rawSource[base + 2] = sampleWithDrop(heights, windowMinX, windowMinZ, windowSize, worldX + 1,
-                        worldZ - 1, 0.0F, noHeight, threshold);
-                rawSource[base + 3] = sampleWithDrop(heights, windowMinX, windowMinZ, windowSize, worldX - 1,
-                        worldZ + 1, 0.0F, noHeight, threshold);
+                for (int channel = 0; channel < 4; channel++) {
+                    distanceSource[base + channel] = 1.0F;
+                }
             }
         }
 
-        // Diagonal doubling passes; final pass combines with cardinal into output and optional rimOutput:
+        // Diagonal doubling passes; final pass combines with cardinal into output and optional lipOutput:
         for (int pass = 0; pass < diagonalStrides.length; pass++) {
             int stride = diagonalStrides[pass];
             boolean finalPass = pass == diagonalStrides.length - 1;
@@ -414,94 +397,65 @@ public final class FogCavity {
                 for (int ix = 0; ix < mapSize; ix++) {
                     if (!finalPass) {
                         int base = (iz * mapSize + ix) * 4;
-                        target[base] = scanDirection(source, mapSize, ix, iz, stride, stride, 0, drop, threshold);
-                        target[base + 1] = scanDirection(source, mapSize, ix, iz, -stride, -stride, 1, drop, threshold);
-                        target[base + 2] = scanDirection(source, mapSize, ix, iz, stride, -stride, 2, drop, threshold);
-                        target[base + 3] = scanDirection(source, mapSize, ix, iz, -stride, stride, 3, drop, threshold);
-                        rawTarget[base] = scanDirection(rawSource, mapSize, ix, iz, stride, stride, 0, 0.0F, threshold);
-                        rawTarget[base + 1] = scanDirection(rawSource, mapSize, ix, iz, -stride, -stride, 1, 0.0F,
-                                threshold);
-                        rawTarget[base + 2] = scanDirection(rawSource, mapSize, ix, iz, stride, -stride, 2, 0.0F,
-                                threshold);
-                        rawTarget[base + 3] = scanDirection(rawSource, mapSize, ix, iz, -stride, stride, 3, 0.0F,
-                                threshold);
+                        scanStep(source, distanceSource, target, distanceTarget, mapSize, ix, iz, stride, stride, 0,
+                                base, drop, stride, threshold, wall);
+                        scanStep(source, distanceSource, target, distanceTarget, mapSize, ix, iz, -stride, -stride, 1,
+                                base, drop, stride, threshold, wall);
+                        scanStep(source, distanceSource, target, distanceTarget, mapSize, ix, iz, stride, -stride, 2,
+                                base, drop, stride, threshold, wall);
+                        scanStep(source, distanceSource, target, distanceTarget, mapSize, ix, iz, -stride, stride, 3,
+                                base, drop, stride, threshold, wall);
                         continue;
                     }
-                    float pp = scanDirection(source, mapSize, ix, iz, stride, stride, 0, drop, threshold);
-                    float mm = scanDirection(source, mapSize, ix, iz, -stride, -stride, 1, drop, threshold);
-                    float pm = scanDirection(source, mapSize, ix, iz, stride, -stride, 2, drop, threshold);
-                    float mp = scanDirection(source, mapSize, ix, iz, -stride, stride, 3, drop, threshold);
-                    float rawPP = scanDirection(rawSource, mapSize, ix, iz, stride, stride, 0, 0.0F, threshold);
-                    float rawMM = scanDirection(rawSource, mapSize, ix, iz, -stride, -stride, 1, 0.0F, threshold);
-                    float rawPM = scanDirection(rawSource, mapSize, ix, iz, stride, -stride, 2, 0.0F, threshold);
-                    float rawMP = scanDirection(rawSource, mapSize, ix, iz, -stride, stride, 3, 0.0F, threshold);
-                    if (applyPerpMin) {
-                        int ax1 = clampIndex(ix + 1, mapSize);
-                        int az1 = clampIndex(iz - 1, mapSize);
-                        int ax2 = clampIndex(ix - 1, mapSize);
-                        int az2 = clampIndex(iz + 1, mapSize);
-                        pp = Math.min(pp, Math.min(
-                                scanDirection(source, mapSize, ax1, az1, stride, stride, 0, drop, threshold),
-                                scanDirection(source, mapSize, ax2, az2, stride, stride, 0, drop, threshold)));
-                        mm = Math.min(mm, Math.min(
-                                scanDirection(source, mapSize, ax1, az1, -stride, -stride, 1, drop, threshold),
-                                scanDirection(source, mapSize, ax2, az2, -stride, -stride, 1, drop, threshold)));
-                        rawPP = Math.min(rawPP, Math.min(
-                                scanDirection(rawSource, mapSize, ax1, az1, stride, stride, 0, 0.0F, threshold),
-                                scanDirection(rawSource, mapSize, ax2, az2, stride, stride, 0, 0.0F, threshold)));
-                        rawMM = Math.min(rawMM, Math.min(
-                                scanDirection(rawSource, mapSize, ax1, az1, -stride, -stride, 1, 0.0F, threshold),
-                                scanDirection(rawSource, mapSize, ax2, az2, -stride, -stride, 1, 0.0F, threshold)));
-                        int bx1 = clampIndex(ix + 1, mapSize);
-                        int bz1 = clampIndex(iz + 1, mapSize);
-                        int bx2 = clampIndex(ix - 1, mapSize);
-                        int bz2 = clampIndex(iz - 1, mapSize);
-                        pm = Math.min(pm, Math.min(
-                                scanDirection(source, mapSize, bx1, bz1, stride, -stride, 2, drop, threshold),
-                                scanDirection(source, mapSize, bx2, bz2, stride, -stride, 2, drop, threshold)));
-                        mp = Math.min(mp, Math.min(
-                                scanDirection(source, mapSize, bx1, bz1, -stride, stride, 3, drop, threshold),
-                                scanDirection(source, mapSize, bx2, bz2, -stride, stride, 3, drop, threshold)));
-                        rawPM = Math.min(rawPM, Math.min(
-                                scanDirection(rawSource, mapSize, bx1, bz1, stride, -stride, 2, 0.0F, threshold),
-                                scanDirection(rawSource, mapSize, bx2, bz2, stride, -stride, 2, 0.0F, threshold)));
-                        rawMP = Math.min(rawMP, Math.min(
-                                scanDirection(rawSource, mapSize, bx1, bz1, -stride, stride, 3, 0.0F, threshold),
-                                scanDirection(rawSource, mapSize, bx2, bz2, -stride, stride, 3, 0.0F, threshold)));
-                    }
-                    float surfD1 = combineAxisSurface(pp, mm, rawPP, rawMM, noHeight, threshold);
-                    float rimD1 = combineAxisRim(pp, mm, rawPP, rawMM, noHeight, threshold);
-                    float surfD2 = combineAxisSurface(pm, mp, rawPM, rawMP, noHeight, threshold);
-                    float rimD2 = combineAxisRim(pm, mp, rawPM, rawMP, noHeight, threshold);
+                    finalWall(source, distanceSource, mapSize, ix, iz, stride, stride, 0, drop, stride, applyPerpMin,
+                            1, -1, threshold, wall);
+                    float pp = wall[0];
+                    float ppDistance = wall[1];
+                    finalWall(source, distanceSource, mapSize, ix, iz, -stride, -stride, 1, drop, stride,
+                            applyPerpMin, 1, -1, threshold, wall);
+                    float mm = wall[0];
+                    float mmDistance = wall[1];
+                    finalWall(source, distanceSource, mapSize, ix, iz, stride, -stride, 2, drop, stride, applyPerpMin,
+                            1, 1, threshold, wall);
+                    float pm = wall[0];
+                    float pmDistance = wall[1];
+                    finalWall(source, distanceSource, mapSize, ix, iz, -stride, stride, 3, drop, stride, applyPerpMin,
+                            1, 1, threshold, wall);
+                    float mp = wall[0];
+                    float mpDistance = wall[1];
+                    float surfD1 = combineAxisSurface(pp, ppDistance, mm, mmDistance, diagSlope, noHeight, threshold);
+                    float lipD1 = combineAxisLip(pp, ppDistance, mm, mmDistance, diagSlope, noHeight, threshold);
+                    float surfD2 = combineAxisSurface(pm, pmDistance, mp, mpDistance, diagSlope, noHeight, threshold);
+                    float lipD2 = combineAxisLip(pm, pmDistance, mp, mpDistance, diagSlope, noHeight, threshold);
                     float diagSurf;
-                    float diagRim;
+                    float diagLip;
                     if (surfD2 > surfD1) {
                         diagSurf = surfD2;
-                        diagRim = rimD2;
+                        diagLip = lipD2;
                     } else if (surfD1 > surfD2) {
                         diagSurf = surfD1;
-                        diagRim = rimD1;
+                        diagLip = lipD1;
                     } else {
                         diagSurf = surfD1;
-                        diagRim = Math.max(rimD1, rimD2);
+                        diagLip = Math.max(lipD1, lipD2);
                     }
                     int index = iz * mapSize + ix;
                     float cardSurf = cardinal[index];
-                    float cardRim = cardinalRim[index];
+                    float cardLip = cardinalLip[index];
                     if (diagSurf > cardSurf) {
                         output[index] = diagSurf;
-                        if (rimOutput != null) {
-                            rimOutput[index] = diagRim;
+                        if (lipOutput != null) {
+                            lipOutput[index] = diagLip;
                         }
                     } else if (cardSurf > diagSurf) {
                         output[index] = cardSurf;
-                        if (rimOutput != null) {
-                            rimOutput[index] = cardRim;
+                        if (lipOutput != null) {
+                            lipOutput[index] = cardLip;
                         }
                     } else {
                         output[index] = cardSurf;
-                        if (rimOutput != null) {
-                            rimOutput[index] = Math.max(cardRim, diagRim);
+                        if (lipOutput != null) {
+                            lipOutput[index] = Math.max(cardLip, diagLip);
                         }
                     }
                 }
@@ -510,9 +464,9 @@ public final class FogCavity {
                 float[] swap = source;
                 source = target;
                 target = swap;
-                float[] rawSwap = rawSource;
-                rawSource = rawTarget;
-                rawTarget = rawSwap;
+                float[] distanceSwap = distanceSource;
+                distanceSource = distanceTarget;
+                distanceTarget = distanceSwap;
             }
         }
     }
@@ -531,8 +485,8 @@ public final class FogCavity {
     }
 
     /**
-     * Independent brute-force evaluation of both the flat cavity enclosure height (out[0]) and the winning axis's lower
-     * opposing rim height (out[1]) at one texel (texelX, texelZ), for verifying scan in GameTests.
+     * Independent brute-force evaluation of both the flat cavity enclosure height (out[0]) and the lower lip of the
+     * winning axis's two walls (out[1]) at one texel (texelX, texelZ), for verifying scan in GameTests.
      */
     public static void bruteForceTexelPair(int mapSize, int cardinalReach, int diagonalReach,
             SnowLee.HeightLookup heights, int minX, int minZ, int windowMinX, int windowMinZ, int windowSize,
@@ -543,95 +497,89 @@ public final class FogCavity {
         bruteForceAxis(mapSize, cardinalReach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, 1, 0, 0, 1,
                 floatSlope, applyPerpMin, texelX, texelZ, axisOut);
         float bestSurf = axisOut[0];
-        float bestRim = axisOut[1];
+        float bestLip = axisOut[1];
 
         bruteForceAxis(mapSize, cardinalReach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, 0, 1, 1, 0,
                 floatSlope, applyPerpMin, texelX, texelZ, axisOut);
         if (axisOut[0] > bestSurf) {
             bestSurf = axisOut[0];
-            bestRim = axisOut[1];
+            bestLip = axisOut[1];
         } else if (axisOut[0] == bestSurf) {
-            bestRim = Math.max(bestRim, axisOut[1]);
+            bestLip = Math.max(bestLip, axisOut[1]);
         }
 
         bruteForceAxis(mapSize, diagonalReach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, 1, 1, 1, -1,
                 diagSlope, applyPerpMin, texelX, texelZ, axisOut);
         if (axisOut[0] > bestSurf) {
             bestSurf = axisOut[0];
-            bestRim = axisOut[1];
+            bestLip = axisOut[1];
         } else if (axisOut[0] == bestSurf) {
-            bestRim = Math.max(bestRim, axisOut[1]);
+            bestLip = Math.max(bestLip, axisOut[1]);
         }
 
         bruteForceAxis(mapSize, diagonalReach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, 1, -1, 1, 1,
                 diagSlope, applyPerpMin, texelX, texelZ, axisOut);
         if (axisOut[0] > bestSurf) {
             bestSurf = axisOut[0];
-            bestRim = axisOut[1];
+            bestLip = axisOut[1];
         } else if (axisOut[0] == bestSurf) {
-            bestRim = Math.max(bestRim, axisOut[1]);
+            bestLip = Math.max(bestLip, axisOut[1]);
         }
         out[0] = bestSurf;
-        out[1] = bestRim;
+        out[1] = bestLip;
     }
 
     private static void bruteForceAxis(int mapSize, int reach, SnowLee.HeightLookup heights, int minX, int minZ,
             int windowMinX, int windowMinZ, int windowSize, int dx, int dz, int perpX, int perpZ, float stepSlope,
             boolean applyPerpMin, int texelX, int texelZ, float[] out) {
-        float pos = bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, dx, dz,
-                stepSlope, texelX, texelZ);
-        float neg = bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, -dx, -dz,
-                stepSlope, texelX, texelZ);
-        float rawPos = bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, dx, dz,
-                0.0F, texelX, texelZ);
-        float rawNeg = bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, -dx, -dz,
-                0.0F, texelX, texelZ);
+        float[] wall = new float[2];
+        bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, dx, dz, stepSlope,
+                texelX, texelZ, wall);
+        float pos = wall[0];
+        float posDistance = wall[1];
+        bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, -dx, -dz, stepSlope,
+                texelX, texelZ, wall);
+        float neg = wall[0];
+        float negDistance = wall[1];
         if (applyPerpMin) {
-            int x1 = clampIndex(texelX + perpX, mapSize);
-            int z1 = clampIndex(texelZ + perpZ, mapSize);
-            int x2 = clampIndex(texelX - perpX, mapSize);
-            int z2 = clampIndex(texelZ - perpZ, mapSize);
-            pos = Math.min(pos, Math.min(
-                    bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, dx, dz,
-                            stepSlope, x1, z1),
-                    bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, dx, dz,
-                            stepSlope, x2, z2)));
-            neg = Math.min(neg, Math.min(
-                    bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, -dx, -dz,
-                            stepSlope, x1, z1),
-                    bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, -dx, -dz,
-                            stepSlope, x2, z2)));
-            rawPos = Math.min(rawPos, Math.min(
-                    bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, dx, dz,
-                            0.0F, x1, z1),
-                    bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, dx, dz,
-                            0.0F, x2, z2)));
-            rawNeg = Math.min(rawNeg, Math.min(
-                    bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, -dx, -dz,
-                            0.0F, x1, z1),
-                    bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, -dx, -dz,
-                            0.0F, x2, z2)));
+            for (int side = -1; side <= 1; side += 2) {
+                int sideX = clampIndex(texelX + side * perpX, mapSize);
+                int sideZ = clampIndex(texelZ + side * perpZ, mapSize);
+                bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, dx, dz,
+                        stepSlope, sideX, sideZ, wall);
+                if (isLowerWall(wall[0], wall[1], pos, posDistance)) {
+                    pos = wall[0];
+                    posDistance = wall[1];
+                }
+                bruteForceRay(mapSize, reach, heights, minX, minZ, windowMinX, windowMinZ, windowSize, -dx, -dz,
+                        stepSlope, sideX, sideZ, wall);
+                if (isLowerWall(wall[0], wall[1], neg, negDistance)) {
+                    neg = wall[0];
+                    negDistance = wall[1];
+                }
+            }
         }
         float noHeight = (float) NO_HEIGHT;
         float threshold = (float) NO_HEIGHT_THRESHOLD;
-        out[0] = combineAxisSurface(pos, neg, rawPos, rawNeg, noHeight, threshold);
-        out[1] = combineAxisRim(pos, neg, rawPos, rawNeg, noHeight, threshold);
+        out[0] = combineAxisSurface(pos, posDistance, neg, negDistance, stepSlope, noHeight, threshold);
+        out[1] = combineAxisLip(pos, posDistance, neg, negDistance, stepSlope, noHeight, threshold);
     }
 
-    private static float combineAxisSurface(float slopedPos, float slopedNeg, float rawPos, float rawNeg,
-            float noHeight, float threshold) {
-        if (!(slopedPos > threshold) || !(slopedNeg > threshold) || !(rawPos > threshold) || !(rawNeg > threshold)) {
+    private static float combineAxisSurface(float positive, float positiveDistance, float negative,
+            float negativeDistance, float stepSlope, float noHeight, float threshold) {
+        if (!(positive > threshold) || !(negative > threshold)) {
             return noHeight;
         }
-        return Math.min(Math.min(rawPos, rawNeg), 0.5F * (slopedPos + slopedNeg));
+        float lowerLip = Math.min(positive + stepSlope * positiveDistance, negative + stepSlope * negativeDistance);
+        return Math.min(lowerLip, 0.5F * (positive + negative));
     }
 
-    private static float combineAxisRim(float slopedPos, float slopedNeg, float rawPos, float rawNeg,
-            float noHeight, float threshold) {
-        if (!(slopedPos > threshold) || !(slopedNeg > threshold) || !(rawPos > threshold) || !(rawNeg > threshold)) {
+    private static float combineAxisLip(float positive, float positiveDistance, float negative,
+            float negativeDistance, float stepSlope, float noHeight, float threshold) {
+        if (!(positive > threshold) || !(negative > threshold)) {
             return noHeight;
         }
-        return Math.min(rawPos, rawNeg);
+        return Math.min(positive + stepSlope * positiveDistance, negative + stepSlope * negativeDistance);
     }
 
     /**
@@ -646,8 +594,8 @@ public final class FogCavity {
         private static final int GRID_SIDE = 2 * MARGIN + 1;
         private final float[] slopedPos = new float[GRID_SIDE * GRID_SIDE];
         private final float[] slopedNeg = new float[GRID_SIDE * GRID_SIDE];
-        private final float[] rawPos = new float[GRID_SIDE * GRID_SIDE];
-        private final float[] rawNeg = new float[GRID_SIDE * GRID_SIDE];
+        private final float[] distancePos = new float[GRID_SIDE * GRID_SIDE];
+        private final float[] distanceNeg = new float[GRID_SIDE * GRID_SIDE];
         private FarHeights cachedFarHeights;
         private int cachedCenterX;
         private int cachedCenterZ;
@@ -744,9 +692,9 @@ public final class FogCavity {
                     int worldX = centerX + gx - MARGIN;
                     int texelX = clampIndex(worldX - minX, mapSize);
                     int slot = row + gx;
-                    scanRayPair(farNoLeaves, lookup, mapSize, reach, minX, minZ, windowMinX, windowMinZ, windowSize,
+                    scanRay(farNoLeaves, lookup, mapSize, reach, minX, minZ, windowMinX, windowMinZ, windowSize,
                             dx, dz, stepSlope, texelX, texelZ, noHeight, threshold, slot, true);
-                    scanRayPair(farNoLeaves, lookup, mapSize, reach, minX, minZ, windowMinX, windowMinZ, windowSize,
+                    scanRay(farNoLeaves, lookup, mapSize, reach, minX, minZ, windowMinX, windowMinZ, windowSize,
                             -dx, -dz, stepSlope, texelX, texelZ, noHeight, threshold, slot, false);
                 }
             }
@@ -769,11 +717,27 @@ public final class FogCavity {
                     int slot0 = gz * GRID_SIDE + gx;
                     int slot1 = (gz + perpZ) * GRID_SIDE + (gx + perpX);
                     int slot2 = (gz - perpZ) * GRID_SIDE + (gx - perpX);
-                    float sp = Math.min(slopedPos[slot0], Math.min(slopedPos[slot1], slopedPos[slot2]));
-                    float sn = Math.min(slopedNeg[slot0], Math.min(slopedNeg[slot1], slopedNeg[slot2]));
-                    float rp = Math.min(rawPos[slot0], Math.min(rawPos[slot1], rawPos[slot2]));
-                    float rn = Math.min(rawNeg[slot0], Math.min(rawNeg[slot1], rawNeg[slot2]));
-                    float surface = combineAxisSurface(sp, sn, rp, rn, noHeight, threshold);
+                    float sp = slopedPos[slot0];
+                    float dp = distancePos[slot0];
+                    float sn = slopedNeg[slot0];
+                    float dn = distanceNeg[slot0];
+                    if (isLowerWall(slopedPos[slot1], distancePos[slot1], sp, dp)) {
+                        sp = slopedPos[slot1];
+                        dp = distancePos[slot1];
+                    }
+                    if (isLowerWall(slopedPos[slot2], distancePos[slot2], sp, dp)) {
+                        sp = slopedPos[slot2];
+                        dp = distancePos[slot2];
+                    }
+                    if (isLowerWall(slopedNeg[slot1], distanceNeg[slot1], sn, dn)) {
+                        sn = slopedNeg[slot1];
+                        dn = distanceNeg[slot1];
+                    }
+                    if (isLowerWall(slopedNeg[slot2], distanceNeg[slot2], sn, dn)) {
+                        sn = slopedNeg[slot2];
+                        dn = distanceNeg[slot2];
+                    }
+                    float surface = combineAxisSurface(sp, dp, sn, dn, stepSlope, noHeight, threshold);
                     if (surface <= best) {
                         continue;
                     }
@@ -792,11 +756,11 @@ public final class FogCavity {
             return best;
         }
 
-        private void scanRayPair(short[] farNoLeaves, SnowLee.HeightLookup lookup, int mapSize, int reach, int minX,
+        private void scanRay(short[] farNoLeaves, SnowLee.HeightLookup lookup, int mapSize, int reach, int minX,
                 int minZ, int windowMinX, int windowMinZ, int windowSize, int dx, int dz, float stepSlope, int texelX,
                 int texelZ, float noHeight, float threshold, int slot, boolean positive) {
             float bestSloped = noHeight;
-            float bestRaw = noHeight;
+            float bestDistance = 0.0F;
             int windowMaxX = windowMinX + windowSize;
             int windowMaxZ = windowMinZ + windowSize;
             for (int step = 1; step <= reach; step++) {
@@ -813,29 +777,28 @@ public final class FogCavity {
                 short height = farNoLeaves != null ? farNoLeaves[FarHeights.texelOf(colX, colZ)]
                         : lookup.heightAt(colX, colZ);
                 if (height > FarHeights.UNKNOWN) {
-                    float rawValue = height;
-                    if (rawValue > bestRaw) {
-                        bestRaw = rawValue;
-                    }
-                    float slopedValue = rawValue - stepSlope * step;
+                    float slopedValue = height - stepSlope * step;
                     if (slopedValue > threshold && slopedValue > bestSloped) {
                         bestSloped = slopedValue;
+                        bestDistance = step;
                     }
                 }
             }
             if (positive) {
                 slopedPos[slot] = bestSloped;
-                rawPos[slot] = bestRaw;
+                distancePos[slot] = bestDistance;
             } else {
                 slopedNeg[slot] = bestSloped;
-                rawNeg[slot] = bestRaw;
+                distanceNeg[slot] = bestDistance;
             }
         }
     }
 
-    private static float bruteForceRay(int mapSize, int reach, SnowLee.HeightLookup heights, int minX, int minZ,
-            int windowMinX, int windowMinZ, int windowSize, int dx, int dz, float stepSlope, int texelX, int texelZ) {
+    private static void bruteForceRay(int mapSize, int reach, SnowLee.HeightLookup heights, int minX, int minZ,
+            int windowMinX, int windowMinZ, int windowSize, int dx, int dz, float stepSlope, int texelX, int texelZ,
+            float[] wallOut) {
         float best = (float) NO_HEIGHT;
+        float bestDistance = 0.0F;
         float threshold = (float) NO_HEIGHT_THRESHOLD;
         for (int step = 1; step <= reach; step++) {
             // Stop once the stepped texel leaves the cavity map, matching the doubling scan bounds:
@@ -853,26 +816,64 @@ public final class FogCavity {
             short height = heights.heightAt(colX, colZ);
             if (height > FarHeights.UNKNOWN) {
                 float value = height - stepSlope * step;
-                if (value > threshold) {
-                    best = Math.max(best, value);
+                if (value > threshold && value > best) {
+                    best = value;
+                    bestDistance = step;
                 }
             }
         }
-        return best;
+        wallOut[0] = best;
+        wallOut[1] = bestDistance;
     }
 
-    private static float scanDirection(float[] source, int mapSize, int ix, int iz, int offsetX, int offsetZ,
-            int channel, float drop, float threshold) {
-        float value = source[(iz * mapSize + ix) * 4 + channel];
+    private static void scanWall(float[] source, float[] distanceSource, int mapSize, int ix, int iz, int offsetX,
+            int offsetZ, int channel, float drop, int stride, float threshold, float[] wallOut) {
+        int index = (iz * mapSize + ix) * 4 + channel;
+        float sloped = source[index];
+        float distance = distanceSource[index];
         int sampleX = ix + offsetX;
         int sampleZ = iz + offsetZ;
         if (sampleX >= 0 && sampleX < mapSize && sampleZ >= 0 && sampleZ < mapSize) {
-            float neighbor = source[(sampleZ * mapSize + sampleX) * 4 + channel];
-            if (neighbor > threshold) {
-                value = Math.max(value, neighbor - drop);
+            int sampleIndex = (sampleZ * mapSize + sampleX) * 4 + channel;
+            float neighbor = source[sampleIndex];
+            if (neighbor > threshold && neighbor - drop > sloped) {
+                sloped = neighbor - drop;
+                distance = distanceSource[sampleIndex] + stride;
             }
         }
-        return value;
+        wallOut[0] = sloped;
+        wallOut[1] = distance;
+    }
+
+    private static void scanStep(float[] source, float[] distanceSource, float[] target, float[] distanceTarget,
+            int mapSize, int ix, int iz, int offsetX, int offsetZ, int channel, int base, float drop, int stride,
+            float threshold, float[] wall) {
+        scanWall(source, distanceSource, mapSize, ix, iz, offsetX, offsetZ, channel, drop, stride, threshold, wall);
+        target[base + channel] = wall[0];
+        distanceTarget[base + channel] = wall[1];
+    }
+
+    private static void finalWall(float[] source, float[] distanceSource, int mapSize, int ix, int iz, int offsetX,
+            int offsetZ, int channel, float drop, int stride, boolean applyPerpMin, int perpX, int perpZ,
+            float threshold, float[] wallOut) {
+        scanWall(source, distanceSource, mapSize, ix, iz, offsetX, offsetZ, channel, drop, stride, threshold, wallOut);
+        if (!applyPerpMin) {
+            return;
+        }
+        float sloped = wallOut[0];
+        float distance = wallOut[1];
+        for (int side = -1; side <= 1; side += 2) {
+            int sideX = clampIndex(ix + side * perpX, mapSize);
+            int sideZ = clampIndex(iz + side * perpZ, mapSize);
+            scanWall(source, distanceSource, mapSize, sideX, sideZ, offsetX, offsetZ, channel, drop, stride, threshold,
+                    wallOut);
+            if (isLowerWall(wallOut[0], wallOut[1], sloped, distance)) {
+                sloped = wallOut[0];
+                distance = wallOut[1];
+            }
+        }
+        wallOut[0] = sloped;
+        wallOut[1] = distance;
     }
 
     private static float sampleWithDrop(SnowLee.HeightLookup heights, int windowMinX, int windowMinZ, int windowSize,

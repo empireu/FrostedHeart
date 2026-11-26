@@ -48,6 +48,9 @@ public final class FogSettingsGameTests {
         checkSwitchSetting(helper, SkySetting.SNOW_LEE, "snowLee", true);
         checkNumberSetting(helper, SkySetting.SNOW_LEE_FILL, "snowLeeFill", 0.15, 0.0, 2.0);
         checkNumberSetting(helper, SkySetting.SNOW_LEE_BAND, "snowLeeBand", 3.0, 0.0, 16.0);
+        checkNumberSetting(helper, SkySetting.SNOW_CAVITY_BRAKE_LENGTH, "snowCavityBrakeLength", 2.0, 0.0, 16.0);
+        checkNumberSetting(helper, SkySetting.SNOW_CAVITY_SWIRL, "snowCavitySwirl", 0.25, 0.0, 4.0);
+        checkNumberSetting(helper, SkySetting.SNOW_CAVITY_DOWNDRAFT, "snowCavityDowndraft", 0.5, 0.0, 1.0);
 
         checkSwitchSetting(helper, SkySetting.FOG_ENABLED, "fogEnabled", true);
 
@@ -82,6 +85,7 @@ public final class FogSettingsGameTests {
                 SkySetting.SNOW_WIND_SHARE, SkySetting.SNOW_FLUTTER, SkySetting.SNOW_STREAK_SECONDS,
                 SkySetting.SNOW_FLAKE_BRIGHTNESS, SkySetting.SNOW_NEAR_RADIUS, SkySetting.SNOW_COLLISION,
                 SkySetting.SNOW_SPLAT_SECONDS, SkySetting.SNOW_LEE, SkySetting.SNOW_LEE_FILL, SkySetting.SNOW_LEE_BAND,
+                SkySetting.SNOW_CAVITY_BRAKE_LENGTH, SkySetting.SNOW_CAVITY_SWIRL, SkySetting.SNOW_CAVITY_DOWNDRAFT,
                 SkySetting.FOG_ENABLED, SkySetting.FOG_SNOW_VISIBILITY, SkySetting.FOG_BLIZZARD_VISIBILITY,
                 SkySetting.FOG_HEIGHT_SCALE, SkySetting.FOG_LEAF_POROSITY, SkySetting.FOG_FIELD_BUDGET_MICROS,
                 SkySetting.FOG_SNOW_DECAY_LENGTH, SkySetting.FOG_BLIZZARD_DECAY_LENGTH, SkySetting.FOG_FIELD_RADIUS,

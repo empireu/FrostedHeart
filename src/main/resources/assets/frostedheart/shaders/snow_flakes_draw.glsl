@@ -251,7 +251,24 @@ void main() {
     }
     float phase = state.w;
     float flutterRate = snowFlakeFlutterRate(flake);
-    float circleRadius = flutterRadius * snowFlakeFlutterRadiusShare(flake);
+    // A flake whose widest flutter circle lies behind the near plane is hidden before its lookups:
+    float widestRadius = (flutterRadius + max(0.0, cavitySwirl)) * SNOW_LARGEST_FLUTTER_RADIUS_SHARE;
+    if (!((viewProjection * vec4(offset, 1.0)).w + widestRadius > SNOW_NEAREST_W)) {
+        hideFlake();
+        return;
+    }
+    // The flake reads its braking, swirl and lee at the center of its flutter circle, as the update moves it:
+    float worldY = float(cameraBlock.y) + cameraFraction.y + offset.y;
+    float columnHeight = (hasLeeMap != 0 || hasCavityMap != 0)
+            ? snowLeeColumnHeight(offset, cameraBlock, cameraFraction) : SNOW_LEE_NO_HEIGHT;
+    float brakeHeight = SNOW_LEE_NO_HEIGHT;
+    float cavityOpen = 1.0;
+    if (hasCavityMap != 0) {
+        vec2 cavity = snowCavitySampleAt(offset, cameraBlock, cameraFraction);
+        brakeHeight = snowCavityBrakeHeight(cavity.x, cavity.y, columnHeight);
+        cavityOpen = snowBrakeOpenFactorAt(worldY, brakeHeight);
+    }
+    float circleRadius = snowCavityCircleRadius(flutterRadius, cavityOpen, snowFlakeFlutterRadiusShare(flake));
     vec3 center = offset + snowFlutterOffset(phase, circleRadius);
     vec4 clipCenter = viewProjection * vec4(center, 1.0);
     if (!(clipCenter.w > SNOW_NEAREST_W)) {
@@ -264,22 +281,14 @@ void main() {
     float nearWeight = smoothstep(SNOW_NEAR_FADE_START, SNOW_NEAR_FADE_END, distance);
     float leeHeight = SNOW_LEE_NO_HEIGHT;
     float terrainSlope = 0.0;
-    float columnHeight = (hasLeeMap != 0 || hasCavityMap != 0)
-            ? snowLeeColumnHeight(center, cameraBlock, cameraFraction) : SNOW_LEE_NO_HEIGHT;
     float smoothHeight = SNOW_LEE_NO_HEIGHT;
-    float worldY = float(cameraBlock.y) + cameraFraction.y + center.y;
-    float cavityOpen = 1.0;
-    if (hasCavityMap != 0) {
-        vec2 cavity = snowCavitySampleAt(center, cameraBlock, cameraFraction);
-        cavityOpen = snowCavityOpenFactor(worldY, cavity.x, cavity.y, columnHeight);
-    }
     float windScale = snowCavityWindScale(cavityOpen);
     float leeWeight = 1.0;
     if (hasLeeMap != 0) {
-        vec2 leeSample = snowLeeSampleAt(center);
+        vec2 leeSample = snowLeeSampleAt(offset);
         leeHeight = leeSample.x;
         terrainSlope = leeSample.y;
-        smoothHeight = snowSmoothHeightAt(center);
+        smoothHeight = snowSmoothHeightAt(offset);
         leeWeight = snowLeeWeightAt(flake, worldY, leeHeight, columnHeight, smoothHeight, cavityOpen);
     }
     float weight = countWeight * boxWeight * shelterWeight * leeWeight * nearWeight;
@@ -294,6 +303,10 @@ void main() {
             ? snowLeeVerticalVelocityAt(worldY, leeHeight, columnHeight, smoothHeight, terrainSlope, ownFall,
                     length(localWind), leeFallSpeed * windScale)
             : -ownFall;
+    if (hasCavityMap != 0) {
+        verticalVelocity += snowCavitySinkVelocity(offset, cameraBlock, cameraFraction, brakeHeight, windScale,
+                windVelocity) + snowCavityDowndraftVelocity(length(windVelocity), windScale);
+    }
     vec3 velocity = vec3(localWind.x, verticalVelocity, localWind.y)
             + vec3(-sin(phase), 0.0, cos(phase)) * (circleRadius * flutterRate);
 

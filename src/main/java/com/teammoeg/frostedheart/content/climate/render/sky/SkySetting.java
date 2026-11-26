@@ -161,6 +161,16 @@ public enum SkySetting {
             Rebuilds.NOTHING, 0.15, 0.0, 2.0),
     SNOW_LEE_BAND("snowLeeBand", "Height in blocks above the lee surface over which falling snow fades back in. 0 "
             + "gives a sharp edge.", Rebuilds.NOTHING, 3.0, 0.0, 16.0),
+    SNOW_CAVITY_BRAKE_LENGTH("snowCavityBrakeLength", "Depth in blocks below a ravine or street's braking ceiling "
+            + "over which horizontal snowflake wind eases down smoothly. 0 brakes right at the ceiling.",
+            Rebuilds.NOTHING, 2.0, 0.0, 16.0),
+    SNOW_CAVITY_SWIRL("snowCavitySwirl", "Blocks by which the circles that snowflakes trace grow below a ravine or "
+            + "street's braking ceiling, so braked flakes swirl instead of falling straight. 0 keeps the usual "
+            + "circles.",
+            Rebuilds.NOTHING, 0.25, 0.0, 4.0),
+    SNOW_CAVITY_DOWNDRAFT("snowCavityDowndraft", "Share of the wind that braking takes from snowflakes below a ravine "
+            + "or street's braking ceiling that pulls them down instead, so they fall faster there and fewer show in "
+            + "the air at once. 0 lets them fall at their own speed.", Rebuilds.NOTHING, 0.5, 0.0, 1.0),
     FOG_ENABLED("fogEnabled", "Draws the fog of snow and blizzards with the calculated sky, thicker in valleys "
             + "and thinner on hills, and as far at every render distance. Off keeps the older fog, which is a share "
             + "of the render distance.", true, null),

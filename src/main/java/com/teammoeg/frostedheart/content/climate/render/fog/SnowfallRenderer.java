@@ -563,6 +563,9 @@ public final class SnowfallRenderer {
         private int hasLeeMapUniform;
         private int hasCavityMapUniform;
         private int cavityMinUniform;
+        private int cavityBrakeLengthUniform;
+        private int cavitySwirlUniform;
+        private int cavityDowndraftUniform;
         private int cameraFromLeeAnchorUniform;
         private int cameraFromSmoothMinUniform;
         private int leeWindDirectionUniform;
@@ -631,6 +634,9 @@ public final class SnowfallRenderer {
                 hasLeeMapUniform = GL20.glGetUniformLocation(programId, "hasLeeMap");
                 hasCavityMapUniform = GL20.glGetUniformLocation(programId, "hasCavityMap");
                 cavityMinUniform = GL20.glGetUniformLocation(programId, "cavityMin");
+                cavityBrakeLengthUniform = GL20.glGetUniformLocation(programId, "cavityBrakeLength");
+                cavitySwirlUniform = GL20.glGetUniformLocation(programId, "cavitySwirl");
+                cavityDowndraftUniform = GL20.glGetUniformLocation(programId, "cavityDowndraft");
                 cameraFromLeeAnchorUniform = GL20.glGetUniformLocation(programId, "cameraFromLeeAnchor");
                 cameraFromSmoothMinUniform = GL20.glGetUniformLocation(programId, "cameraFromSmoothMin");
                 leeWindDirectionUniform = GL20.glGetUniformLocation(programId, "leeWindDirection");
@@ -691,6 +697,9 @@ public final class SnowfallRenderer {
             GL20.glUniform1i(frameCounterUniform, frameCounter);
             GL20.glUniform1i(hasLeeMapUniform, leeActive ? 1 : 0);
             GL20.glUniform1i(hasCavityMapUniform, cavityActive ? 1 : 0);
+            GL20.glUniform1f(cavityBrakeLengthUniform, (float) SkySetting.SNOW_CAVITY_BRAKE_LENGTH.get());
+            GL20.glUniform1f(cavitySwirlUniform, (float) SkySetting.SNOW_CAVITY_SWIRL.get());
+            GL20.glUniform1f(cavityDowndraftUniform, (float) SkySetting.SNOW_CAVITY_DOWNDRAFT.get());
             if (cavityActive) {
                 GL20.glUniform2i(cavityMinUniform, FogCavityMap.publishedMinX(), FogCavityMap.publishedMinZ());
             }
@@ -754,6 +763,9 @@ public final class SnowfallRenderer {
         private int hasLeeMapUniform;
         private int hasCavityMapUniform;
         private int cavityMinUniform;
+        private int cavityBrakeLengthUniform;
+        private int cavitySwirlUniform;
+        private int cavityDowndraftUniform;
         private int cameraFromLeeAnchorUniform;
         private int cameraFromSmoothMinUniform;
         private int leeWindDirectionUniform;
@@ -823,6 +835,9 @@ public final class SnowfallRenderer {
                 hasLeeMapUniform = GL20.glGetUniformLocation(programId, "hasLeeMap");
                 hasCavityMapUniform = GL20.glGetUniformLocation(programId, "hasCavityMap");
                 cavityMinUniform = GL20.glGetUniformLocation(programId, "cavityMin");
+                cavityBrakeLengthUniform = GL20.glGetUniformLocation(programId, "cavityBrakeLength");
+                cavitySwirlUniform = GL20.glGetUniformLocation(programId, "cavitySwirl");
+                cavityDowndraftUniform = GL20.glGetUniformLocation(programId, "cavityDowndraft");
                 cameraFromLeeAnchorUniform = GL20.glGetUniformLocation(programId, "cameraFromLeeAnchor");
                 cameraFromSmoothMinUniform = GL20.glGetUniformLocation(programId, "cameraFromSmoothMin");
                 leeWindDirectionUniform = GL20.glGetUniformLocation(programId, "leeWindDirection");
@@ -889,6 +904,9 @@ public final class SnowfallRenderer {
             GL20.glUniform1i(divisorUniform, WeatherFogRenderer.froxelDivisor());
             GL20.glUniform1i(hasLeeMapUniform, leeActive ? 1 : 0);
             GL20.glUniform1i(hasCavityMapUniform, cavityActive ? 1 : 0);
+            GL20.glUniform1f(cavityBrakeLengthUniform, (float) SkySetting.SNOW_CAVITY_BRAKE_LENGTH.get());
+            GL20.glUniform1f(cavitySwirlUniform, (float) SkySetting.SNOW_CAVITY_SWIRL.get());
+            GL20.glUniform1f(cavityDowndraftUniform, (float) SkySetting.SNOW_CAVITY_DOWNDRAFT.get());
             if (cavityActive) {
                 GL20.glUniform2i(cavityMinUniform, FogCavityMap.publishedMinX(), FogCavityMap.publishedMinZ());
             }

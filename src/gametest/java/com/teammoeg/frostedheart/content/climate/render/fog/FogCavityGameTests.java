@@ -122,6 +122,17 @@ public final class FogCavityGameTests {
             checkFloatNear(helper, "lopsided ravine lower rim at x=" + x, rimOutput[idx], lowRim, 1.0e-3F);
         }
 
+        // 1d. 10-block ravine with ground 5 blocks higher 12 blocks behind each lip: the lip stays the ravine's own:
+        SnowLee.HeightLookup terracedRavine = (x, z) -> (x <= -18 || x >= 17) ? (short) (RIM + 5)
+                : ((x <= -6 || x >= 5) ? RIM : FLOOR);
+        assertCavityMatchesBruteForce(helper, "terraced ravine", terracedRavine, cardinalStrides, diagonalStrides,
+                slope, output, rimOutput);
+        for (int x = -5; x <= 4; x++) {
+            int idx = TEST_HALF * TEST_MAP + (x + TEST_HALF);
+            checkFloatNear(helper, "terraced ravine enclosure at x=" + x, output[idx], expected10, 0.01F);
+            checkFloatNear(helper, "terraced ravine lower lip at x=" + x, rimOutput[idx], RIM, 1.0e-3F);
+        }
+
         // 2. Ravine at 22.5 degrees (halfway between cardinal and diagonal axes):
         double angle225 = Math.toRadians(22.5);
         double cos225 = Math.cos(angle225);

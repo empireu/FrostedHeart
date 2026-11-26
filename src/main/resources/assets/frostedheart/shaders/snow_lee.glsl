@@ -8,6 +8,11 @@ uniform sampler2D smoothHeights;
 uniform int hasCavityMap;
 uniform sampler2D cavityMap;
 uniform ivec2 cavityMin;
+uniform float cavityBrakeLength;
+// The blocks by which a flake's flutter circle grows below a braking ceiling:
+uniform float cavitySwirl;
+// The share of the wind that braking removes which pulls flakes down below a braking ceiling:
+uniform float cavityDowndraft;
 // The camera's horizontal offset from the published lee map's anchor block and from the smoothed terrain's minimum
 // corner, both computed in double precision on the CPU:
 uniform vec2 cameraFromLeeAnchor;
@@ -33,8 +38,8 @@ const float SNOW_OVERHANG_MARGIN = 1.0;
 const float SNOW_LEE_MINIMUM_WIND_SPEED = 0.01;
 const int SNOW_CAVITY_MAP_SIZE = 512;
 const float SNOW_CAVITY_WIND_FLOOR = 0.01;
-const float SNOW_CAVITY_WIND_DECAY = 0.5;
-const float SNOW_CAVITY_RIM_BLEND_DEPTH = 2.0;
+const float SNOW_CAVITY_SLOPE_DISTANCE = 2.0;
+const float SNOW_CAVITY_SLOPE_LIMIT = 1.0;
 
 // The no-leaves terrain height of the column containing a point given as an offset from the camera:
 float snowLeeColumnHeight(vec3 fromCamera, ivec3 cameraBlock, vec3 cameraFraction) {
@@ -51,7 +56,7 @@ float snowLeeColumnHeight(vec3 fromCamera, ivec3 cameraBlock, vec3 cameraFractio
     return float(height);
 }
 
-// The published flat cavity enclosure surface (x) and lower opposing rim height (y) at a point given from the camera:
+// The published flat cavity enclosure surface (x) and the lower lip of its walls (y) at a point given from the camera:
 vec2 snowCavitySampleAt(vec3 fromCamera, ivec3 cameraBlock, vec3 cameraFraction) {
     if (hasCavityMap == 0) {
         return vec2(SNOW_LEE_NO_HEIGHT);
@@ -65,23 +70,72 @@ vec2 snowCavitySampleAt(vec3 fromCamera, ivec3 cameraBlock, vec3 cameraFraction)
     return texelFetch(cavityMap, local, 0).rg;
 }
 
-// The braking ceiling inside an open-sky cavity, as SnowLee.cavityBrakeHeight:
-float snowCavityBrakeHeight(float cavityHeight, float cavityRim, float columnHeight) {
+// The braking ceiling over an open-sky cavity column, as SnowLee.cavityBrakeHeight:
+float snowCavityBrakeHeight(float cavityHeight, float cavityLip, float columnHeight) {
     if (!(cavityHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD) || !(columnHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD)) {
         return SNOW_LEE_NO_HEIGHT;
     }
-    float cavityDepth = cavityHeight - columnHeight;
-    if (!(cavityDepth > 0.0)) {
+    if (!(cavityHeight > columnHeight)) {
         return SNOW_LEE_NO_HEIGHT;
     }
-    float rim = cavityRim > SNOW_LEE_NO_HEIGHT_THRESHOLD ? max(cavityHeight, cavityRim) : cavityHeight;
-    float strength = clamp(cavityDepth / SNOW_CAVITY_RIM_BLEND_DEPTH, 0.0, 1.0);
-    return mix(cavityHeight, rim, strength);
+    return cavityLip > SNOW_LEE_NO_HEIGHT_THRESHOLD ? max(cavityHeight, cavityLip) : cavityHeight;
 }
 
-// Depth-only cavity openness factor in (0, 1] for falling flakes, as SnowLee.cavityOpenFactor:
-float snowCavityOpenFactor(float worldY, float cavityHeight, float cavityRim, float columnHeight) {
-    float brakeHeight = snowCavityBrakeHeight(cavityHeight, cavityRim, columnHeight);
+// The braking ceiling of the column containing a point given from the camera:
+float snowCavityBrakeHeightAt(vec3 fromCamera, ivec3 cameraBlock, vec3 cameraFraction) {
+    vec2 cavity = snowCavitySampleAt(fromCamera, cameraBlock, cameraFraction);
+    return snowCavityBrakeHeight(cavity.x, cavity.y, snowLeeColumnHeight(fromCamera, cameraBlock, cameraFraction));
+}
+
+// The flow ceiling of the column containing a point given from the camera, as SnowLee.cavityFlowCeiling:
+float snowCavityFlowCeilingAt(vec3 fromCamera, ivec3 cameraBlock, vec3 cameraFraction) {
+    float columnHeight = snowLeeColumnHeight(fromCamera, cameraBlock, cameraFraction);
+    vec2 cavity = snowCavitySampleAt(fromCamera, cameraBlock, cameraFraction);
+    float brakeHeight = snowCavityBrakeHeight(cavity.x, cavity.y, columnHeight);
+    return brakeHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD ? brakeHeight : columnHeight;
+}
+
+// The extra vertical velocity of a braked flake where the flow ceiling upwind is lower, as SnowLee.cavitySinkVelocity:
+float snowCavitySinkVelocityFor(float brakeHeight, float upwindCeiling, float windSpeed, float windScale) {
+    if (!(brakeHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD) || !(upwindCeiling > SNOW_LEE_NO_HEIGHT_THRESHOLD)
+            || !(windSpeed > SNOW_LEE_MINIMUM_WIND_SPEED)) {
+        return 0.0;
+    }
+    float rise = clamp((brakeHeight - upwindCeiling) / SNOW_CAVITY_SLOPE_DISTANCE, 0.0, SNOW_CAVITY_SLOPE_LIMIT);
+    return -windSpeed * rise * (1.0 - clamp(windScale, 0.0, 1.0));
+}
+
+// The extra vertical velocity of a braked flake at a point given from the camera under the wind before braking:
+float snowCavitySinkVelocity(vec3 fromCamera, ivec3 cameraBlock, vec3 cameraFraction, float brakeHeight,
+        float windScale, vec2 wind) {
+    float windSpeed = length(wind);
+    if (!(brakeHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD) || !(windScale < 1.0)
+            || !(windSpeed > SNOW_LEE_MINIMUM_WIND_SPEED)) {
+        return 0.0;
+    }
+    vec2 upwind = wind * (-SNOW_CAVITY_SLOPE_DISTANCE / windSpeed);
+    float upwindCeiling = snowCavityFlowCeilingAt(fromCamera + vec3(upwind.x, 0.0, upwind.y), cameraBlock,
+            cameraFraction);
+    return snowCavitySinkVelocityFor(brakeHeight, upwindCeiling, windSpeed, windScale);
+}
+
+// The extra vertical velocity of a braked flake that the downdraft pulls down, as SnowLee.cavityDowndraftVelocity:
+float snowCavityDowndraftVelocity(float windSpeed, float windScale) {
+    if (!(windSpeed > SNOW_LEE_MINIMUM_WIND_SPEED) || !(cavityDowndraft > 0.0)) {
+        return 0.0;
+    }
+    return -windSpeed * min(1.0, cavityDowndraft) * (1.0 - clamp(windScale, 0.0, 1.0));
+}
+
+// The radius of a flake's flutter circle, which grows by cavitySwirl below a braking ceiling, as
+// SnowLee.cavityCircleRadius:
+float snowCavityCircleRadius(float flutterRadius, float cavityOpen, float radiusShare) {
+    return (flutterRadius + max(0.0, cavitySwirl) * (1.0 - clamp(cavityOpen, 0.0, 1.0))) * radiusShare;
+}
+
+// Cavity openness factor in [0, 1] at worldY under a precomputed braking ceiling brakeHeight and transition depth
+// cavityBrakeLength, as SnowLee.brakeOpenFactorAt:
+float snowBrakeOpenFactorAt(float worldY, float brakeHeight) {
     if (!(brakeHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD)) {
         return 1.0;
     }
@@ -89,7 +143,17 @@ float snowCavityOpenFactor(float worldY, float cavityHeight, float cavityRim, fl
     if (!(depth > 0.0)) {
         return 1.0;
     }
-    return exp(-depth / SNOW_CAVITY_WIND_DECAY);
+    if (!(cavityBrakeLength > 0.0)) {
+        return 0.0;
+    }
+    float share = clamp(depth / cavityBrakeLength, 0.0, 1.0);
+    return 1.0 - share * share * (3.0 - 2.0 * share);
+}
+
+// Depth-only cavity openness factor in [0, 1] for falling flakes, as SnowLee.cavityOpenFactor:
+float snowCavityOpenFactor(float worldY, float cavityHeight, float cavityLip, float columnHeight) {
+    float brakeHeight = snowCavityBrakeHeight(cavityHeight, cavityLip, columnHeight);
+    return snowBrakeOpenFactorAt(worldY, brakeHeight);
 }
 
 // Horizontal flake wind speed multiplier in [SNOW_CAVITY_WIND_FLOOR, 1.0], as SnowLee.cavityWindScale:
@@ -98,16 +162,9 @@ float snowCavityWindScale(float cavityOpen) {
 }
 
 // Horizontal wind multiplier in [SNOW_CAVITY_WIND_FLOOR, 1.0] at worldY under a precomputed braking ceiling
-// brakeHeight, as SnowLee.brakeWindScaleAt:
+// brakeHeight and transition depth cavityBrakeLength, as SnowLee.brakeWindScaleAt:
 float snowBrakeWindScaleAt(float worldY, float brakeHeight) {
-    if (!(brakeHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD)) {
-        return 1.0;
-    }
-    float depth = brakeHeight - worldY;
-    if (!(depth > 0.0)) {
-        return 1.0;
-    }
-    return SNOW_CAVITY_WIND_FLOOR + (1.0 - SNOW_CAVITY_WIND_FLOOR) * exp(-depth / SNOW_CAVITY_WIND_DECAY);
+    return snowCavityWindScale(snowBrakeOpenFactorAt(worldY, brakeHeight));
 }
 
 // Valid-only bilinear sample of the smoothed macro terrain surface S at a point given from the camera, as

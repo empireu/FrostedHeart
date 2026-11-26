@@ -20,6 +20,7 @@
 package com.teammoeg.frostedheart.content.climate.render.fog;
 
 import com.mojang.logging.LogUtils;
+import com.teammoeg.frostedheart.content.climate.render.sky.SkySetting;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraftforge.gametest.GameTestHolder;
@@ -567,8 +568,57 @@ public final class SnowLeeGameTests {
         double fallSpeed = SnowFlakes.fallSpeed(0.6, 1.8, 1.0);
         double leeFill = 0.15;
         double leeBand = 3.0;
+        double defaultBrakeLength = SkySetting.SNOW_CAVITY_BRAKE_LENGTH.defaultValue();
         double leeSlope = SnowLee.slope(fallSpeed, windSpeed, leeFill);
         double leeFall = SnowLee.leeFallSpeed(leeSlope, windSpeed);
+        // Flakes that the downdraft pulls down faster fill the air below the ceiling more thinly, in the ratio of the
+        // fall speeds:
+        double downdraftSpeed = -SnowLee.cavityDowndraftVelocity(windSpeed, SnowLee.CAVITY_WIND_FLOOR,
+                SkySetting.SNOW_CAVITY_DOWNDRAFT.defaultValue());
+        double minimumDensity = 0.35 * fallSpeed / (fallSpeed + downdraftSpeed);
+
+        // Smoothstep cavity braking profile properties (C1-smooth at brakeHeight and brakeHeight - brakeLength):
+        checkNear(helper, "brakeOpenFactorAt at ceiling", SnowLee.brakeOpenFactorAt(65.0, 65.0, defaultBrakeLength),
+                1.0);
+        checkNear(helper, "brakeOpenFactorAt at midpoint",
+                SnowLee.brakeOpenFactorAt(65.0 - 0.5 * defaultBrakeLength, 65.0, defaultBrakeLength), 0.5);
+        checkNear(helper, "brakeOpenFactorAt at ramp bottom",
+                SnowLee.brakeOpenFactorAt(65.0 - defaultBrakeLength, 65.0, defaultBrakeLength), 0.0);
+        checkNear(helper, "brakeOpenFactorAt deep inside cavity",
+                SnowLee.brakeOpenFactorAt(50.0, 65.0, defaultBrakeLength), 0.0);
+        checkNear(helper, "brakeWindScaleAt at midpoint",
+                SnowLee.brakeWindScaleAt(65.0 - 0.5 * defaultBrakeLength, 65.0, defaultBrakeLength),
+                0.5 * (1.0 + SnowLee.CAVITY_WIND_FLOOR));
+        double justBelowLip = SnowLee.brakeOpenFactorAt(65.0 - 0.01 * defaultBrakeLength, 65.0, defaultBrakeLength);
+        helper.assertTrue(1.0 - justBelowLip < 0.001, "smoothstep braking should have near-zero drop just below lip, "
+                + "got drop " + (1.0 - justBelowLip));
+        checkNear(helper, "brakeOpenFactorAt zero length at ceiling", SnowLee.brakeOpenFactorAt(65.0, 65.0, 0.0), 1.0);
+        checkNear(helper, "brakeOpenFactorAt zero length below ceiling", SnowLee.brakeOpenFactorAt(64.9, 65.0, 0.0),
+                0.0);
+        // Zero-length and moving-camera sign-split re-entry stay finite and populate both inflow faces across the ramp:
+        double[] splitEntry = new double[3];
+        int negFaceEntries = 0;
+        int posFaceEntries = 0;
+        for (int flake = 0; flake < 256; flake++) {
+            SnowLee.reenterBoxOffset(flake, 3, 0.2, 0.0, -0.06, -0.06, 0.0, 0.0, 60.0, 65.0, 0.0, 40.0, splitEntry);
+            for (int axis = 0; axis < 3; axis++) {
+                helper.assertTrue(Double.isFinite(splitEntry[axis]) && Math.abs(splitEntry[axis]) <= 20.0 + 1.0e-6,
+                        "zero brakeLength reenterBoxOffset axis " + axis + " out of box: " + splitEntry[axis]);
+            }
+            SnowLee.reenterBoxOffset(flake, 5, 0.2, 0.1, -0.06, -0.06, 0.0, 0.0, 60.0, 65.0, defaultBrakeLength, 40.0,
+                    splitEntry);
+            for (int axis = 0; axis < 3; axis++) {
+                helper.assertTrue(Double.isFinite(splitEntry[axis]) && Math.abs(splitEntry[axis]) <= 20.0 + 1.0e-6,
+                        "sign-split reenterBoxOffset axis " + axis + " out of box: " + splitEntry[axis]);
+            }
+            if (splitEntry[0] < -19.5) {
+                negFaceEntries++;
+            } else if (splitEntry[0] > 19.5) {
+                posFaceEntries++;
+            }
+        }
+        helper.assertTrue(negFaceEntries > 0 && posFaceEntries > 0, "moving-camera sign-split re-entry should enter "
+                + "both -x and +x faces, got neg=" + negFaceEntries + ", pos=" + posFaceEntries);
 
         float[] smooth = new float[TEST_SMOOTH * TEST_SMOOTH];
         float[] smoothScratchA = new float[2 * TEST_SMOOTH * TEST_SMOOTH];
@@ -590,27 +640,44 @@ public final class SnowLeeGameTests {
         FogCavity.scan(TEST_MAP, FogCavity.cardinalStrides(), FogCavity.diagonalStrides(), ravine10, -TEST_HALF,
                 -TEST_HALF, -TEST_HALF, -TEST_HALF, TEST_MAP, FogCavity.ENCLOSURE_SLOPE, true, cavSurf, cavRim);
         double[] camHeights = {42.0, 50.0, 58.0, 62.0};
+        double[] ravine10Cam58Default = null;
         for (double camY : camHeights) {
             double[] stats = simulateRavineSnow(ravine10, smooth, leeOut, slopeOut, cavSurf, cavRim, -5, 4, floor,
-                    0.0, camY, windSpeed, fallSpeed, leeFall, leeBand);
+                    0.0, camY, windSpeed, fallSpeed, leeFall, leeBand, defaultBrakeLength);
+            if (camY == 58.0) {
+                ravine10Cam58Default = stats;
+            }
             String hitLabel = floor >= camY - 19.5 ? "visibleFloorHits"
                     : "visibleShaftCrossings(y=" + String.format(java.util.Locale.ROOT, "%.1f", camY - 19.0) + ")";
-            LOGGER.info("10-wide 25-deep cross-wind ravine (camY={}): {}={} [thirds {}, {}, {}], "
-                            + "meanFloorWeight={}, densityRatio={}",
-                    camY, hitLabel, String.format(java.util.Locale.ROOT, "%.0f", stats[0]),
+            LOGGER.info("10-wide 25-deep cross-wind ravine (camY={}, L={}): {}={} [thirds {}, {}, {}], "
+                            + "sparseStrip={}m, halfStrip={}m, meanFloorWeight={}, densityRatio={}",
+                    camY, defaultBrakeLength, hitLabel, String.format(java.util.Locale.ROOT, "%.0f", stats[0]),
                     String.format(java.util.Locale.ROOT, "%.0f", stats[3]),
                     String.format(java.util.Locale.ROOT, "%.0f", stats[4]),
                     String.format(java.util.Locale.ROOT, "%.0f", stats[5]),
+                    String.format(java.util.Locale.ROOT, "%.2f", stats[6]),
+                    String.format(java.util.Locale.ROOT, "%.2f", stats[7]),
                     String.format(java.util.Locale.ROOT, "%.3f", stats[1]),
                     String.format(java.util.Locale.ROOT, "%.3f", stats[2]));
             helper.assertTrue(stats[0] >= 250.0, "10-wide ravine at camY=" + camY + " had only " + stats[0]
                     + " " + hitLabel + ", expected >= 250");
-            assertEachFloorThirdHasHits(helper, "10-wide 25-deep ravine (camY=" + camY + ")", stats, 40.0);
+            assertFloorThirds(helper, "10-wide 25-deep ravine (camY=" + camY + ")", stats,
+                    camY == 42.0 ? 40.0 : 0.0, 100.0, 100.0);
+            helper.assertTrue(stats[7] <= 5.0, "10-wide ravine at camY=" + camY + " had half-density strip width "
+                    + stats[7] + "m, expected <= 5.0m");
             helper.assertTrue(stats[1] >= 0.90, "10-wide ravine at camY=" + camY + " had mean floor leeWeight "
                     + stats[1] + ", expected >= 0.90");
-            helper.assertTrue(stats[2] >= 0.35 && stats[2] <= 2.20, "10-wide ravine at camY=" + camY
-                    + " had air density ratio " + stats[2] + ", outside [0.35, 2.20]");
+            helper.assertTrue(stats[2] >= minimumDensity && stats[2] <= 2.20, "10-wide ravine at camY=" + camY
+                    + " had air density ratio " + stats[2] + ", outside [" + minimumDensity + ", 2.20]");
         }
+        double[] ravine10L1 = simulateRavineSnow(ravine10, smooth, leeOut, slopeOut, cavSurf, cavRim, -5, 4, floor,
+                0.0, 58.0, windSpeed, fallSpeed, leeFall, leeBand, 1.0);
+        double[] ravine10L3 = simulateRavineSnow(ravine10, smooth, leeOut, slopeOut, cavSurf, cavRim, -5, 4, floor,
+                0.0, 58.0, windSpeed, fallSpeed, leeFall, leeBand, 3.0);
+        logAndCheckBrakeLengthSweep(helper, "10-wide 25-deep ravine (camY=58.0)", ravine10L1, ravine10Cam58Default,
+                ravine10L3, 250.0, 200.0, 40.0, 100.0, 60.0, 100.0);
+        logDowndraftSweep("10-wide 25-deep ravine (camY=58.0)", ravine10, smooth, leeOut, slopeOut, cavSurf, cavRim,
+                -5, 4, floor, 58.0, windSpeed, fallSpeed, leeFall, leeBand, defaultBrakeLength);
 
         // 2. 20-block wide, 25-deep cross-wind ravine (air x in [-10, +9], floor 40, rim 65) at camY = 42, 50, 58, 62:
         SnowLee.HeightLookup ravine20 = (x, z) -> (x <= -11 || x >= 10) ? rim : floor;
@@ -618,27 +685,43 @@ public final class SnowLeeGameTests {
                 smoothScratchB, leeOut, slopeOut, rawA, rawB, relA, relB);
         FogCavity.scan(TEST_MAP, FogCavity.cardinalStrides(), FogCavity.diagonalStrides(), ravine20, -TEST_HALF,
                 -TEST_HALF, -TEST_HALF, -TEST_HALF, TEST_MAP, FogCavity.ENCLOSURE_SLOPE, true, cavSurf, cavRim);
+        double[] ravine20Cam58Default = null;
         for (double camY : camHeights) {
             double[] stats = simulateRavineSnow(ravine20, smooth, leeOut, slopeOut, cavSurf, cavRim, -10, 9, floor,
-                    0.0, camY, windSpeed, fallSpeed, leeFall, leeBand);
+                    0.0, camY, windSpeed, fallSpeed, leeFall, leeBand, defaultBrakeLength);
+            if (camY == 58.0) {
+                ravine20Cam58Default = stats;
+            }
             String hitLabel = floor >= camY - 19.5 ? "visibleFloorHits"
                     : "visibleShaftCrossings(y=" + String.format(java.util.Locale.ROOT, "%.1f", camY - 19.0) + ")";
-            LOGGER.info("20-wide 25-deep cross-wind ravine (camY={}): {}={} [thirds {}, {}, {}], "
-                            + "meanFloorWeight={}, densityRatio={}",
-                    camY, hitLabel, String.format(java.util.Locale.ROOT, "%.0f", stats[0]),
+            LOGGER.info("20-wide 25-deep cross-wind ravine (camY={}, L={}): {}={} [thirds {}, {}, {}], "
+                            + "sparseStrip={}m, halfStrip={}m, meanFloorWeight={}, densityRatio={}",
+                    camY, defaultBrakeLength, hitLabel, String.format(java.util.Locale.ROOT, "%.0f", stats[0]),
                     String.format(java.util.Locale.ROOT, "%.0f", stats[3]),
                     String.format(java.util.Locale.ROOT, "%.0f", stats[4]),
                     String.format(java.util.Locale.ROOT, "%.0f", stats[5]),
+                    String.format(java.util.Locale.ROOT, "%.2f", stats[6]),
+                    String.format(java.util.Locale.ROOT, "%.2f", stats[7]),
                     String.format(java.util.Locale.ROOT, "%.3f", stats[1]),
                     String.format(java.util.Locale.ROOT, "%.3f", stats[2]));
             helper.assertTrue(stats[0] >= 500.0, "20-wide ravine at camY=" + camY + " had only " + stats[0]
                     + " " + hitLabel + ", expected >= 500");
-            assertEachFloorThirdHasHits(helper, "20-wide 25-deep ravine (camY=" + camY + ")", stats, 100.0);
+            assertFloorThirds(helper, "20-wide 25-deep ravine (camY=" + camY + ")", stats, 80.0, 200.0, 200.0);
+            helper.assertTrue(stats[7] <= 5.0, "20-wide ravine at camY=" + camY + " had half-density strip width "
+                    + stats[7] + "m, expected <= 5.0m");
             helper.assertTrue(stats[1] >= 0.90, "20-wide ravine at camY=" + camY + " had mean floor leeWeight "
                     + stats[1] + ", expected >= 0.90");
-            helper.assertTrue(stats[2] >= 0.35 && stats[2] <= 2.20, "20-wide ravine at camY=" + camY
-                    + " had air density ratio " + stats[2] + ", outside [0.35, 2.20]");
+            helper.assertTrue(stats[2] >= minimumDensity && stats[2] <= 2.20, "20-wide ravine at camY=" + camY
+                    + " had air density ratio " + stats[2] + ", outside [" + minimumDensity + ", 2.20]");
         }
+        double[] ravine20L1 = simulateRavineSnow(ravine20, smooth, leeOut, slopeOut, cavSurf, cavRim, -10, 9, floor,
+                0.0, 58.0, windSpeed, fallSpeed, leeFall, leeBand, 1.0);
+        double[] ravine20L3 = simulateRavineSnow(ravine20, smooth, leeOut, slopeOut, cavSurf, cavRim, -10, 9, floor,
+                0.0, 58.0, windSpeed, fallSpeed, leeFall, leeBand, 3.0);
+        logAndCheckBrakeLengthSweep(helper, "20-wide 25-deep ravine (camY=58.0)", ravine20L1, ravine20Cam58Default,
+                ravine20L3, 500.0, 500.0, 150.0, 200.0, 200.0, 200.0);
+        helper.assertTrue(ravine20L3[3] >= 30.0, "20-wide ravine at L=3.0 had only " + ravine20L3[3]
+                + " visible floor hits in the upwind third, expected >= 30");
 
         // 3. 12-deep, 10-wide cross-wind ravine (floor 53, rim 65) with camera on its floor (camY = 54.6):
         short shallowFloor = 53;
@@ -648,22 +731,32 @@ public final class SnowLeeGameTests {
         FogCavity.scan(TEST_MAP, FogCavity.cardinalStrides(), FogCavity.diagonalStrides(), ravine12, -TEST_HALF,
                 -TEST_HALF, -TEST_HALF, -TEST_HALF, TEST_MAP, FogCavity.ENCLOSURE_SLOPE, true, cavSurf, cavRim);
         double[] shallowStats = simulateRavineSnow(ravine12, smooth, leeOut, slopeOut, cavSurf, cavRim, -5, 4,
-                shallowFloor, 0.0, shallowFloor + 1.6, windSpeed, fallSpeed, leeFall, leeBand);
-        LOGGER.info("10-wide 12-deep cross-wind ravine (camY={}): visibleFloorHits={} [thirds {}, {}, {}], "
-                        + "meanFloorWeight={}, densityRatio={}",
-                shallowFloor + 1.6, String.format(java.util.Locale.ROOT, "%.0f", shallowStats[0]),
+                shallowFloor, 0.0, shallowFloor + 1.6, windSpeed, fallSpeed, leeFall, leeBand, defaultBrakeLength);
+        LOGGER.info("10-wide 12-deep cross-wind ravine (camY={}, L={}): visibleFloorHits={} [thirds {}, {}, {}], "
+                        + "sparseStrip={}m, halfStrip={}m, meanFloorWeight={}, densityRatio={}",
+                shallowFloor + 1.6, defaultBrakeLength, String.format(java.util.Locale.ROOT, "%.0f", shallowStats[0]),
                 String.format(java.util.Locale.ROOT, "%.0f", shallowStats[3]),
                 String.format(java.util.Locale.ROOT, "%.0f", shallowStats[4]),
                 String.format(java.util.Locale.ROOT, "%.0f", shallowStats[5]),
+                String.format(java.util.Locale.ROOT, "%.2f", shallowStats[6]),
+                String.format(java.util.Locale.ROOT, "%.2f", shallowStats[7]),
                 String.format(java.util.Locale.ROOT, "%.3f", shallowStats[1]),
                 String.format(java.util.Locale.ROOT, "%.3f", shallowStats[2]));
         helper.assertTrue(shallowStats[0] >= 250.0, "12-deep ravine had only " + shallowStats[0]
                 + " visible floor hits, expected >= 250");
-        assertEachFloorThirdHasHits(helper, "10-wide 12-deep ravine", shallowStats, 40.0);
+        assertFloorThirds(helper, "10-wide 12-deep ravine", shallowStats, 0.0, 100.0, 100.0);
+        helper.assertTrue(shallowStats[7] <= 4.5, "12-deep ravine had half-density strip width " + shallowStats[7]
+                + "m, expected <= 4.5m");
         helper.assertTrue(shallowStats[1] >= 0.90, "12-deep ravine had mean floor leeWeight " + shallowStats[1]
                 + ", expected >= 0.90");
-        helper.assertTrue(shallowStats[2] >= 0.35 && shallowStats[2] <= 2.20, "12-deep ravine had air density ratio "
-                + shallowStats[2] + ", outside [0.35, 2.20]");
+        helper.assertTrue(shallowStats[2] >= minimumDensity && shallowStats[2] <= 2.20,
+                "12-deep ravine had air density ratio " + shallowStats[2] + ", outside [" + minimumDensity + ", 2.20]");
+        double[] shallowL1 = simulateRavineSnow(ravine12, smooth, leeOut, slopeOut, cavSurf, cavRim, -5, 4,
+                shallowFloor, 0.0, shallowFloor + 1.6, windSpeed, fallSpeed, leeFall, leeBand, 1.0);
+        double[] shallowL3 = simulateRavineSnow(ravine12, smooth, leeOut, slopeOut, cavSurf, cavRim, -5, 4,
+                shallowFloor, 0.0, shallowFloor + 1.6, windSpeed, fallSpeed, leeFall, leeBand, 3.0);
+        logAndCheckBrakeLengthSweep(helper, "10-wide 12-deep ravine (camY=54.6)", shallowL1, shallowStats, shallowL3,
+                250.0, 220.0, 40.0, 100.0, 80.0, 100.0);
 
         // 4. 8-wide village street between 6-tall houses (street air x in [-4, +3], floor 64, houses roof 70 at
         // x in [-12, -5] and [4, 11]), camera at eye level (camY = 65.6):
@@ -676,25 +769,37 @@ public final class SnowLeeGameTests {
         FogCavity.scan(TEST_MAP, FogCavity.cardinalStrides(), FogCavity.diagonalStrides(), villageStreet, -TEST_HALF,
                 -TEST_HALF, -TEST_HALF, -TEST_HALF, TEST_MAP, FogCavity.ENCLOSURE_SLOPE, true, cavSurf, cavRim);
         double[] streetStats = simulateRavineSnow(villageStreet, smooth, leeOut, slopeOut, cavSurf, cavRim, -4, 3,
-                streetFloor, 0.0, streetFloor + 1.6, windSpeed, fallSpeed, leeFall, leeBand);
-        LOGGER.info("8-wide street between 6-tall houses (camY={}): visibleFloorHits={} [thirds {}, {}, {}], "
-                        + "meanFloorWeight={}, densityRatio={}",
-                streetFloor + 1.6, String.format(java.util.Locale.ROOT, "%.0f", streetStats[0]),
+                streetFloor, 0.0, streetFloor + 1.6, windSpeed, fallSpeed, leeFall, leeBand, defaultBrakeLength);
+        LOGGER.info("8-wide street between 6-tall houses (camY={}, L={}): visibleFloorHits={} [thirds {}, {}, {}], "
+                        + "sparseStrip={}m, halfStrip={}m, meanFloorWeight={}, densityRatio={}",
+                streetFloor + 1.6, defaultBrakeLength, String.format(java.util.Locale.ROOT, "%.0f", streetStats[0]),
                 String.format(java.util.Locale.ROOT, "%.0f", streetStats[3]),
                 String.format(java.util.Locale.ROOT, "%.0f", streetStats[4]),
                 String.format(java.util.Locale.ROOT, "%.0f", streetStats[5]),
+                String.format(java.util.Locale.ROOT, "%.2f", streetStats[6]),
+                String.format(java.util.Locale.ROOT, "%.2f", streetStats[7]),
                 String.format(java.util.Locale.ROOT, "%.3f", streetStats[1]),
                 String.format(java.util.Locale.ROOT, "%.3f", streetStats[2]));
         helper.assertTrue(streetStats[0] >= 200.0, "8-wide street had only " + streetStats[0]
                 + " visible floor hits, expected >= 200");
-        assertEachFloorThirdHasHits(helper, "8-wide village street", streetStats, 30.0);
+        assertFloorThirds(helper, "8-wide village street", streetStats, 0.0, 80.0, 80.0);
+        helper.assertTrue(streetStats[7] <= 4.0, "8-wide street had half-density strip width " + streetStats[7]
+                + "m, expected <= 4.0m");
         helper.assertTrue(streetStats[1] >= 0.90, "8-wide street had mean floor leeWeight " + streetStats[1]
                 + ", expected >= 0.90");
-        helper.assertTrue(streetStats[2] >= 0.35 && streetStats[2] <= 2.20, "8-wide street had air density ratio "
-                + streetStats[2] + ", outside [0.35, 2.20]");
+        helper.assertTrue(streetStats[2] >= minimumDensity && streetStats[2] <= 2.20,
+                "8-wide street had air density ratio " + streetStats[2] + ", outside [" + minimumDensity + ", 2.20]");
+        double[] streetL1 = simulateRavineSnow(villageStreet, smooth, leeOut, slopeOut, cavSurf, cavRim, -4, 3,
+                streetFloor, 0.0, streetFloor + 1.6, windSpeed, fallSpeed, leeFall, leeBand, 1.0);
+        double[] streetL3 = simulateRavineSnow(villageStreet, smooth, leeOut, slopeOut, cavSurf, cavRim, -4, 3,
+                streetFloor, 0.0, streetFloor + 1.6, windSpeed, fallSpeed, leeFall, leeBand, 3.0);
+        logAndCheckBrakeLengthSweep(helper, "8-wide street (camY=65.6)", streetL1, streetStats, streetL3,
+                200.0, 140.0, 25.0, 80.0, 30.0, 80.0);
+        logDowndraftSweep("8-wide street (camY=65.6)", villageStreet, smooth, leeOut, slopeOut, cavSurf, cavRim, -4, 3,
+                streetFloor, streetFloor + 1.6, windSpeed, fallSpeed, leeFall, leeBand, defaultBrakeLength);
 
         // 5. Overhang lip stays dry even with a deep cavity map value overhead:
-        double overhangOpen = SnowLee.cavityOpenFactor(50.0, 61.4, 65.0, 60.0);
+        double overhangOpen = SnowLee.cavityOpenFactor(50.0, 61.4, 65.0, 60.0, defaultBrakeLength);
         double overhangShare = SnowLee.leeShare(50.0, 62.0, 60.0, 58.0, overhangOpen, leeBand);
         checkNear(helper, "overhang inside cavity stays dry", overhangShare, 0.0);
 
@@ -714,14 +819,24 @@ public final class SnowLeeGameTests {
                 int idx = TEST_HALF * TEST_MAP + (x + TEST_HALF);
                 short colH = lookup.heightAt(x, 0);
                 double brakeH = SnowLee.cavityBrakeHeight(cavSurf[idx], cavRim[idx], colH);
-                double open = SnowLee.cavityOpenFactor(colH + 1.5, cavSurf[idx], cavRim[idx], colH);
+                double open = SnowLee.cavityOpenFactor(colH + 1.5, cavSurf[idx], cavRim[idx], colH,
+                        defaultBrakeLength);
                 double scale = SnowLee.cavityWindScale(open);
                 helper.assertTrue(brakeH <= SnowLee.NO_HEIGHT_THRESHOLD,
                         nonCavityLabels[shapeIndex] + " got brakeHeight " + brakeH + " at x=" + x);
                 checkNear(helper, nonCavityLabels[shapeIndex] + " brakeWindScaleAt at x=" + x,
-                        SnowLee.brakeWindScaleAt(colH + 1.5, brakeH), 1.0);
+                        SnowLee.brakeWindScaleAt(colH + 1.5, brakeH, defaultBrakeLength), 1.0);
                 checkNear(helper, nonCavityLabels[shapeIndex] + " cavityOpenFactor at x=" + x, open, 1.0);
                 checkNear(helper, nonCavityLabels[shapeIndex] + " cavityWindScale at x=" + x, scale, 1.0);
+                checkNear(helper, nonCavityLabels[shapeIndex] + " cavitySinkVelocity at x=" + x,
+                        SnowLee.cavitySinkVelocity(brakeH, colH - 10.0, windSpeed, scale), 0.0);
+                checkNear(helper, nonCavityLabels[shapeIndex] + " cavityDowndraftVelocity at x=" + x,
+                        SnowLee.cavityDowndraftVelocity(windSpeed, scale,
+                                SkySetting.SNOW_CAVITY_DOWNDRAFT.defaultValue()), 0.0);
+                checkNear(helper, nonCavityLabels[shapeIndex] + " cavityCircleRadius at x=" + x,
+                        SnowLee.cavityCircleRadius(SkySetting.SNOW_FLUTTER.defaultValue(),
+                                SkySetting.SNOW_CAVITY_SWIRL.defaultValue(), open, 1.2),
+                        SkySetting.SNOW_FLUTTER.defaultValue() * 1.2);
                 double withCav = SnowLee.leeShare(colH + 1.5, colH + 5.0, colH, colH, open, leeBand);
                 double withoutCav = SnowLee.leeShare(colH + 1.5, colH + 5.0, colH, colH, leeBand);
                 checkNear(helper, nonCavityLabels[shapeIndex] + " leeShare unchanged at x=" + x, withCav, withoutCav);
@@ -737,19 +852,135 @@ public final class SnowLeeGameTests {
             double wz = -0.12;
             double cz = 0.03;
             SnowLee.reenterBoxOffset(flake, 7, wx - cx, -0.06, -0.06, wz - cz, 40.0, plainEntry);
-            SnowLee.reenterBoxOffset(flake, 7, wx, cx, -0.06, -0.06, wz, cz, 65.6, SnowLee.NO_HEIGHT, 40.0,
-                    profiledEntry);
+            SnowLee.reenterBoxOffset(flake, 7, wx, cx, -0.06, -0.06, wz, cz, 65.6, SnowLee.NO_HEIGHT,
+                    defaultBrakeLength, 40.0, profiledEntry);
             for (int axis = 0; axis < 3; axis++) {
                 checkNear(helper, "open-ground reenterBoxOffset axis " + axis + " flake " + flake,
                         profiledEntry[axis], plainEntry[axis]);
             }
-            SnowLee.reenterBoxOffset(flake, 7, wx, cx, -0.06, -0.06, wz, cz, 65.6, 40.0, 40.0, profiledEntry);
+            SnowLee.reenterBoxOffset(flake, 7, wx, cx, -0.06, -0.06, wz, cz, 65.6, 40.0, defaultBrakeLength, 40.0,
+                    profiledEntry);
             for (int axis = 0; axis < 3; axis++) {
                 checkNear(helper, "below-box cavity reenterBoxOffset axis " + axis + " flake " + flake,
                         profiledEntry[axis], plainEntry[axis]);
             }
         }
 
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 120)
+    public static void ravineCeilingStaysAtTheLipAndSteppedRimsKeepFlakesSpread(GameTestHelper helper) {
+        short floor = 40;
+        short rim = 65;
+        short higherGround = 70;
+        double windSpeed = SnowFlakes.windSpeed(12.0, 0.5);
+        double fallSpeed = SnowFlakes.fallSpeed(0.6, 1.8, 1.0);
+        double leeBand = 3.0;
+        double brakeLength = SkySetting.SNOW_CAVITY_BRAKE_LENGTH.defaultValue();
+        double leeSlope = SnowLee.slope(fallSpeed, windSpeed, 0.15);
+        double leeFall = SnowLee.leeFallSpeed(leeSlope, windSpeed);
+        float[] smooth = new float[TEST_SMOOTH * TEST_SMOOTH];
+        float[] smoothScratchA = new float[2 * TEST_SMOOTH * TEST_SMOOTH];
+        float[] smoothScratchB = new float[2 * TEST_SMOOTH * TEST_SMOOTH];
+        float[] leeOut = new float[TEST_MAP * TEST_MAP];
+        float[] slopeOut = new float[TEST_MAP * TEST_MAP];
+        float[] rawA = new float[TEST_MAP * TEST_MAP];
+        float[] rawB = new float[TEST_MAP * TEST_MAP];
+        float[] relA = new float[TEST_MAP * TEST_MAP];
+        float[] relB = new float[TEST_MAP * TEST_MAP];
+        float[] cavSurf = new float[TEST_MAP * TEST_MAP];
+        float[] cavLip = new float[TEST_MAP * TEST_MAP];
+
+        // Braked flakes sink only where the ceiling rises along the wind, by the clamped slope, and swirl when braked:
+        checkNear(helper, "sink under a rising ceiling", SnowLee.cavitySinkVelocity(65.0, 64.0, 6.0, 0.01),
+                -6.0 * 0.5 * 0.99);
+        checkNear(helper, "sink under a steep rise", SnowLee.cavitySinkVelocity(65.0, 40.0, 6.0, 0.01),
+                -6.0 * SnowLee.CAVITY_SLOPE_LIMIT * 0.99);
+        checkNear(helper, "no sink under a falling ceiling", SnowLee.cavitySinkVelocity(65.0, 70.0, 6.0, 0.01), 0.0);
+        checkNear(helper, "no sink above the ceiling", SnowLee.cavitySinkVelocity(65.0, 60.0, 6.0, 1.0), 0.0);
+        checkNear(helper, "swirl radius when fully braked", SnowLee.cavityCircleRadius(0.15, 1.5, 0.0, 1.2),
+                1.65 * 1.2);
+        checkNear(helper, "downdraft when fully braked", SnowLee.cavityDowndraftVelocity(6.0, 0.01, 0.5),
+                -6.0 * 0.5 * 0.99);
+        checkNear(helper, "no downdraft above the ceiling", SnowLee.cavityDowndraftVelocity(6.0, 1.0, 0.5), 0.0);
+        checkNear(helper, "no downdraft at share 0", SnowLee.cavityDowndraftVelocity(6.0, 0.01, 0.0), 0.0);
+
+        // 1. A 10-wide ravine with ground 5 blocks higher 12 blocks behind each lip brakes only below the lip:
+        SnowLee.HeightLookup terraced = (x, z) -> (x <= -18 || x >= 17) ? higherGround
+                : ((x <= -6 || x >= 5) ? rim : floor);
+        FogCavity.scan(TEST_MAP, FogCavity.cardinalStrides(), FogCavity.diagonalStrides(), terraced, -TEST_HALF,
+                -TEST_HALF, -TEST_HALF, -TEST_HALF, TEST_MAP, FogCavity.ENCLOSURE_SLOPE, true, cavSurf, cavLip);
+        for (int z = -8; z <= 8; z += 4) {
+            for (int x = -24; x <= 24; x++) {
+                int idx = (z + TEST_HALF) * TEST_MAP + (x + TEST_HALF);
+                short column = terraced.heightAt(x, z);
+                double brakeHeight = SnowLee.cavityBrakeHeight(cavSurf[idx], cavLip[idx], column);
+                if (column == floor) {
+                    helper.assertTrue(Math.abs(brakeHeight - rim) < 1.0e-3, "terraced ravine brakes below "
+                            + brakeHeight + " instead of its lip " + rim + " at x=" + x + ", z=" + z);
+                } else {
+                    helper.assertTrue(!(brakeHeight > SnowLee.NO_HEIGHT_THRESHOLD), "terraced ravine brakes over "
+                            + "its ground at x=" + x + ", z=" + z + " below " + brakeHeight);
+                }
+            }
+        }
+
+        // 2. A ravine with uneven rims and stepped walls keeps every column's air below twice the mean density.
+        // Its ceiling rises from the upwind step to the rims:
+        SnowLee.HeightLookup stepped = (x, z) -> {
+            if (x <= -10) {
+                return (short) (61 + Math.floorMod(z * 7, 5));
+            }
+            if (x <= -6) {
+                return (short) 58;
+            }
+            if (x <= 4) {
+                return floor;
+            }
+            if (x <= 7) {
+                return (short) 55;
+            }
+            if (x <= 9) {
+                return (short) 60;
+            }
+            return (short) (66 - Math.floorMod(z * 3, 4));
+        };
+        runSmoothAndScan(stepped, TEST_MAP, TEST_STRIDES, 1.0, 0.0, leeSlope, true, smooth, smoothScratchA,
+                smoothScratchB, leeOut, slopeOut, rawA, rawB, relA, relB);
+        FogCavity.scan(TEST_MAP, FogCavity.cardinalStrides(), FogCavity.diagonalStrides(), stepped, -TEST_HALF,
+                -TEST_HALF, -TEST_HALF, -TEST_HALF, TEST_MAP, FogCavity.ENCLOSURE_SLOPE, true, cavSurf, cavLip);
+        int densityMinX = -9;
+        int densityMaxX = 9;
+        double densityTop = 64.0;
+        double[] withSink = new double[densityMaxX - densityMinX + 1];
+        double[] withoutSink = new double[densityMaxX - densityMinX + 1];
+        // The downdraft only spreads flakes below the ceiling, so the crowding is measured without it:
+        double[] withDowndraft = new double[densityMaxX - densityMinX + 1];
+        simulateRavineSnow(stepped, smooth, leeOut, slopeOut, cavSurf, cavLip, densityMinX, densityMaxX, floor, 0.0,
+                50.0, windSpeed, fallSpeed, leeFall, leeBand, brakeLength, 0.0, true, withSink, densityTop);
+        simulateRavineSnow(stepped, smooth, leeOut, slopeOut, cavSurf, cavLip, densityMinX, densityMaxX, floor, 0.0,
+                50.0, windSpeed, fallSpeed, leeFall, leeBand, brakeLength, 0.0, false, withoutSink, densityTop);
+        simulateRavineSnow(stepped, smooth, leeOut, slopeOut, cavSurf, cavLip, densityMinX, densityMaxX, floor, 0.0,
+                50.0, windSpeed, fallSpeed, leeFall, leeBand, brakeLength,
+                SkySetting.SNOW_CAVITY_DOWNDRAFT.defaultValue(), true, withDowndraft, densityTop);
+        double[] sinkSpread = densitySpread(withSink);
+        double[] plainSpread = densitySpread(withoutSink);
+        LOGGER.info("Stepped ravine column densities with sinking: {}", formatDensities(withSink));
+        LOGGER.info("Stepped ravine column densities without sinking: {}", formatDensities(withoutSink));
+        LOGGER.info("Stepped ravine column densities with sinking and the default downdraft: {}",
+                formatDensities(withDowndraft));
+        LOGGER.info("Stepped ravine density spread with sinking: mean={}, max/mean={}, min/mean={}; without: mean={}, "
+                        + "max/mean={}, min/mean={}",
+                String.format(java.util.Locale.ROOT, "%.3f", sinkSpread[0]),
+                String.format(java.util.Locale.ROOT, "%.3f", sinkSpread[1]),
+                String.format(java.util.Locale.ROOT, "%.3f", sinkSpread[2]),
+                String.format(java.util.Locale.ROOT, "%.3f", plainSpread[0]),
+                String.format(java.util.Locale.ROOT, "%.3f", plainSpread[1]),
+                String.format(java.util.Locale.ROOT, "%.3f", plainSpread[2]));
+        helper.assertTrue(sinkSpread[0] > 0.0, "stepped ravine has no flakes in its air");
+        helper.assertTrue(sinkSpread[1] <= 2.0, "stepped ravine has a column at " + sinkSpread[1]
+                + " times the mean air density, expected at most 2");
         helper.succeed();
     }
 
@@ -871,10 +1102,10 @@ public final class SnowLeeGameTests {
         checkShaderConstant(helper, "snow_lee.glsl", leeGlsl, "SNOW_CAVITY_MAP_SIZE", SnowLee.CAVITY_MAP_SIZE, 0.0);
         checkShaderConstant(helper, "snow_lee.glsl", leeGlsl, "SNOW_CAVITY_WIND_FLOOR",
                 SnowLee.CAVITY_WIND_FLOOR, 1.0e-6);
-        checkShaderConstant(helper, "snow_lee.glsl", leeGlsl, "SNOW_CAVITY_WIND_DECAY",
-                SnowLee.CAVITY_WIND_DECAY, 1.0e-6);
-        checkShaderConstant(helper, "snow_lee.glsl", leeGlsl, "SNOW_CAVITY_RIM_BLEND_DEPTH",
-                SnowLee.CAVITY_RIM_BLEND_DEPTH, 1.0e-6);
+        checkShaderConstant(helper, "snow_lee.glsl", leeGlsl, "SNOW_CAVITY_SLOPE_DISTANCE",
+                SnowLee.CAVITY_SLOPE_DISTANCE, 1.0e-6);
+        checkShaderConstant(helper, "snow_lee.glsl", leeGlsl, "SNOW_CAVITY_SLOPE_LIMIT",
+                SnowLee.CAVITY_SLOPE_LIMIT, 1.0e-6);
 
         // snow_lee_build.fsh:
         checkLeeShaderConstants(helper, "snow_lee_build.fsh", leeBuildFsh);
@@ -1122,19 +1353,66 @@ public final class SnowLeeGameTests {
         return visibleSum;
     }
 
-    private static void assertEachFloorThirdHasHits(GameTestHelper helper, String label, double[] stats,
-            double minimumPerThird) {
+    private static void assertFloorThirds(GameTestHelper helper, String label, double[] stats, double minUpwind,
+            double minMiddle, double minDownwind) {
         String[] thirdNames = {"upwind third", "middle third", "downwind third"};
+        double[] minimums = {minUpwind, minMiddle, minDownwind};
         for (int third = 0; third < 3; third++) {
+            if (minimums[third] <= 0.0) {
+                continue;
+            }
             double hits = stats[3 + third];
-            helper.assertTrue(hits >= minimumPerThird, label + " had only " + hits + " visible floor hits in the "
-                    + thirdNames[third] + ", expected >= " + minimumPerThird);
+            helper.assertTrue(hits >= minimums[third], label + " had only " + hits + " visible floor hits in the "
+                    + thirdNames[third] + ", expected >= " + minimums[third]);
         }
+    }
+
+    private static void logAndCheckBrakeLengthSweep(GameTestHelper helper, String label, double[] statsL1,
+            double[] statsL2, double[] statsL3, double minTotalL1, double minTotalL3, double minUpwindL1,
+            double minMidDownL1, double minMidL3, double minDownL3) {
+        double[][] sweep = {statsL1, statsL2, statsL3};
+        double[] lengths = {1.0, 2.0, 3.0};
+        for (int i = 0; i < sweep.length; i++) {
+            double[] stats = sweep[i];
+            LOGGER.info("Brake length sweep ({}, L={}): visibleFloorHits={} [thirds {}, {}, {}], "
+                            + "sparseStrip={}m, halfStrip={}m, meanFloorWeight={}, densityRatio={}",
+                    label, lengths[i], String.format(java.util.Locale.ROOT, "%.0f", stats[0]),
+                    String.format(java.util.Locale.ROOT, "%.0f", stats[3]),
+                    String.format(java.util.Locale.ROOT, "%.0f", stats[4]),
+                    String.format(java.util.Locale.ROOT, "%.0f", stats[5]),
+                    String.format(java.util.Locale.ROOT, "%.2f", stats[6]),
+                    String.format(java.util.Locale.ROOT, "%.2f", stats[7]),
+                    String.format(java.util.Locale.ROOT, "%.3f", stats[1]),
+                    String.format(java.util.Locale.ROOT, "%.3f", stats[2]));
+        }
+        helper.assertTrue(statsL1[0] >= minTotalL1, label + " at L=1.0 had only " + statsL1[0]
+                + " visible floor hits, expected >= " + minTotalL1);
+        assertFloorThirds(helper, label + " (L=1.0)", statsL1, minUpwindL1, minMidDownL1, minMidDownL1);
+        helper.assertTrue(statsL1[1] >= 0.90, label + " at L=1.0 had mean floor leeWeight " + statsL1[1]);
+        helper.assertTrue(statsL3[0] >= minTotalL3, label + " at L=3.0 had only " + statsL3[0]
+                + " visible floor hits, expected >= " + minTotalL3);
+        assertFloorThirds(helper, label + " (L=3.0)", statsL3, 0.0, minMidL3, minDownL3);
+        helper.assertTrue(statsL3[1] >= 0.90, label + " at L=3.0 had mean floor leeWeight " + statsL3[1]);
     }
 
     private static double[] simulateRavineSnow(SnowLee.HeightLookup heights, float[] smooth, float[] leeMap,
             float[] slopeMap, float[] cavSurf, float[] cavRim, int airMinX, int airMaxX, short floorHeight,
-            double cameraX, double cameraY, double windSpeed, double fallSpeed, double leeFall, double leeBand) {
+            double cameraX, double cameraY, double windSpeed, double fallSpeed, double leeFall, double leeBand,
+            double brakeLength) {
+        return simulateRavineSnow(heights, smooth, leeMap, slopeMap, cavSurf, cavRim, airMinX, airMaxX, floorHeight,
+                cameraX, cameraY, windSpeed, fallSpeed, leeFall, leeBand, brakeLength,
+                SkySetting.SNOW_CAVITY_DOWNDRAFT.defaultValue(), true, null, 0.0);
+    }
+
+    /**
+     * Simulates the flakes of the near box over a cross-section with wind along +x. When columnDensities is non-null,
+     * it receives the live flake density of each column from airMinX to airMaxX in the air from one block above the
+     * terrain up to densityTop, as a share of the box's mean density, or -1 for a column without such air.
+     */
+    private static double[] simulateRavineSnow(SnowLee.HeightLookup heights, float[] smooth, float[] leeMap,
+            float[] slopeMap, float[] cavSurf, float[] cavRim, int airMinX, int airMaxX, short floorHeight,
+            double cameraX, double cameraY, double windSpeed, double fallSpeed, double leeFall, double leeBand,
+            double brakeLength, double downdraft, boolean sinks, double[] columnDensities, double densityTop) {
         int flakeCount = 8192;
         int warmupSteps = 180;
         int measureSteps = 180;
@@ -1163,23 +1441,29 @@ public final class SnowLeeGameTests {
         double centerSlope = SnowLee.sampleBilinear(slopeMap, TEST_MAP, cameraX, 0.0, 1.0, 0.0);
         double centerSmooth = SnowLee.sampleSmoothBilinear(smooth, TEST_SMOOTH, cameraX + TEST_HALF, TEST_HALF);
         double centerBrakeHeight = SnowLee.cavityBrakeHeight(cavSurf[camIdx], cavRim[camIdx], centerColumn);
-        double topWindScale = SnowLee.brakeWindScaleAt(cameraY + halfSide, centerBrakeHeight);
-        double bottomWindScale = SnowLee.brakeWindScaleAt(cameraY - halfSide, centerBrakeHeight);
+        double topWindScale = SnowLee.brakeWindScaleAt(cameraY + halfSide, centerBrakeHeight, brakeLength);
+        double bottomWindScale = SnowLee.brakeWindScaleAt(cameraY - halfSide, centerBrakeHeight, brakeLength);
         double[] reentry = new double[3];
 
         double floorSpan = (airMaxX - airMinX) + 1.0;
         boolean floorInBox = floorHeight >= cameraY - halfSide + 0.5;
         double measureY = floorInBox ? floorHeight : cameraY - halfSide + 1.0;
+        int binsPerBlock = 4;
+        int stripBins = (int) Math.round(floorSpan * binsPerBlock);
+        double[] binHits = new double[stripBins];
         double visibleFloorHits = 0.0;
         double rawFloorHits = 0.0;
         double[] thirdHits = new double[3];
+        int densitySnapshotFrames = 15;
+        int densitySnapshots = 0;
+        double[] columnCounts = new double[columnDensities != null ? columnDensities.length : 0];
         for (int frame = 1; frame <= warmupSteps + measureSteps; frame++) {
             boolean measuring = frame > warmupSteps;
             for (int flake = 0; flake < flakeCount; flake++) {
                 double vx;
                 double vy;
                 if (stopped[flake]) {
-                    vx = windSpeed * SnowLee.brakeWindScaleAt(cameraY + posY[flake], centerBrakeHeight);
+                    vx = windSpeed * SnowLee.brakeWindScaleAt(cameraY + posY[flake], centerBrakeHeight, brakeLength);
                     vy = -ownFall[flake];
                 } else {
                     double wx = cameraX + posX[flake];
@@ -1190,7 +1474,8 @@ public final class SnowLeeGameTests {
                     double columnHeight = heights.heightAt(colX, colZ);
                     int cIdx = Math.max(0, Math.min(TEST_MAP - 1, colZ + TEST_HALF)) * TEST_MAP
                             + Math.max(0, Math.min(TEST_MAP - 1, colX + TEST_HALF));
-                    double cavOpen = SnowLee.cavityOpenFactor(wy, cavSurf[cIdx], cavRim[cIdx], columnHeight);
+                    double brakeHeight = SnowLee.cavityBrakeHeight(cavSurf[cIdx], cavRim[cIdx], columnHeight);
+                    double cavOpen = SnowLee.brakeOpenFactorAt(wy, brakeHeight, brakeLength);
                     double windScale = SnowLee.cavityWindScale(cavOpen);
                     vx = windSpeed * windScale;
                     double leeHeight = SnowLee.sampleBilinear(leeMap, TEST_MAP, wx, wz, 1.0, 0.0);
@@ -1198,19 +1483,26 @@ public final class SnowLeeGameTests {
                     double smoothHeight = SnowLee.sampleSmoothBilinear(smooth, TEST_SMOOTH, wx + TEST_HALF,
                             wz + TEST_HALF);
                     vy = SnowLee.verticalVelocity(wy, leeHeight, columnHeight, smoothHeight, terrainSlope,
-                            ownFall[flake], windSpeed * windScale, leeFall * windScale);
+                            ownFall[flake], windSpeed * windScale, leeFall * windScale)
+                            + SnowLee.cavityDowndraftVelocity(windSpeed, windScale, downdraft);
+                    if (sinks) {
+                        vy += SnowLee.cavitySinkVelocity(brakeHeight, flowCeilingAt(heights, cavSurf, cavRim,
+                                wx - SnowLee.CAVITY_SLOPE_DISTANCE, wz), windSpeed, windScale);
+                    }
                 }
                 double nextX = posX[flake] + vx * dt;
                 double nextY = posY[flake] + vy * dt;
                 double nextZ = posZ[flake];
                 if (Math.abs(nextX) >= halfSide || Math.abs(nextY) >= halfSide || Math.abs(nextZ) >= halfSide) {
                     double topVy = SnowLee.verticalVelocity(cameraY + halfSide, centerLee, centerColumn, centerSmooth,
-                            centerSlope, ownFall[flake], windSpeed * topWindScale, leeFall * topWindScale);
+                            centerSlope, ownFall[flake], windSpeed * topWindScale, leeFall * topWindScale)
+                            + SnowLee.cavityDowndraftVelocity(windSpeed, topWindScale, downdraft);
                     double bottomVy = SnowLee.verticalVelocity(cameraY - halfSide, centerLee, centerColumn,
                             centerSmooth, centerSlope, ownFall[flake], windSpeed * bottomWindScale,
-                            leeFall * bottomWindScale);
+                            leeFall * bottomWindScale)
+                            + SnowLee.cavityDowndraftVelocity(windSpeed, bottomWindScale, downdraft);
                     SnowLee.reenterBoxOffset(flake, frame, windSpeed * dt, 0.0, topVy * dt, bottomVy * dt, 0.0, 0.0,
-                            cameraY, centerBrakeHeight, boxSide, reentry);
+                            cameraY, centerBrakeHeight, brakeLength, boxSide, reentry);
                     posX[flake] = reentry[0];
                     posY[flake] = reentry[1];
                     posZ[flake] = reentry[2];
@@ -1239,7 +1531,7 @@ public final class SnowLeeGameTests {
                                     int cIdx = Math.max(0, Math.min(TEST_MAP - 1, colZ + TEST_HALF)) * TEST_MAP
                                             + Math.max(0, Math.min(TEST_MAP - 1, colX + TEST_HALF));
                                     double cavOpen = SnowLee.cavityOpenFactor(floorHeight, cavSurf[cIdx], cavRim[cIdx],
-                                            floorHeight);
+                                            floorHeight, brakeLength);
                                     double leeHeight = SnowLee.sampleBilinear(leeMap, TEST_MAP, wx, wz, 1.0, 0.0);
                                     double smoothHeight = SnowLee.sampleSmoothBilinear(smooth, TEST_SMOOTH,
                                             wx + TEST_HALF, wz + TEST_HALF);
@@ -1251,6 +1543,9 @@ public final class SnowLeeGameTests {
                                     int third = Math.max(0, Math.min(2, (int) Math.floor(3.0 * (wx - airMinX)
                                             / floorSpan)));
                                     thirdHits[third] += weight;
+                                    int bin = Math.max(0, Math.min(stripBins - 1,
+                                            (int) Math.floor((wx - airMinX) * binsPerBlock)));
+                                    binHits[bin] += weight;
                                 }
                                 break;
                             }
@@ -1259,7 +1554,7 @@ public final class SnowLeeGameTests {
                                 int cIdx = Math.max(0, Math.min(TEST_MAP - 1, colZ + TEST_HALF)) * TEST_MAP
                                         + Math.max(0, Math.min(TEST_MAP - 1, colX + TEST_HALF));
                                 double cavOpen = SnowLee.cavityOpenFactor(measureY, cavSurf[cIdx], cavRim[cIdx],
-                                        floorHeight);
+                                        floorHeight, brakeLength);
                                 double leeHeight = SnowLee.sampleBilinear(leeMap, TEST_MAP, wx, wz, 1.0, 0.0);
                                 double smoothHeight = SnowLee.sampleSmoothBilinear(smooth, TEST_SMOOTH,
                                         wx + TEST_HALF, wz + TEST_HALF);
@@ -1271,6 +1566,9 @@ public final class SnowLeeGameTests {
                                 int third = Math.max(0, Math.min(2, (int) Math.floor(3.0 * (wx - airMinX)
                                         / floorSpan)));
                                 thirdHits[third] += weight;
+                                int bin = Math.max(0, Math.min(stripBins - 1,
+                                        (int) Math.floor((wx - airMinX) * binsPerBlock)));
+                                binHits[bin] += weight;
                             }
                             prevWy = wy;
                         }
@@ -1279,6 +1577,34 @@ public final class SnowLeeGameTests {
                     posY[flake] = nextY;
                     posZ[flake] = nextZ;
                 }
+            }
+            if (columnDensities != null && measuring && frame % densitySnapshotFrames == 0) {
+                densitySnapshots++;
+                for (int flake = 0; flake < flakeCount; flake++) {
+                    double wx = cameraX + posX[flake];
+                    double wy = cameraY + posY[flake];
+                    int colX = (int) Math.floor(wx);
+                    if (stopped[flake] || colX < airMinX || colX > airMaxX || !(wy < densityTop)) {
+                        continue;
+                    }
+                    if (wy >= heights.heightAt(colX, (int) Math.floor(posZ[flake])) + 1.0) {
+                        columnCounts[colX - airMinX] += 1.0;
+                    }
+                }
+            }
+        }
+        if (columnDensities != null) {
+            double boxDensity = flakeCount / (boxSide * boxSide * boxSide);
+            for (int column = 0; column < columnDensities.length; column++) {
+                int colX = airMinX + column;
+                double volume = 0.0;
+                for (int colZ = -(int) halfSide; colZ < (int) halfSide; colZ++) {
+                    double bottom = Math.max(heights.heightAt(colX, colZ) + 1.0, cameraY - halfSide);
+                    double top = Math.min(densityTop, cameraY + halfSide);
+                    volume += Math.max(0.0, top - bottom);
+                }
+                columnDensities[column] = volume > 0.0 && densitySnapshots > 0
+                        ? columnCounts[column] / (densitySnapshots * volume * boxDensity) : -1.0;
             }
         }
         // Measure live flake density inside the cavity air volume inside the simulation box:
@@ -1296,10 +1622,97 @@ public final class SnowLeeGameTests {
                 liveInRavine++;
             }
         }
+        double steadyPerBlock = thirdHits[2] / (floorSpan / 3.0);
+        double sparseStripWidth = floorSpan;
+        double halfStripWidth = floorSpan;
+        if (steadyPerBlock > 0.0 && stripBins >= 2) {
+            double prevDensity = 0.0;
+            double prevX = 0.0;
+            for (int bin = 0; bin < stripBins - 1; bin++) {
+                double windowDensity = (binHits[bin] + binHits[bin + 1]) * (0.5 * binsPerBlock);
+                double centerX = (bin + 1.0) / binsPerBlock;
+                if (sparseStripWidth == floorSpan && windowDensity >= 0.1 * steadyPerBlock) {
+                    double share = windowDensity > prevDensity
+                            ? (0.1 * steadyPerBlock - prevDensity) / (windowDensity - prevDensity) : 0.0;
+                    sparseStripWidth = prevX + Math.max(0.0, Math.min(1.0, share)) * (centerX - prevX);
+                }
+                if (halfStripWidth == floorSpan && windowDensity >= 0.5 * steadyPerBlock) {
+                    double share = windowDensity > prevDensity
+                            ? (0.5 * steadyPerBlock - prevDensity) / (windowDensity - prevDensity) : 0.0;
+                    halfStripWidth = prevX + Math.max(0.0, Math.min(1.0, share)) * (centerX - prevX);
+                    break;
+                }
+                prevDensity = windowDensity;
+                prevX = centerX;
+            }
+        }
         double expectedLive = flakeCount * (floorSpan * sampleHeight * boxSide) / (boxSide * boxSide * boxSide);
         double meanWeight = rawFloorHits > 0.0 ? visibleFloorHits / rawFloorHits : 0.0;
         return new double[]{visibleFloorHits, meanWeight, liveInRavine / expectedLive, thirdHits[0], thirdHits[1],
-                thirdHits[2]};
+                thirdHits[2], sparseStripWidth, halfStripWidth};
+    }
+
+    private static void logDowndraftSweep(String label, SnowLee.HeightLookup heights, float[] smooth, float[] leeMap,
+            float[] slopeMap, float[] cavSurf, float[] cavLip, int airMinX, int airMaxX, short floorHeight,
+            double cameraY, double windSpeed, double fallSpeed, double leeFall, double leeBand, double brakeLength) {
+        double[] shares = {0.0, 0.3};
+        for (double share : shares) {
+            double[] stats = simulateRavineSnow(heights, smooth, leeMap, slopeMap, cavSurf, cavLip, airMinX, airMaxX,
+                    floorHeight, 0.0, cameraY, windSpeed, fallSpeed, leeFall, leeBand, brakeLength, share, true, null,
+                    0.0);
+            LOGGER.info("Downdraft sweep ({}, share={}): visibleFloorHits={} [thirds {}, {}, {}], halfStrip={}m, "
+                            + "densityRatio={}",
+                    label, share, String.format(java.util.Locale.ROOT, "%.0f", stats[0]),
+                    String.format(java.util.Locale.ROOT, "%.0f", stats[3]),
+                    String.format(java.util.Locale.ROOT, "%.0f", stats[4]),
+                    String.format(java.util.Locale.ROOT, "%.0f", stats[5]),
+                    String.format(java.util.Locale.ROOT, "%.2f", stats[7]),
+                    String.format(java.util.Locale.ROOT, "%.3f", stats[2]));
+        }
+    }
+
+    private static double flowCeilingAt(SnowLee.HeightLookup heights, float[] cavSurf, float[] cavLip, double x,
+            double z) {
+        int colX = (int) Math.floor(x);
+        int colZ = (int) Math.floor(z);
+        int index = Math.max(0, Math.min(TEST_MAP - 1, colZ + TEST_HALF)) * TEST_MAP
+                + Math.max(0, Math.min(TEST_MAP - 1, colX + TEST_HALF));
+        return SnowLee.cavityFlowCeiling(cavSurf[index], cavLip[index], heights.heightAt(colX, colZ));
+    }
+
+    /**
+     * The mean of the column densities that have air, and the largest and smallest of them as shares of the mean.
+     */
+    private static double[] densitySpread(double[] columnDensities) {
+        double sum = 0.0;
+        int count = 0;
+        double largest = 0.0;
+        double smallest = Double.POSITIVE_INFINITY;
+        for (double density : columnDensities) {
+            if (density < 0.0) {
+                continue;
+            }
+            sum += density;
+            count++;
+            largest = Math.max(largest, density);
+            smallest = Math.min(smallest, density);
+        }
+        double mean = count > 0 ? sum / count : 0.0;
+        if (!(mean > 0.0)) {
+            return new double[]{0.0, 0.0, 0.0};
+        }
+        return new double[]{mean, largest / mean, smallest / mean};
+    }
+
+    private static String formatDensities(double[] columnDensities) {
+        StringBuilder text = new StringBuilder();
+        for (double density : columnDensities) {
+            if (text.length() > 0) {
+                text.append(' ');
+            }
+            text.append(String.format(java.util.Locale.ROOT, "%.2f", density));
+        }
+        return text.toString();
     }
 
     private static void runSmoothAndScan(SnowLee.HeightLookup heights, int mapSize, int[] strides, double dirX,
