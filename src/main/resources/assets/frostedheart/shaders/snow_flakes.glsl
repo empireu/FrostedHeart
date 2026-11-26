@@ -6,6 +6,7 @@
 const int SNOW_STATE_WIDTH = 512;
 const float SNOW_TWO_PI = 6.28318530718;
 // The salts that make the hashes of one flake independent, as the SALT constants of SnowFlakes:
+const uint SNOW_SALT_LEE = 0u;
 const uint SNOW_SALT_POSITION_X = 1u;
 const uint SNOW_SALT_POSITION_Y = 2u;
 const uint SNOW_SALT_POSITION_Z = 3u;
@@ -93,6 +94,11 @@ float snowFlakeBrightnessShare(uint flake) {
 // The snow share below which the flake is hidden under cover, from 0 to 1 - SNOW_SHELTER_SOFTNESS:
 float snowFlakeShelterThreshold(uint flake) {
     return snowFlakeUnit(flake, SNOW_SALT_SHELTER) * (1.0 - SNOW_SHELTER_SOFTNESS);
+}
+
+// The lee share below which the flake is hidden in a lee, from 0 to 1 - SNOW_SHELTER_SOFTNESS:
+float snowFlakeLeeThreshold(uint flake) {
+    return snowFlakeUnit(flake, SNOW_SALT_LEE) * (1.0 - SNOW_SHELTER_SOFTNESS);
 }
 
 // A position wrapped into the box of the given side, from 0 up to the side:

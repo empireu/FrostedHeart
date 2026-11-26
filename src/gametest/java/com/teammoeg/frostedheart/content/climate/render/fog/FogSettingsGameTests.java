@@ -26,26 +26,28 @@ import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
 
 /**
- * Checks the fog settings of the calculated sky: their keys, defaults, ranges, and order in the config.
+ * Checks the snowfall and fog settings of the calculated sky: their keys, defaults, ranges, and order in the config.
  */
 @GameTestHolder("frostedheart_weather")
 @PrefixGameTestTemplate(false)
 public final class FogSettingsGameTests {
     @GameTest(template = "phase0a_empty", timeoutTicks = 20)
     public static void fogSettingsHaveTheirKeysDefaultsRangesAndOrder(GameTestHelper helper) {
-        String enabledKey = SkySetting.FOG_ENABLED.key();
-        helper.assertTrue("fogEnabled".equals(enabledKey), "fogEnabled has the key " + enabledKey + " instead of "
-                + "fogEnabled");
-        boolean enabledIsSwitch = SkySetting.FOG_ENABLED.isSwitch();
-        helper.assertTrue(enabledIsSwitch, "fogEnabled has the switch " + enabledIsSwitch + " instead of true");
-        double enabledDefault = SkySetting.FOG_ENABLED.defaultValue();
-        helper.assertTrue(enabledDefault == 1.0, "fogEnabled has the default " + enabledDefault + " instead of 1.0");
-        SkySetting enabledManualValue = SkySetting.FOG_ENABLED.manualValue();
-        helper.assertTrue(enabledManualValue == null, "fogEnabled has the manual value " + enabledManualValue
-                + " instead of null");
-        SkySetting.Rebuilds enabledRebuilds = SkySetting.FOG_ENABLED.rebuilds();
-        helper.assertTrue(enabledRebuilds == SkySetting.Rebuilds.NOTHING, "fogEnabled rebuilds " + enabledRebuilds
-                + " instead of NOTHING");
+        checkSwitchSetting(helper, SkySetting.SNOW_ENABLED, "snowEnabled", true);
+        checkNumberSetting(helper, SkySetting.SNOW_FLAKE_SHARE, "snowFlakeShare", 0.5, 0.0, 1.0);
+        checkNumberSetting(helper, SkySetting.SNOW_FLAKE_SIZE, "snowFlakeSize", 0.08, 0.01, 0.5);
+        checkNumberSetting(helper, SkySetting.SNOW_FALL_SPEED, "snowFallSpeed", 0.6, 0.05, 5.0);
+        checkNumberSetting(helper, SkySetting.SNOW_FLUTTER, "snowFlutter", 0.15, 0.0, 1.0);
+        checkNumberSetting(helper, SkySetting.SNOW_STREAK_SECONDS, "snowStreakSeconds", 0.02, 0.0, 0.2);
+        checkNumberSetting(helper, SkySetting.SNOW_FLAKE_BRIGHTNESS, "snowFlakeBrightness", 1.0, 0.0, 4.0);
+        checkNumberSetting(helper, SkySetting.SNOW_NEAR_RADIUS, "snowNearRadius", 20.0, 8.0, 32.0);
+        checkSwitchSetting(helper, SkySetting.SNOW_COLLISION, "snowCollision", true);
+        checkNumberSetting(helper, SkySetting.SNOW_SPLAT_SECONDS, "snowSplatSeconds", 1.5, 0.0, 10.0);
+        checkSwitchSetting(helper, SkySetting.SNOW_LEE, "snowLee", true);
+        checkNumberSetting(helper, SkySetting.SNOW_LEE_FILL, "snowLeeFill", 0.15, 0.0, 2.0);
+        checkNumberSetting(helper, SkySetting.SNOW_LEE_BAND, "snowLeeBand", 3.0, 0.0, 16.0);
+
+        checkSwitchSetting(helper, SkySetting.FOG_ENABLED, "fogEnabled", true);
 
         checkNumberSetting(helper, SkySetting.FOG_SNOW_VISIBILITY, "fogSnowVisibility", 300.0, 8.0, 2048.0);
         checkNumberSetting(helper, SkySetting.FOG_BLIZZARD_VISIBILITY, "fogBlizzardVisibility", 80.0, 4.0, 2048.0);
@@ -72,9 +74,13 @@ public final class FogSettingsGameTests {
         helper.assertTrue(blizzardVisibility < snowVisibility, "fogBlizzardVisibility has the default "
                 + blizzardVisibility + ", not below the " + snowVisibility + " of fogSnowVisibility");
 
-        SkySetting[] fogSettings = {SkySetting.FOG_ENABLED, SkySetting.FOG_SNOW_VISIBILITY,
-                SkySetting.FOG_BLIZZARD_VISIBILITY, SkySetting.FOG_HEIGHT_SCALE, SkySetting.FOG_LEAF_POROSITY,
-                SkySetting.FOG_FIELD_BUDGET_MICROS, SkySetting.FOG_SNOW_DECAY_LENGTH,
+        SkySetting[] weatherSettings = {SkySetting.SNOW_ENABLED, SkySetting.SNOW_FLAKE_SHARE,
+                SkySetting.SNOW_FLAKE_SIZE, SkySetting.SNOW_FALL_SPEED, SkySetting.SNOW_FLUTTER,
+                SkySetting.SNOW_STREAK_SECONDS, SkySetting.SNOW_FLAKE_BRIGHTNESS, SkySetting.SNOW_NEAR_RADIUS,
+                SkySetting.SNOW_COLLISION, SkySetting.SNOW_SPLAT_SECONDS, SkySetting.SNOW_LEE,
+                SkySetting.SNOW_LEE_FILL, SkySetting.SNOW_LEE_BAND, SkySetting.FOG_ENABLED,
+                SkySetting.FOG_SNOW_VISIBILITY, SkySetting.FOG_BLIZZARD_VISIBILITY, SkySetting.FOG_HEIGHT_SCALE,
+                SkySetting.FOG_LEAF_POROSITY, SkySetting.FOG_FIELD_BUDGET_MICROS, SkySetting.FOG_SNOW_DECAY_LENGTH,
                 SkySetting.FOG_BLIZZARD_DECAY_LENGTH, SkySetting.FOG_FIELD_RADIUS, SkySetting.FOG_FROXEL_DIVISOR,
                 SkySetting.FOG_FROXEL_SLICES, SkySetting.FOG_FROXEL_RANGE, SkySetting.FOG_SNOW_STRUCTURE_SHARE,
                 SkySetting.FOG_BLIZZARD_STRUCTURE_SHARE, SkySetting.FOG_STRUCTURE_COVERAGE,
@@ -82,16 +88,35 @@ public final class FogSettingsGameTests {
                 SkySetting.FOG_STRUCTURE_RANGE, SkySetting.FOG_WIND_SCALE};
         SkySetting[] settings = SkySetting.values();
         int lastIndex = settings.length - 1;
-        helper.assertTrue(lastIndex + 1 >= fogSettings.length, "SkySetting has " + settings.length + " settings, fewer "
-                + "than the " + fogSettings.length + " fog settings");
-        for (int settingIndex = 0; settingIndex < fogSettings.length; settingIndex++) {
-            int distanceFromEnd = fogSettings.length - 1 - settingIndex;
-            helper.assertTrue(settings[lastIndex - distanceFromEnd] == fogSettings[settingIndex], "SkySetting has "
+        helper.assertTrue(lastIndex + 1 >= weatherSettings.length, "SkySetting has " + settings.length
+                + " settings, fewer than the " + weatherSettings.length + " snow and fog settings");
+        for (int settingIndex = 0; settingIndex < weatherSettings.length; settingIndex++) {
+            int distanceFromEnd = weatherSettings.length - 1 - settingIndex;
+            helper.assertTrue(settings[lastIndex - distanceFromEnd] == weatherSettings[settingIndex], "SkySetting has "
                     + settings[lastIndex - distanceFromEnd] + " " + (distanceFromEnd + 1) + " from the end instead of "
-                    + fogSettings[settingIndex]);
+                    + weatherSettings[settingIndex]);
         }
 
         helper.succeed();
+    }
+
+    /**
+     * Checks the key, switch flag, default, manual value, and rebuilds of a boolean switch setting.
+     */
+    private static void checkSwitchSetting(GameTestHelper helper, SkySetting setting, String key, boolean defaultOn) {
+        String settingKey = setting.key();
+        helper.assertTrue(key.equals(settingKey), key + " has the key " + settingKey + " instead of " + key);
+        boolean settingIsSwitch = setting.isSwitch();
+        helper.assertTrue(settingIsSwitch, key + " has the switch " + settingIsSwitch + " instead of true");
+        double expectedDefault = defaultOn ? 1.0 : 0.0;
+        double settingDefault = setting.defaultValue();
+        helper.assertTrue(settingDefault == expectedDefault, key + " has the default " + settingDefault
+                + " instead of " + expectedDefault);
+        SkySetting manualValue = setting.manualValue();
+        helper.assertTrue(manualValue == null, key + " has the manual value " + manualValue + " instead of null");
+        SkySetting.Rebuilds settingRebuilds = setting.rebuilds();
+        helper.assertTrue(settingRebuilds == SkySetting.Rebuilds.NOTHING, key + " rebuilds " + settingRebuilds
+                + " instead of NOTHING");
     }
 
     /**

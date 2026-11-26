@@ -485,6 +485,88 @@ public final class FarHeightsGameTests {
     }
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
+    public static void noLeavesHeightsIgnoreLeavesAndTrackChangesUnderCanopies(GameTestHelper helper) {
+        BlockPos testPos = helper.absolutePos(BlockPos.ZERO);
+        int chunkX = testPos.getX() >> CHUNK_AXIS_SHIFT;
+        int chunkZ = testPos.getZ() >> CHUNK_AXIS_SHIFT;
+        LevelChunk chunk = new LevelChunk(helper.getLevel(), new ChunkPos(chunkX, chunkZ));
+        int minBuildHeight = helper.getLevel().getMinBuildHeight();
+        int maxBuildHeight = helper.getLevel().getMaxBuildHeight();
+        Long2ObjectOpenHashMap<LevelChunk> chunks = new Long2ObjectOpenHashMap<>();
+        chunks.put(ChunkPos.asLong(chunkX, chunkZ), chunk);
+        CachingChunkLookup lookup = new CachingChunkLookup(chunks, minBuildHeight, maxBuildHeight);
+
+        int baseX = chunk.getPos().getMinBlockX();
+        int baseZ = chunk.getPos().getMinBlockZ();
+        int columnX = baseX + 2;
+        int columnZ = baseZ + 2;
+        int leavesOnlyX = baseX + 4;
+        int leavesOnlyZ = baseZ + 4;
+        int waterColumnX = baseX + 6;
+        int waterColumnZ = baseZ + 6;
+
+        // Column (2, 2): stone at y = 64, oak leaves at y = 72; column (4, 4): leaves only at y = 100 over air;
+        // column (6, 6): water at y = 62 under oak leaves at y = 70:
+        chunk.setBlockState(new BlockPos(columnX, 64, columnZ), Blocks.STONE.defaultBlockState(), false);
+        chunk.setBlockState(new BlockPos(columnX, 72, columnZ), Blocks.OAK_LEAVES.defaultBlockState(), false);
+        chunk.setBlockState(new BlockPos(leavesOnlyX, 100, leavesOnlyZ), Blocks.OAK_LEAVES.defaultBlockState(), false);
+        chunk.setBlockState(new BlockPos(waterColumnX, 62, waterColumnZ), Blocks.WATER.defaultBlockState(), false);
+        chunk.setBlockState(new BlockPos(waterColumnX, 70, waterColumnZ), Blocks.OAK_LEAVES.defaultBlockState(), false);
+
+        FarHeights heights = new FarHeights();
+        helper.assertTrue(heights.follow(columnX, columnZ), "The first follow did not fill the window");
+        readAll(helper, heights, lookup, "the fill with leaves");
+
+        helper.assertTrue(heights.motionHeightAt(columnX, columnZ) == 73,
+                "Under oak leaves, motionHeightAt is " + heights.motionHeightAt(columnX, columnZ) + " instead of 73");
+        helper.assertTrue(heights.noLeavesHeightAt(columnX, columnZ) == 65,
+                "Under oak leaves, noLeavesHeightAt is " + heights.noLeavesHeightAt(columnX, columnZ)
+                        + " instead of 65");
+        helper.assertTrue(heights.motionHeightAt(leavesOnlyX, leavesOnlyZ) == 101,
+                "Over leaves alone, motionHeightAt is " + heights.motionHeightAt(leavesOnlyX, leavesOnlyZ)
+                        + " instead of 101");
+        helper.assertTrue(heights.noLeavesHeightAt(leavesOnlyX, leavesOnlyZ) == minBuildHeight,
+                "Over leaves alone, noLeavesHeightAt is " + heights.noLeavesHeightAt(leavesOnlyX, leavesOnlyZ)
+                        + " instead of " + minBuildHeight);
+        helper.assertTrue(heights.motionHeightAt(waterColumnX, waterColumnZ) == 71,
+                "Over water under leaves, motionHeightAt is " + heights.motionHeightAt(waterColumnX, waterColumnZ)
+                        + " instead of 71");
+        helper.assertTrue(heights.noLeavesHeightAt(waterColumnX, waterColumnZ) == 63,
+                "Over water under leaves, noLeavesHeightAt is " + heights.noLeavesHeightAt(waterColumnX, waterColumnZ)
+                        + " instead of 63");
+
+        // Placing stone under the leaves raises noLeavesHeightAt without changing motionHeightAt:
+        heights.clearDirtyNoLeavesTiles();
+        long changesBeforeSolid = heights.noLeavesChangeCount();
+        chunk.setBlockState(new BlockPos(columnX, 68, columnZ), Blocks.STONE.defaultBlockState(), false);
+        heights.onBlockChanged(lookup, columnX, columnZ);
+        helper.assertTrue(heights.motionHeightAt(columnX, columnZ) == 73, "Placing stone under leaves changed "
+                + "motionHeightAt to " + heights.motionHeightAt(columnX, columnZ) + " instead of 73");
+        helper.assertTrue(heights.noLeavesHeightAt(columnX, columnZ) == 69, "Placing stone under leaves gave "
+                + "noLeavesHeightAt " + heights.noLeavesHeightAt(columnX, columnZ) + " instead of 69");
+        helper.assertTrue(heights.noLeavesChangeCount() == changesBeforeSolid + 1, "Placing stone under leaves left "
+                + "noLeavesChangeCount at " + heights.noLeavesChangeCount() + " instead of "
+                + (changesBeforeSolid + 1));
+        helper.assertTrue(heights.dirtyNoLeavesTileCount() == 1, "Placing stone under leaves marked "
+                + heights.dirtyNoLeavesTileCount() + " no-leaves tiles dirty instead of 1");
+
+        // Removing the leaves above the stone drops motionHeightAt but leaves noLeavesHeightAt unchanged:
+        heights.clearDirtyNoLeavesTiles();
+        long changesBeforeLeafBreak = heights.noLeavesChangeCount();
+        chunk.setBlockState(new BlockPos(columnX, 72, columnZ), Blocks.AIR.defaultBlockState(), false);
+        heights.onBlockChanged(lookup, columnX, columnZ);
+        helper.assertTrue(heights.motionHeightAt(columnX, columnZ) == 69, "Breaking leaves left motionHeightAt "
+                + heights.motionHeightAt(columnX, columnZ) + " instead of 69");
+        helper.assertTrue(heights.noLeavesHeightAt(columnX, columnZ) == 69, "Breaking leaves changed "
+                + "noLeavesHeightAt to " + heights.noLeavesHeightAt(columnX, columnZ) + " instead of 69");
+        helper.assertTrue(heights.noLeavesChangeCount() == changesBeforeLeafBreak, "Breaking leaves incremented "
+                + "noLeavesChangeCount from " + changesBeforeLeafBreak + " to " + heights.noLeavesChangeCount());
+        helper.assertTrue(heights.dirtyNoLeavesTileCount() == 0, "Breaking leaves marked "
+                + heights.dirtyNoLeavesTileCount() + " no-leaves tiles dirty instead of 0");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void warmOperationsAllocateNothing(GameTestHelper helper) {
         FarHeights heights = new FarHeights();
         BlockPos eye = helper.absolutePos(new BlockPos(1, 2, 1));
@@ -559,7 +641,10 @@ public final class FarHeightsGameTests {
         heights.onChunkLoaded(lookup, columnX >> CHUNK_AXIS_SHIFT, columnZ >> CHUNK_AXIS_SHIFT);
         sum += heights.highestSurface(lookup.minBuildHeight(), lookup.maxBuildHeight());
         for (int query = 0; query < ALLOCATION_HEIGHT_QUERIES; query++) {
-            sum += heights.motionHeightAt(columnX + (query & 63) - 32, columnZ + ((query >> 6) & 63) - 32);
+            int queryX = columnX + (query & 63) - 32;
+            int queryZ = columnZ + ((query >> 6) & 63) - 32;
+            sum += heights.motionHeightAt(queryX, queryZ);
+            sum += heights.noLeavesHeightAt(queryX, queryZ);
         }
         return sum;
     }

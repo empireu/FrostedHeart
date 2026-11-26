@@ -79,6 +79,7 @@ public final class SnowFieldTextures {
     private static int shownMaxY;
     private static int shownMaxZ;
     private static int heightTexture;
+    private static int noLeavesHeightTexture;
     private static int currentFieldUploads;
     private static int currentBricksUploaded;
     private static int currentWaitedFrames;
@@ -145,7 +146,7 @@ public final class SnowFieldTextures {
     public static int uploadHeights(FarHeights heights) {
         long start = System.nanoTime();
         if (heightTexture == 0) {
-            createHeightTexture();
+            heightTexture = createHeightTexture();
         } else if (heights.dirtyTileCount() == 0) {
             return heightTexture;
         }
@@ -156,6 +157,7 @@ public final class SnowFieldTextures {
             GlStateManager._pixelStore(GL11.GL_UNPACK_SKIP_ROWS, 0);
             GlStateManager._pixelStore(GL11.GL_UNPACK_ALIGNMENT, 2);
             GL11.glBindTexture(GL11.GL_TEXTURE_2D, heightTexture);
+            short[] heightsArray = heights.heights();
             for (int tileRow = 0; tileRow < FarHeights.CHUNKS; tileRow++) {
                 int firstTileX = -1;
                 for (int tileX = 0; tileX <= FarHeights.CHUNKS; tileX++) {
@@ -166,7 +168,7 @@ public final class SnowFieldTextures {
                             firstTileX = tileX;
                         }
                     } else if (firstTileX >= 0) {
-                        uploadTileRun(heights, tileRow, firstTileX, tileX - 1);
+                        uploadTileRun(heightsArray, tileRow, firstTileX, tileX - 1);
                         firstTileX = -1;
                     }
                 }
@@ -178,6 +180,51 @@ public final class SnowFieldTextures {
         heights.clearDirtyTiles();
         currentHeightNanos += System.nanoTime() - start;
         return heightTexture;
+    }
+
+    /**
+     * The no-leaves height texture, made on first use, with the tiles whose no-leaves heights changed since the last
+     * call uploaded. The texture bound before stays bound. Allocates nothing after the frame that makes the texture.
+     * @param heights the heights to upload
+     * @return the texture id
+     */
+    public static int uploadNoLeavesHeights(FarHeights heights) {
+        long start = System.nanoTime();
+        if (noLeavesHeightTexture == 0) {
+            noLeavesHeightTexture = createHeightTexture();
+        } else if (heights.dirtyNoLeavesTileCount() == 0) {
+            return noLeavesHeightTexture;
+        }
+        int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        try {
+            GlStateManager._pixelStore(GL11.GL_UNPACK_ROW_LENGTH, FarHeights.SIZE);
+            GlStateManager._pixelStore(GL11.GL_UNPACK_SKIP_PIXELS, 0);
+            GlStateManager._pixelStore(GL11.GL_UNPACK_SKIP_ROWS, 0);
+            GlStateManager._pixelStore(GL11.GL_UNPACK_ALIGNMENT, 2);
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, noLeavesHeightTexture);
+            short[] heightsArray = heights.noLeavesHeights();
+            for (int tileRow = 0; tileRow < FarHeights.CHUNKS; tileRow++) {
+                int firstTileX = -1;
+                for (int tileX = 0; tileX <= FarHeights.CHUNKS; tileX++) {
+                    boolean dirty = tileX < FarHeights.CHUNKS
+                            && heights.isNoLeavesTileDirty(FarHeights.tileOf(tileX, tileRow));
+                    if (dirty) {
+                        if (firstTileX < 0) {
+                            firstTileX = tileX;
+                        }
+                    } else if (firstTileX >= 0) {
+                        uploadTileRun(heightsArray, tileRow, firstTileX, tileX - 1);
+                        firstTileX = -1;
+                    }
+                }
+            }
+        } finally {
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, previousTexture);
+            restoreUnpackState();
+        }
+        heights.clearDirtyNoLeavesTiles();
+        currentHeightNanos += System.nanoTime() - start;
+        return noLeavesHeightTexture;
     }
 
     /**
@@ -194,6 +241,14 @@ public final class SnowFieldTextures {
      */
     public static int heightTexture() {
         return heightTexture;
+    }
+
+    /**
+     * The no-leaves height texture, made on first use.
+     * @return the texture id, or 0 while no no-leaves heights were uploaded
+     */
+    public static int noLeavesHeightTexture() {
+        return noLeavesHeightTexture;
     }
 
     /**
@@ -427,7 +482,7 @@ public final class SnowFieldTextures {
      * Makes the height texture, which asks for a full upload with its first frame since FarHeights starts with every
      * tile dirty. A texture that fails to be made is deleted again, so that the next frame does not retry with it.
      */
-    private static void createHeightTexture() {
+    private static int createHeightTexture() {
         int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
         int target = GL11.glGenTextures();
         try {
@@ -450,7 +505,7 @@ public final class SnowFieldTextures {
             GL11.glBindTexture(GL11.GL_TEXTURE_2D, previousTexture);
             restoreUnpackState();
         }
-        heightTexture = target;
+        return target;
     }
 
     /**
@@ -458,12 +513,11 @@ public final class SnowFieldTextures {
      * texel (x, z) of the row goes to the index x + (z & 15) * SIZE of the buffer, which is the layout of one tile
      * row of the texture with row length SIZE.
      */
-    private static void uploadTileRun(FarHeights heights, int tileRow, int firstTileX, int lastTileX) {
+    private static void uploadTileRun(short[] heightsArray, int tileRow, int firstTileX, int lastTileX) {
         int runLength = lastTileX - firstTileX + 1;
         int firstX = firstTileX * TILE_WIDTH;
         int width = TILE_WIDTH * runLength;
         int firstZ = tileRow * TILE_WIDTH;
-        short[] heightsArray = heights.heights();
         for (int localZ = 0; localZ < TILE_WIDTH; localZ++) {
             int source = FarHeights.texelOf(firstX, firstZ + localZ);
             heightStaging.put(firstX + localZ * FarHeights.SIZE, heightsArray, source, width);

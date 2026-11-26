@@ -19,7 +19,11 @@
 
 package com.teammoeg.frostedheart.content.climate.render.fog;
 
+import net.minecraft.tags.BlockTags;
+import net.minecraft.world.level.block.LeavesBlock;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.levelgen.Heightmap;
 
 /**
@@ -78,11 +82,16 @@ public final class FarHeights {
      */
     private final short[] heights = new short[SIZE * SIZE];
     /**
+     * The motion height without leaves of each column, indexed by its texel, for the snowfall lee map.
+     */
+    private final short[] noLeavesHeights = new short[SIZE * SIZE];
+    /**
      * The surface height of each tile, from the largest of its columns, or NO_SURFACE.
      */
     private final int[] surfaceHeights = new int[TILES];
     private final long[] pendingTiles = new long[WORD_COUNT];
     private final long[] dirtyTiles = new long[WORD_COUNT];
+    private final long[] dirtyNoLeavesTiles = new long[WORD_COUNT];
     private int originChunkX;
     private int originChunkZ;
     private boolean placed;
@@ -97,6 +106,7 @@ public final class FarHeights {
     private int scannedSurface = NO_SURFACE;
     private long tilesReadCount;
     private long fillCountValue;
+    private long noLeavesChangeCount;
 
     /**
      * Creates an unplaced window that holds no height yet and marks every tile dirty, so that the first upload covers
@@ -105,12 +115,14 @@ public final class FarHeights {
     public FarHeights() {
         for (int texel = 0; texel < heights.length; texel++) {
             heights[texel] = UNKNOWN;
+            noLeavesHeights[texel] = UNKNOWN;
         }
         for (int tile = 0; tile < TILES; tile++) {
             surfaceHeights[tile] = NO_SURFACE;
         }
         for (int word = 0; word < WORD_COUNT; word++) {
             dirtyTiles[word] = -1L;
+            dirtyNoLeavesTiles[word] = -1L;
         }
         surfaceScanPending = true;
     }
@@ -241,11 +253,18 @@ public final class FarHeights {
         }
         int localX = x & CHUNK_LOCAL_MASK;
         int localZ = z & CHUNK_LOCAL_MASK;
-        int motionHeight = chunk.getHeight(Heightmap.Types.MOTION_BLOCKING, localX, localZ) + 1;
+        int motionBlockY = chunk.getHeight(Heightmap.Types.MOTION_BLOCKING, localX, localZ);
+        int motionHeight = motionBlockY + 1;
         int texel = texelOf(x, z);
         if (heights[texel] != motionHeight) {
             heights[texel] = (short) motionHeight;
             markTileDirty(tile);
+        }
+        short noLeavesHeight = computeNoLeavesHeight(chunk, localX, localZ, motionBlockY);
+        if (noLeavesHeights[texel] != noLeavesHeight) {
+            noLeavesHeights[texel] = noLeavesHeight;
+            markNoLeavesTileDirty(tile);
+            noLeavesChangeCount++;
         }
         int surfaceHeight = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, localX, localZ) + 1;
         if (surfaceHeight > surfaceHeights[tile]) {
@@ -265,6 +284,20 @@ public final class FarHeights {
             return UNKNOWN;
         }
         return heights[texelOf(x, z)];
+    }
+
+    /**
+     * The motion height without leaves of a column, the first y above the highest motion-blocking or fluid block that
+     * is not leaves, for the snowfall lee map.
+     * @param x the world x
+     * @param z the world z
+     * @return the height in blocks, or UNKNOWN outside the window
+     */
+    public short noLeavesHeightAt(int x, int z) {
+        if (!contains(x, z)) {
+            return UNKNOWN;
+        }
+        return noLeavesHeights[texelOf(x, z)];
     }
 
     /**
@@ -348,6 +381,15 @@ public final class FarHeights {
     }
 
     /**
+     * The live array of no-leaves heights in the texel layout of the texture, for the uploader. It is reused by this
+     * window and changes with every read.
+     * @return the array of SIZE * SIZE heights, which the caller must not write
+     */
+    public short[] noLeavesHeights() {
+        return noLeavesHeights;
+    }
+
+    /**
      * Whether the motion heights of a tile changed since the last clearDirtyTiles, so that the uploader must upload
      * it.
      * @param tile the tile index, from 0 to TILES - 1
@@ -376,6 +418,45 @@ public final class FarHeights {
         for (int word = 0; word < WORD_COUNT; word++) {
             dirtyTiles[word] = 0L;
         }
+    }
+
+    /**
+     * Whether the no-leaves heights of a tile changed since the last clearDirtyNoLeavesTiles.
+     * @param tile the tile index, from 0 to TILES - 1
+     * @return whether the tile is dirty
+     */
+    public boolean isNoLeavesTileDirty(int tile) {
+        return (dirtyNoLeavesTiles[tile >> 6] & (1L << (tile & 63))) != 0L;
+    }
+
+    /**
+     * The number of dirty no-leaves tiles, which allocates nothing.
+     * @return the number of tiles whose no-leaves heights changed since the last clearDirtyNoLeavesTiles
+     */
+    public int dirtyNoLeavesTileCount() {
+        int count = 0;
+        for (int word = 0; word < WORD_COUNT; word++) {
+            count += Long.bitCount(dirtyNoLeavesTiles[word]);
+        }
+        return count;
+    }
+
+    /**
+     * Marks every no-leaves tile clean, after the uploader has uploaded them.
+     */
+    public void clearDirtyNoLeavesTiles() {
+        for (int word = 0; word < WORD_COUNT; word++) {
+            dirtyNoLeavesTiles[word] = 0L;
+        }
+    }
+
+    /**
+     * A counter that increments whenever any no-leaves height in the window changes, so the snowfall lee map can tell
+     * whether terrain heights changed since its last build.
+     * @return the change counter, which only grows
+     */
+    public long noLeavesChangeCount() {
+        return noLeavesChangeCount;
     }
 
     /**
@@ -507,14 +588,21 @@ public final class FarHeights {
         int firstZ = (tile >> TILE_ROW_SHIFT) * CHUNK_WIDTH;
         int highestSurface = NO_SURFACE;
         boolean changed = false;
+        boolean noLeavesChanged = false;
         for (int localZ = 0; localZ < CHUNK_WIDTH; localZ++) {
             int rowTexel = texelOf(firstX, firstZ + localZ);
             for (int localX = 0; localX < CHUNK_WIDTH; localX++) {
-                short motionHeight = (short) (chunk.getHeight(Heightmap.Types.MOTION_BLOCKING, localX, localZ) + 1);
+                int motionBlockY = chunk.getHeight(Heightmap.Types.MOTION_BLOCKING, localX, localZ);
+                short motionHeight = (short) (motionBlockY + 1);
+                short noLeavesHeight = computeNoLeavesHeight(chunk, localX, localZ, motionBlockY);
                 int surfaceHeight = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, localX, localZ) + 1;
                 if (heights[rowTexel + localX] != motionHeight) {
                     heights[rowTexel + localX] = motionHeight;
                     changed = true;
+                }
+                if (noLeavesHeights[rowTexel + localX] != noLeavesHeight) {
+                    noLeavesHeights[rowTexel + localX] = noLeavesHeight;
+                    noLeavesChanged = true;
                 }
                 if (surfaceHeight > highestSurface) {
                     highestSurface = surfaceHeight;
@@ -523,6 +611,10 @@ public final class FarHeights {
         }
         if (changed) {
             markTileDirty(tile);
+        }
+        if (noLeavesChanged) {
+            markNoLeavesTileDirty(tile);
+            noLeavesChangeCount++;
         }
         setSurfaceHeight(tile, highestSurface);
     }
@@ -533,14 +625,59 @@ public final class FarHeights {
     private void resetTile(int tile) {
         int firstX = (tile & TILE_MASK) * CHUNK_WIDTH;
         int firstZ = (tile >> TILE_ROW_SHIFT) * CHUNK_WIDTH;
+        boolean noLeavesChanged = false;
         for (int localZ = 0; localZ < CHUNK_WIDTH; localZ++) {
             int rowTexel = texelOf(firstX, firstZ + localZ);
             for (int localX = 0; localX < CHUNK_WIDTH; localX++) {
                 heights[rowTexel + localX] = UNKNOWN;
+                if (noLeavesHeights[rowTexel + localX] != UNKNOWN) {
+                    noLeavesHeights[rowTexel + localX] = UNKNOWN;
+                    noLeavesChanged = true;
+                }
             }
         }
         setSurfaceHeight(tile, NO_SURFACE);
         markTileDirty(tile);
+        markNoLeavesTileDirty(tile);
+        if (noLeavesChanged) {
+            noLeavesChangeCount++;
+        }
+    }
+
+    /**
+     * Scans down from a column's MOTION_BLOCKING block to the first motion-blocking or fluid block that is not leaves,
+     * returning the y just above it, or the chunk's minimum build height when none exists. Allocates nothing.
+     */
+    private static short computeNoLeavesHeight(LevelChunk chunk, int localX, int localZ, int motionBlockY) {
+        int minBuildHeight = chunk.getMinBuildHeight();
+        int maxBlockY = chunk.getMaxBuildHeight() - 1;
+        int y = Math.min(motionBlockY, maxBlockY);
+        if (y < minBuildHeight) {
+            return (short) minBuildHeight;
+        }
+        while (y >= minBuildHeight) {
+            LevelChunkSection section = chunk.getSection(chunk.getSectionIndex(y));
+            int sectionBottomY = (y >> CHUNK_SHIFT) << CHUNK_SHIFT;
+            if (section.hasOnlyAir()) {
+                y = sectionBottomY - 1;
+                continue;
+            }
+            int lowestY = Math.max(sectionBottomY, minBuildHeight);
+            for (; y >= lowestY; y--) {
+                BlockState state = section.getBlockState(localX, y & CHUNK_LOCAL_MASK, localZ);
+                if (isSolidNonLeaf(state)) {
+                    return (short) (y + 1);
+                }
+            }
+        }
+        return (short) minBuildHeight;
+    }
+
+    private static boolean isSolidNonLeaf(BlockState state) {
+        if (!state.blocksMotion() && state.getFluidState().isEmpty()) {
+            return false;
+        }
+        return !(state.getBlock() instanceof LeavesBlock) && !state.is(BlockTags.LEAVES);
     }
 
     /**
@@ -565,5 +702,12 @@ public final class FarHeights {
      */
     private void markTileDirty(int tile) {
         dirtyTiles[tile >> 6] |= 1L << (tile & 63);
+    }
+
+    /**
+     * Marks a no-leaves tile dirty.
+     */
+    private void markNoLeavesTileDirty(int tile) {
+        dirtyNoLeavesTiles[tile >> 6] |= 1L << (tile & 63);
     }
 }

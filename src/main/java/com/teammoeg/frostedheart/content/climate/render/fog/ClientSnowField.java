@@ -363,6 +363,19 @@ public final class ClientSnowField {
     }
 
     /**
+     * Uploads the no-leaves far heights for the snowfall lee map and returns the texture id, or 0 while the field does
+     * not follow the level of the game.
+     */
+    public static int prepareNoLeavesHeights() {
+        ClientLevel level = trackedLevel;
+        FarHeights currentFarHeights = farHeights;
+        if (level == null || currentFarHeights == null || level != Minecraft.getInstance().level) {
+            return 0;
+        }
+        return SnowFieldTextures.uploadNoLeavesHeights(currentFarHeights);
+    }
+
+    /**
      * The window of far heights of the fog, for the uniforms of the shader.
      * @return the window, or null while the field follows no level
      */
@@ -457,6 +470,7 @@ public final class ClientSnowField {
         } else if (fillRequested) {
             fillRequested = false;
             shapeVolume.forget();
+            farHeights.forget();
             reader.fill(eyeX, eyeY, eyeZ);
         } else {
             reader.follow(eyeX, eyeY, eyeZ);

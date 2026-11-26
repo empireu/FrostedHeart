@@ -69,6 +69,10 @@ public final class SnowShapes {
      * A row whose 16 voxels are all filled.
      */
     public static final int FULL_ROW = 0xFFFF;
+    /**
+     * The shape tiles laid across each row of the shape rows texture, shared with snow_flake_update.fsh.
+     */
+    public static final int SHAPES_PER_ROW = 64;
 
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final int INITIAL_SHAPE_CAPACITY = 64;

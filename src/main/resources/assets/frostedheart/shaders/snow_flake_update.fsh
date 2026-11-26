@@ -1,8 +1,9 @@
-// FHShaders prepends the version line and snow_flakes.glsl.
+// FHShaders prepends the version line, snow_flakes.glsl and snow_lee.glsl.
 // Moves every snowflake by one frame, one fragment for each texel of the state textures. A flake's state holds its
 // position in the periodic box in xyz and the angle of its flutter circle in w, raised by SNOW_STOPPED_PHASE while the
-// flake is stopped. Its splat holds the point where it last hit a block, in the box like a position, and in w its face
-// times SNOW_SPLAT_FACE_STRIDE plus the seconds since the hit, or -1 when it has no splat.
+// flake is stopped. Its splat holds the point where it last hit a block, relative to the fixed splat origin block set
+// on each fill, and in w its face times SNOW_SPLAT_FACE_STRIDE plus the seconds since the hit, or -1 when it has no
+// splat.
 // A flake stands for its copies at every multiple of the box's side, so the box follows the eye without respawning
 // flakes, and the position stays a small float. A flake that hits a block stops. It moves on unseen and without
 // collision until it leaves the box seen from the camera, and comes in at the opposite face as a new flake. So the flakes
@@ -19,10 +20,12 @@ uniform float fallSpeed;
 // The side of the periodic box and the mean radius of the flutter circles in blocks:
 uniform float boxSide;
 uniform float flutterRadius;
-// The camera's position modulo the box's side at the last update and now, and its motion since the last update:
+// The camera's position modulo the box's side at the last update and now, its motion since the last update, and its
+// position relative to the fixed splat origin block:
 uniform vec3 previousCameraInBox;
 uniform vec3 cameraInBox;
 uniform vec3 cameraStep;
+uniform vec3 cameraFromSplatOrigin;
 // Whether flakes collide, the ids of SnowShapeVolume, and the rows of SnowShapes in tiles as SnowShapeTextures:
 uniform int collides;
 uniform usampler3D shapeVolume;
@@ -144,13 +147,17 @@ void main() {
         float age = splat.w - face * SNOW_SPLAT_FACE_STRIDE + stepSeconds;
         splat.w = age < splatSeconds ? face * SNOW_SPLAT_FACE_STRIDE + age : -1.0;
     }
-    vec3 velocity = vec3(windVelocity.x, -fallSpeed * snowFlakeFallShare(flake), windVelocity.y);
+    // The flake's path from the camera as it is now, which the draw continues from:
+    vec3 pathStart = snowNearestOffset(state.xyz - previousCameraInBox, boxSide) - cameraStep;
+    float ownFall = fallSpeed * snowFlakeFallShare(flake);
+    float effectiveFall = stopped ? ownFall
+            : snowLeeFallSpeed(pathStart + snowFlutterOffset(phase, circleRadius), ownFall, cameraBlock,
+                    cameraFraction);
+    vec3 velocity = vec3(windVelocity.x, -effectiveFall, windVelocity.y);
     vec3 step = velocity * stepSeconds;
     float turn = snowFlakeFlutterRate(flake) * stepSeconds;
     vec3 position = snowWrap(state.xyz + step, boxSide);
     float nextPhase = mod(phase + turn, SNOW_TWO_PI);
-    // The flake's path from the camera as it is now, which the draw continues from:
-    vec3 pathStart = snowNearestOffset(state.xyz - previousCameraInBox, boxSide) - cameraStep;
     vec3 pathEnd = pathStart + step;
     if (any(greaterThanEqual(abs(pathEnd), vec3(0.5 * boxSide)))) {
         // The flake comes in at the opposite face as a new one, stopped only when it comes in inside a block:
@@ -171,7 +178,7 @@ void main() {
                 if (!startedInside && splatSeconds > 0.0 && (id & SNOW_FLUID_FLAG) == 0u) {
                     vec3 hitPoint;
                     int face = snowHitFace(previous, point, flake, hitPoint);
-                    splat = vec4(snowWrap(cameraInBox + hitPoint, boxSide), float(face) * SNOW_SPLAT_FACE_STRIDE);
+                    splat = vec4(cameraFromSplatOrigin + hitPoint, float(face) * SNOW_SPLAT_FACE_STRIDE);
                 }
                 break;
             }

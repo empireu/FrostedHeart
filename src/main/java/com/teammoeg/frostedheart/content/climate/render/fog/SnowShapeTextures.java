@@ -43,7 +43,7 @@ import java.nio.ShortBuffer;
  */
 @OnlyIn(Dist.CLIENT)
 final class SnowShapeTextures {
-    static final int SHAPES_PER_ROW = 64;
+    static final int SHAPES_PER_ROW = SnowShapes.SHAPES_PER_ROW;
     private static final int ROWS_TEXTURE_WIDTH = SHAPES_PER_ROW * SnowShapes.SIDE;
     private static final int BRICK = SnowShapeVolume.BRICK_SIZE;
     private static final int RUN_CAPACITY = SnowShapeVolume.SIZE * BRICK * BRICK;

@@ -84,6 +84,8 @@ public class FHShaders extends Shaders {
     private static Shader SNOW_FLAKES_VERTEX;
     private static Shader SNOW_FLAKES_FRAGMENT;
     private static boolean snowFlakesUnloadOnReload;
+    private static Shader SNOW_LEE_BUILD;
+    private static boolean snowLeeBuildUnloadOnReload;
     public static Shader getCalculatedSky() {
         if (CALCULATED_SKY == null) {
             runAndAddReloadListener(() -> CALCULATED_SKY = load(Shader.ShaderType.FRAGMENT, FHMain.rl("calculated_sky")));
@@ -334,8 +336,8 @@ public class FHShaders extends Shaders {
     }
 
     /**
-     * The fragment stage of the pass that moves the snowflakes, snow_flakes.glsl followed by snow_flake_update.fsh in
-     * one source, which is compiled on first use.
+     * The fragment stage of the pass that moves the snowflakes, snow_flakes.glsl followed by snow_lee.glsl and
+     * snow_flake_update.fsh in one source, which is compiled on first use.
      */
     public static Shader getSnowFlakeUpdate() {
         if (!snowFlakeUpdateUnloadOnReload) {
@@ -344,6 +346,7 @@ public class FHShaders extends Shaders {
         }
         if (SNOW_FLAKE_UPDATE == null) {
             String source = readShaderSource(FHMain.rl("shaders/snow_flakes.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/snow_lee.glsl")) + "\n"
                     + readShaderSource(FHMain.rl("shaders/snow_flake_update.fsh"));
             SNOW_FLAKE_UPDATE = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
         }
@@ -362,8 +365,33 @@ public class FHShaders extends Shaders {
     }
 
     /**
-     * The vertex stage of the snowflake draw. Both stages are weather_fog.glsl, weather_fog_excess.glsl and
-     * snow_flakes.glsl followed by snow_flakes_draw.glsl, compiled with a define for each.
+     * The fragment stage of the pass that builds the snowfall lee map, snow_lee_build.fsh, compiled on first use.
+     */
+    public static Shader getSnowLeeBuild() {
+        if (!snowLeeBuildUnloadOnReload) {
+            addReloadListener(FHShaders::unloadSnowLeeBuild);
+            snowLeeBuildUnloadOnReload = true;
+        }
+        if (SNOW_LEE_BUILD == null) {
+            String source = readShaderSource(FHMain.rl("shaders/snow_lee_build.fsh"));
+            SNOW_LEE_BUILD = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
+        }
+        return SNOW_LEE_BUILD;
+    }
+
+    /**
+     * Deletes the lee map build stage after a resource reload, so the next use compiles it from the new resources.
+     */
+    private static void unloadSnowLeeBuild() {
+        if (SNOW_LEE_BUILD != null) {
+            SNOW_LEE_BUILD.deleteShader();
+            SNOW_LEE_BUILD = null;
+        }
+    }
+
+    /**
+     * The vertex stage of the snowflake draw. Both stages are weather_fog.glsl, weather_fog_excess.glsl,
+     * snow_flakes.glsl and snow_lee.glsl followed by snow_flakes_draw.glsl, compiled with a define for each.
      */
     public static Shader getSnowFlakesVertex() {
         loadSnowFlakes();
@@ -384,6 +412,7 @@ public class FHShaders extends Shaders {
             String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
                     + readShaderSource(FHMain.rl("shaders/weather_fog_excess.glsl")) + "\n"
                     + readShaderSource(FHMain.rl("shaders/snow_flakes.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/snow_lee.glsl")) + "\n"
                     + readShaderSource(FHMain.rl("shaders/snow_flakes_draw.glsl"));
             Shader vertex = Shader.loadShader(Shader.ShaderType.VERTEX, "#version 150\n#define VERTEX_SHADER\n" + source);
             Shader fragment;

@@ -148,6 +148,14 @@ public enum SkySetting {
             + "it leaves the space around the eye. Off lets flakes fall through blocks.", true, null),
     SNOW_SPLAT_SECONDS("snowSplatSeconds", "Seconds that a snowflake stopped by a block shows as a splat on it, "
             + "fading over the second half. 0 leaves no splats.", Rebuilds.NOTHING, 1.5, 0.0, 10.0),
+    SNOW_LEE("snowLee", "Holds falling snow out of the lee behind walls, buildings and ridges along the wind, and "
+            + "pulls flakes down into it. Ignores leaves and obstacles narrower than 3 blocks across the wind.",
+            true, null),
+    SNOW_LEE_FILL("snowLeeFill", "Extra downward slope added to the lee surface behind obstacles, in blocks dropped "
+            + "per block downwind, setting how quickly snow curls back down into a lee. 0 keeps straight flake paths.",
+            Rebuilds.NOTHING, 0.15, 0.0, 2.0),
+    SNOW_LEE_BAND("snowLeeBand", "Height in blocks above the lee surface over which falling snow fades back in. 0 "
+            + "gives a sharp edge.", Rebuilds.NOTHING, 3.0, 0.0, 16.0),
     FOG_ENABLED("fogEnabled", "Draws the fog of snow and blizzards with the calculated sky, thicker in valleys "
             + "and thinner on hills, and as far at every render distance. Off keeps the older fog, which is a share "
             + "of the render distance.", true, null),

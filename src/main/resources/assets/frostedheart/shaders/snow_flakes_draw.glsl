@@ -1,5 +1,5 @@
-// FHShaders prepends the version line, the stage's define, weather_fog.glsl, weather_fog_excess.glsl and
-// snow_flakes.glsl.
+// FHShaders prepends the version line, the stage's define, weather_fog.glsl, weather_fog_excess.glsl,
+// snow_flakes.glsl and snow_lee.glsl.
 // Draws the snowflakes near the eye as one instanced draw of quads without vertex data. Each instance is the copy of one
 // flake of the periodic box that is nearest the camera, which fades out toward the box's faces. A flake is a soft round
 // sprite stretched along the path it travels while the shutter is open, and its opacity is spread over the streak so a
@@ -19,8 +19,12 @@ uniform mat4 viewProjection;
 uniform vec2 screenSize;
 // The pixels that a block spans at a clip w of 1:
 uniform float pixelsPerBlock;
-// The camera's position modulo the box's side, and the side and the width of the fade at its faces, in blocks:
+// The camera's position modulo the box's side, its position relative to the fixed splat origin block, its block and
+// place inside it, and the side and the width of the fade at the box's faces, in blocks:
 uniform vec3 cameraInBox;
+uniform vec3 cameraFromSplatOrigin;
+uniform ivec3 cameraBlock;
+uniform vec3 cameraFraction;
 uniform float boxSide;
 uniform float boxFadeWidth;
 // The flakes drawn, which may end in a fraction that fades the last ones:
@@ -186,14 +190,20 @@ void drawSplat(int index) {
     float age = splat.w - faceNumber * SNOW_SPLAT_FACE_STRIDE;
     int face = int(faceNumber);
     vec3 normal = snowFaceNormal(face);
-    vec3 center = snowNearestOffset(splat.xyz - cameraInBox, boxSide) + normal * SNOW_SPLAT_LIFT;
+    vec3 offset = splat.xyz - cameraFromSplatOrigin;
+    if (any(greaterThan(abs(offset), vec3(0.5 * boxSide)))) {
+        hideFlake();
+        return;
+    }
+    vec3 center = offset + normal * SNOW_SPLAT_LIFT;
     vec3 fromFogEye = center - fogEye;
     float distance = length(fromFogEye);
     float countWeight = clamp((drawnCount - float(index)) / SNOW_COUNT_FADE, 0.0, 1.0);
     float lifeWeight = 1.0 - smoothstep(0.5 * splatSeconds, splatSeconds, age);
-    // The shelter of the air in front of the face, where the flake was before it hit:
+    // The shelter of the air in front of the face, where the flake was before it hit, and the lee weight at the hit:
     float weight = countWeight * snowBoxWeight(center) * lifeWeight
             * snowShelterWeight(flake, fromFogEye + normal * SNOW_SPLAT_SHARE_REACH)
+            * snowLeeWeight(flake, center, cameraBlock, cameraFraction)
             * smoothstep(SNOW_NEAR_FADE_START, SNOW_NEAR_FADE_END, distance);
     vec4 clipCenter = viewProjection * vec4(center, 1.0);
     // A face that turns away from the camera hides its splat:
@@ -243,8 +253,6 @@ void main() {
     float flutterRate = snowFlakeFlutterRate(flake);
     float circleRadius = flutterRadius * snowFlakeFlutterRadiusShare(flake);
     vec3 center = offset + snowFlutterOffset(phase, circleRadius);
-    vec3 velocity = vec3(windVelocity.x, -fallSpeed * snowFlakeFallShare(flake), windVelocity.y)
-            + vec3(-sin(phase), 0.0, cos(phase)) * (circleRadius * flutterRate);
     vec4 clipCenter = viewProjection * vec4(center, 1.0);
     if (!(clipCenter.w > SNOW_NEAREST_W)) {
         hideFlake();
@@ -254,11 +262,25 @@ void main() {
     float distance = length(fromFogEye);
     float shelterWeight = snowShelterWeight(flake, fromFogEye);
     float nearWeight = smoothstep(SNOW_NEAR_FADE_START, SNOW_NEAR_FADE_END, distance);
-    float weight = countWeight * boxWeight * shelterWeight * nearWeight;
+    float leeHeight = SNOW_LEE_NO_HEIGHT;
+    float columnHeight = SNOW_LEE_NO_HEIGHT;
+    float worldY = float(cameraBlock.y) + cameraFraction.y + center.y;
+    float leeWeight = 1.0;
+    if (hasLeeMap != 0) {
+        leeHeight = snowLeeHeightAt(center);
+        columnHeight = snowLeeColumnHeight(center, cameraBlock, cameraFraction);
+        leeWeight = snowLeeWeightAt(flake, worldY, leeHeight, columnHeight);
+    }
+    float weight = countWeight * boxWeight * shelterWeight * leeWeight * nearWeight;
     if (!(weight > SNOW_LEAST_ALPHA)) {
         hideFlake();
         return;
     }
+
+    float ownFall = fallSpeed * snowFlakeFallShare(flake);
+    float effectiveFall = hasLeeMap != 0 ? snowLeeFallSpeedAt(worldY, leeHeight, columnHeight, ownFall) : ownFall;
+    vec3 velocity = vec3(windVelocity.x, -effectiveFall, windVelocity.y)
+            + vec3(-sin(phase), 0.0, cos(phase)) * (circleRadius * flutterRate);
 
     vec3 halfStreak = 0.5 * shutterSeconds * velocity;
     vec4 clipStart = viewProjection * vec4(center - halfStreak, 1.0);

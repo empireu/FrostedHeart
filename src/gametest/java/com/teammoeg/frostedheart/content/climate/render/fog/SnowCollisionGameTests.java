@@ -263,11 +263,22 @@ public final class SnowCollisionGameTests {
     @GameTest(template = "phase0a_empty", timeoutTicks = 20)
     public static void flakesLeaveTheBoxAndSplatsFade(GameTestHelper helper) {
         double side = 40.0;
-        helper.assertTrue(SnowFlakes.leavesBox(19.9, 0.2, 0.0, side), "a flake falling past the face stays");
-        helper.assertTrue(!SnowFlakes.leavesBox(19.7, 0.2, 0.0, side), "a flake inside the face leaves");
-        helper.assertTrue(SnowFlakes.leavesBox(-19.5, 0.0, 1.0, side), "a camera stepping away does not let the flake "
-                + "behind it leave");
-        helper.assertTrue(SnowFlakes.leavesBox(3.0, 0.0, 1.0e6, side), "a teleported camera keeps the flake");
+        helper.assertTrue(SnowFlakes.leavesBox(19.9, 0.2, 0.0, side),
+                "a flake moving past the box face returned false from leavesBox instead of true");
+        helper.assertTrue(!SnowFlakes.leavesBox(19.7, 0.2, 0.0, side),
+                "a flake staying inside the box face returned true from leavesBox instead of false");
+        helper.assertTrue(SnowFlakes.leavesBox(-19.5, 0.0, 1.0, side),
+                "a camera stepping away from a flake behind it returned false from leavesBox instead of true");
+        helper.assertTrue(SnowFlakes.leavesBox(3.0, 0.0, 1.0e6, side),
+                "a teleported camera returned false from leavesBox instead of true");
+        helper.assertTrue(SnowFlakes.splatVisible(19.5, -10.0, 20.0, side),
+                "a splat within half a box returned false from splatVisible instead of true");
+        helper.assertTrue(!SnowFlakes.splatVisible(20.1, 0.0, 0.0, side),
+                "a splat beyond half a box along x returned true from splatVisible instead of false");
+        helper.assertTrue(!SnowFlakes.splatVisible(0.0, -25.0, 0.0, side),
+                "a splat beyond half a box along y returned true from splatVisible instead of false");
+        helper.assertTrue(!SnowFlakes.splatVisible(0.0, 0.0, 25.0, side),
+                "a splat beyond half a box along z returned true from splatVisible instead of false");
         checkNear(helper, "sub-steps of no move", SnowFlakes.substepCount(0.0), 1.0);
         checkNear(helper, "sub-steps of a quarter block", SnowFlakes.substepCount(0.25), 1.0);
         checkNear(helper, "sub-steps of a bit more", SnowFlakes.substepCount(0.26), 2.0);

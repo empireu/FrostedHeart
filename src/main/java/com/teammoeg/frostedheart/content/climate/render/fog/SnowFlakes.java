@@ -43,6 +43,7 @@ public final class SnowFlakes {
      * The flakes over which the last drawn ones fade as the drawn count changes.
      */
     public static final double COUNT_FADE_FLAKES = 1024.0;
+    public static final int SALT_LEE = 0;
     public static final int SALT_POSITION_X = 1;
     public static final int SALT_POSITION_Y = 2;
     public static final int SALT_POSITION_Z = 3;
@@ -54,6 +55,9 @@ public final class SnowFlakes {
     public static final int SALT_FLUTTER_RADIUS = 9;
     public static final int SALT_BRIGHTNESS = 10;
     public static final int SALT_SHELTER = 11;
+    public static final int SALT_SHAPE = 12;
+    public static final int SALT_TURN = 13;
+    public static final int SALT_TILT = 14;
     public static final int SALT_LEAVES = 15;
     /**
      * What the angle of a flake's flutter circle in its state is raised by while the flake is stopped, which is more
@@ -392,6 +396,15 @@ public final class SnowFlakes {
         }
         double fade = clamp((age - 0.5 * splatSeconds) / (0.5 * splatSeconds));
         return 1.0 - fade * fade * (3.0 - 2.0 * fade);
+    }
+
+    /**
+     * Whether a splat stored relative to the fixed splat origin lies within half a box of the camera on every axis,
+     * hiding splats left behind by fast flight or teleports instead of wrapping them ahead of the camera.
+     */
+    public static boolean splatVisible(double offsetX, double offsetY, double offsetZ, double boxSide) {
+        double halfSide = 0.5 * boxSide;
+        return Math.abs(offsetX) <= halfSide && Math.abs(offsetY) <= halfSide && Math.abs(offsetZ) <= halfSide;
     }
 
     private static double mix(double from, double to, double share) {
