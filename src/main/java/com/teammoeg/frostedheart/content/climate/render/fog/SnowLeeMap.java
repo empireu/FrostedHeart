@@ -150,10 +150,10 @@ final class SnowLeeMap {
     /**
      * Advances either the smoothed terrain surface S or the lee map by at most one GPU pass for the current frame.
      * Must be called inside SnowfallRenderer's GL state save/restore block (with scissor and cull disabled and units
-     * 0..8 saved).
+     * 0..9 saved).
      */
     static void step(@Nullable ClientLevel level, @Nullable FarHeights heights, int noLeavesHeightTexture,
-            WeatherWind wind) {
+            double windDirection, double flakeWindSpeed, double flakeFallSpeed) {
         onLevelChanged(level);
         if (failed || !SkySetting.SNOW_LEE.isOn() || level == null || heights == null || !heights.isPlaced()
                 || noLeavesHeightTexture == 0) {
@@ -164,7 +164,7 @@ final class SnowLeeMap {
             lastCalm = false;
             return;
         }
-        double windSpeed = wind.speed();
+        double windSpeed = flakeWindSpeed;
         if (SnowLee.isCalm(windSpeed)) {
             lastCalm = true;
             hasPublished = false;
@@ -246,8 +246,8 @@ final class SnowLeeMap {
             return;
         }
 
-        double direction = wind.direction();
-        double fallSpeed = SkySetting.SNOW_FALL_SPEED.get();
+        double direction = windDirection;
+        double fallSpeed = flakeFallSpeed;
         double leeFill = SkySetting.SNOW_LEE_FILL.get();
         if (!rebuilding && SnowLee.needsRebuild(hasPublished, anchorX, anchorZ, publishedSmoothVersion, direction,
                 windSpeed, fallSpeed, leeFill, publishedAnchorX, publishedAnchorZ, publishedLeeSmoothVersion,

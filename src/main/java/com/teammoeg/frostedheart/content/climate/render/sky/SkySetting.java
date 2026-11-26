@@ -134,8 +134,13 @@ public enum SkySetting {
             Rebuilds.NOTHING, 0.5, 0.0, 1.0),
     SNOW_FLAKE_SIZE("snowFlakeSize", "Mean width of a snowflake in blocks. Larger flakes are fewer at the same "
             + "share.", Rebuilds.NOTHING, 0.08, 0.01, 0.5),
-    SNOW_FALL_SPEED("snowFallSpeed", "Median speed in blocks per second at which snowflakes fall, give or take a "
-            + "third.", Rebuilds.NOTHING, 0.6, 0.05, 5.0),
+    SNOW_FALL_SPEED("snowFallSpeed", "Median speed in blocks per second at which snowflakes fall in plain snowfall, "
+            + "give or take a third.", Rebuilds.NOTHING, 0.6, 0.05, 5.0),
+    SNOW_BLIZZARD_FALL_SPEED("snowBlizzardFallSpeed", "Median speed in blocks per second at which snowflakes fall in "
+            + "a full blizzard. Plain snowfall uses snowFallSpeed and blends toward this as the storm grows.",
+            Rebuilds.NOTHING, 1.8, 0.05, 5.0),
+    SNOW_WIND_SHARE("snowWindShare", "Share of the wind speed that snowflakes and the lee map follow, while the fog "
+            + "keeps the full wind.", Rebuilds.NOTHING, 0.5, 0.0, 1.0),
     SNOW_FLUTTER("snowFlutter", "Mean radius in blocks of the circles that snowflakes trace while they fall. 0 makes "
             + "them fall straight.", Rebuilds.NOTHING, 0.15, 0.0, 1.0),
     SNOW_STREAK_SECONDS("snowStreakSeconds", "Seconds of motion that a snowflake is smeared over, like a camera's "
@@ -191,7 +196,7 @@ public enum SkySetting {
             + "counts as open air, and cover that far away is ignored.", Rebuilds.NOTHING, 192.0, 64.0, 512.0),
     FOG_SNOW_STRUCTURE_SHARE("fogSnowStructureShare", "Share of the fog of snowfall that gathers into moving "
             + "structures, with the rest spread thin as clear air between them. 0 draws fog of an even density, and "
-            + "the mean visibility is the same at every share.", Rebuilds.NOTHING, 0.5, 0.0, 1.0),
+            + "the mean visibility is the same at every share.", Rebuilds.NOTHING, 0.3, 0.0, 1.0),
     FOG_BLIZZARD_STRUCTURE_SHARE("fogBlizzardStructureShare", "The same for a blizzard.", Rebuilds.NOTHING, 0.2, 0.0,
             1.0),
     FOG_STRUCTURE_COVERAGE("fogStructureCoverage", "Share of space that the fog structures fill. Smaller gives fewer "
@@ -208,7 +213,7 @@ public enum SkySetting {
             + "structures of the fog drift along with it.", Rebuilds.NOTHING, 12.0, 0.0, 40.0),
     FOG_CAVITY_SHARE("fogCavityShare", "Lowest fog density share deep inside a narrow open-sky ravine or walled "
             + "cavity in windy weather, while falling snow still enters it. 1 turns cavity thinning off.",
-            Rebuilds.NOTHING, 0.5, 0.0, 1.0);
+            Rebuilds.NOTHING, 0.0, 0.0, 1.0);
 
     /**
      * What a build does again when a setting changes. The views are built again with either part.

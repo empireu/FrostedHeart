@@ -37,6 +37,8 @@ public final class FogSettingsGameTests {
         checkNumberSetting(helper, SkySetting.SNOW_FLAKE_SHARE, "snowFlakeShare", 0.5, 0.0, 1.0);
         checkNumberSetting(helper, SkySetting.SNOW_FLAKE_SIZE, "snowFlakeSize", 0.08, 0.01, 0.5);
         checkNumberSetting(helper, SkySetting.SNOW_FALL_SPEED, "snowFallSpeed", 0.6, 0.05, 5.0);
+        checkNumberSetting(helper, SkySetting.SNOW_BLIZZARD_FALL_SPEED, "snowBlizzardFallSpeed", 1.8, 0.05, 5.0);
+        checkNumberSetting(helper, SkySetting.SNOW_WIND_SHARE, "snowWindShare", 0.5, 0.0, 1.0);
         checkNumberSetting(helper, SkySetting.SNOW_FLUTTER, "snowFlutter", 0.15, 0.0, 1.0);
         checkNumberSetting(helper, SkySetting.SNOW_STREAK_SECONDS, "snowStreakSeconds", 0.02, 0.0, 0.2);
         checkNumberSetting(helper, SkySetting.SNOW_FLAKE_BRIGHTNESS, "snowFlakeBrightness", 1.0, 0.0, 4.0);
@@ -60,7 +62,7 @@ public final class FogSettingsGameTests {
         checkNumberSetting(helper, SkySetting.FOG_FROXEL_DIVISOR, "fogFroxelDivisor", 8.0, 4.0, 16.0);
         checkNumberSetting(helper, SkySetting.FOG_FROXEL_SLICES, "fogFroxelSlices", 32.0, 32.0, 64.0);
         checkNumberSetting(helper, SkySetting.FOG_FROXEL_RANGE, "fogFroxelRange", 192.0, 64.0, 512.0);
-        checkNumberSetting(helper, SkySetting.FOG_SNOW_STRUCTURE_SHARE, "fogSnowStructureShare", 0.5, 0.0, 1.0);
+        checkNumberSetting(helper, SkySetting.FOG_SNOW_STRUCTURE_SHARE, "fogSnowStructureShare", 0.3, 0.0, 1.0);
         checkNumberSetting(helper, SkySetting.FOG_BLIZZARD_STRUCTURE_SHARE, "fogBlizzardStructureShare", 0.2, 0.0, 1.0);
         checkNumberSetting(helper, SkySetting.FOG_STRUCTURE_COVERAGE, "fogStructureCoverage", 0.25, 0.05, 1.0);
         checkNumberSetting(helper, SkySetting.FOG_STRUCTURE_SIZE, "fogStructureSize", 16.0, 16.0, 512.0);
@@ -68,7 +70,7 @@ public final class FogSettingsGameTests {
         checkNumberSetting(helper, SkySetting.FOG_STRUCTURE_EROSION, "fogStructureErosion", 0.5, 0.0, 0.9);
         checkNumberSetting(helper, SkySetting.FOG_STRUCTURE_RANGE, "fogStructureRange", 96.0, 32.0, 160.0);
         checkNumberSetting(helper, SkySetting.FOG_WIND_SCALE, "fogWindScale", 12.0, 0.0, 40.0);
-        checkNumberSetting(helper, SkySetting.FOG_CAVITY_SHARE, "fogCavityShare", 0.5, 0.0, 1.0);
+        checkNumberSetting(helper, SkySetting.FOG_CAVITY_SHARE, "fogCavityShare", 0.0, 0.0, 1.0);
 
         double snowVisibility = SkySetting.FOG_SNOW_VISIBILITY.defaultValue();
         double blizzardVisibility = SkySetting.FOG_BLIZZARD_VISIBILITY.defaultValue();
@@ -76,17 +78,18 @@ public final class FogSettingsGameTests {
                 + blizzardVisibility + ", not below the " + snowVisibility + " of fogSnowVisibility");
 
         SkySetting[] weatherSettings = {SkySetting.SNOW_ENABLED, SkySetting.SNOW_FLAKE_SHARE,
-                SkySetting.SNOW_FLAKE_SIZE, SkySetting.SNOW_FALL_SPEED, SkySetting.SNOW_FLUTTER,
-                SkySetting.SNOW_STREAK_SECONDS, SkySetting.SNOW_FLAKE_BRIGHTNESS, SkySetting.SNOW_NEAR_RADIUS,
-                SkySetting.SNOW_COLLISION, SkySetting.SNOW_SPLAT_SECONDS, SkySetting.SNOW_LEE,
-                SkySetting.SNOW_LEE_FILL, SkySetting.SNOW_LEE_BAND, SkySetting.FOG_ENABLED,
-                SkySetting.FOG_SNOW_VISIBILITY, SkySetting.FOG_BLIZZARD_VISIBILITY, SkySetting.FOG_HEIGHT_SCALE,
-                SkySetting.FOG_LEAF_POROSITY, SkySetting.FOG_FIELD_BUDGET_MICROS, SkySetting.FOG_SNOW_DECAY_LENGTH,
-                SkySetting.FOG_BLIZZARD_DECAY_LENGTH, SkySetting.FOG_FIELD_RADIUS, SkySetting.FOG_FROXEL_DIVISOR,
-                SkySetting.FOG_FROXEL_SLICES, SkySetting.FOG_FROXEL_RANGE, SkySetting.FOG_SNOW_STRUCTURE_SHARE,
-                SkySetting.FOG_BLIZZARD_STRUCTURE_SHARE, SkySetting.FOG_STRUCTURE_COVERAGE,
-                SkySetting.FOG_STRUCTURE_SIZE, SkySetting.FOG_STRUCTURE_STRETCH, SkySetting.FOG_STRUCTURE_EROSION,
-                SkySetting.FOG_STRUCTURE_RANGE, SkySetting.FOG_WIND_SCALE, SkySetting.FOG_CAVITY_SHARE};
+                SkySetting.SNOW_FLAKE_SIZE, SkySetting.SNOW_FALL_SPEED, SkySetting.SNOW_BLIZZARD_FALL_SPEED,
+                SkySetting.SNOW_WIND_SHARE, SkySetting.SNOW_FLUTTER, SkySetting.SNOW_STREAK_SECONDS,
+                SkySetting.SNOW_FLAKE_BRIGHTNESS, SkySetting.SNOW_NEAR_RADIUS, SkySetting.SNOW_COLLISION,
+                SkySetting.SNOW_SPLAT_SECONDS, SkySetting.SNOW_LEE, SkySetting.SNOW_LEE_FILL, SkySetting.SNOW_LEE_BAND,
+                SkySetting.FOG_ENABLED, SkySetting.FOG_SNOW_VISIBILITY, SkySetting.FOG_BLIZZARD_VISIBILITY,
+                SkySetting.FOG_HEIGHT_SCALE, SkySetting.FOG_LEAF_POROSITY, SkySetting.FOG_FIELD_BUDGET_MICROS,
+                SkySetting.FOG_SNOW_DECAY_LENGTH, SkySetting.FOG_BLIZZARD_DECAY_LENGTH, SkySetting.FOG_FIELD_RADIUS,
+                SkySetting.FOG_FROXEL_DIVISOR, SkySetting.FOG_FROXEL_SLICES, SkySetting.FOG_FROXEL_RANGE,
+                SkySetting.FOG_SNOW_STRUCTURE_SHARE, SkySetting.FOG_BLIZZARD_STRUCTURE_SHARE,
+                SkySetting.FOG_STRUCTURE_COVERAGE, SkySetting.FOG_STRUCTURE_SIZE, SkySetting.FOG_STRUCTURE_STRETCH,
+                SkySetting.FOG_STRUCTURE_EROSION, SkySetting.FOG_STRUCTURE_RANGE, SkySetting.FOG_WIND_SCALE,
+                SkySetting.FOG_CAVITY_SHARE};
         SkySetting[] settings = SkySetting.values();
         int lastIndex = settings.length - 1;
         helper.assertTrue(lastIndex + 1 >= weatherSettings.length, "SkySetting has " + settings.length

@@ -210,6 +210,7 @@ public final class WeatherFogRenderer {
      * The walk that the self test compares with the shader, which keeps the references of the last frame.
      */
     private static final SnowFogWalk selfTestWalk = new SnowFogWalk();
+    private static final FogCavity.NearCavityQuery nearCavityQuery = new FogCavity.NearCavityQuery();
     /**
      * Whether the settings of the draw were read once, and the froxel divisor, the slice count, the range and the debug
      * mode of the frame before, which start a new measurement of the passes when they change.
@@ -322,6 +323,7 @@ public final class WeatherFogRenderer {
     private static double frameHalfWidth;
     private static double frameFieldFade;
     private static double frameCavityFloor = 1.0;
+    private static double frameCavityWindFactor;
     private static double frameCavityDecayLength = SnowFogWalk.MINIMUM_DECAY_LENGTH;
     private static boolean frameCavityActive;
     /**
@@ -464,6 +466,7 @@ public final class WeatherFogRenderer {
             ClientLevel level = Minecraft.getInstance().level;
             if (level != keptFrameLevel) {
                 FogCavityMap.onLevelChanged(level);
+                nearCavityQuery.clear();
             }
             if (level == null || !isActive(level) || !CalculatedSkyRenderer.isDrawnThisFrame()) {
                 return;
@@ -615,8 +618,12 @@ public final class WeatherFogRenderer {
         updateStructureDensity();
         boundClearAirDensity = structure.isOn() ? structure.clearAirDensity() : 1.0;
         boundClearRange = structure.isOn() ? structure.range() : 0.0;
+        FarHeights farHeights = ClientSnowField.farHeights();
+        boolean nearCavity = farHeights != null && farHeights.isPlaced()
+                && nearCavityQuery.hasCavityAbove(farHeights, cameraBlock.getX(), cameraBlock.getZ(), eyeHeight);
         double cavityWind = Math.max(wind.speed(), conditions.windSpeed());
-        boundCavityDensity = FogCavity.effectiveFloor(settingValue(SkySetting.FOG_CAVITY_SHARE), cavityWind);
+        boundCavityDensity = nearCavity
+                ? FogCavity.effectiveFloor(settingValue(SkySetting.FOG_CAVITY_SHARE), cavityWind) : 1.0;
         boundCavityRange = boundCavityDensity < 1.0
                 ? FogFroxelGrid.rangeOf(SkySetting.FOG_FROXEL_RANGE.get()) : 0.0;
         double clampedRadius = SkySetting.FOG_FIELD_RADIUS.get();
@@ -778,6 +785,7 @@ public final class WeatherFogRenderer {
         updateShareTable();
         updateFieldFade();
         updateRadius();
+        frameCavityWindFactor = FogCavity.windFactor(wind.speed());
         frameCavityFloor = FogCavity.effectiveFloor(settingValue(SkySetting.FOG_CAVITY_SHARE), wind.speed());
         frameCavityDecayLength = conditions.decayLength();
         frameHeightScale = conditions.heightScale();
@@ -1091,7 +1099,7 @@ public final class WeatherFogRenderer {
             RenderSystem.disableCull();
             RenderSystem.disableScissor();
             RenderSystem.disableBlend();
-            if (frameCavityFloor < 1.0) {
+            if (frameCavityFloor < 1.0 || SkySetting.SNOW_ENABLED.isOn()) {
                 int noLeavesTexture = ClientSnowField.prepareNoLeavesHeights();
                 FogCavityMap.step(Minecraft.getInstance().level, ClientSnowField.farHeights(), noLeavesTexture);
             }
@@ -2044,7 +2052,7 @@ public final class WeatherFogRenderer {
         float[] cavityReadback = frameCavityActive ? FogCavityMap.readbackPublished() : null;
         if (cavityReadback != null) {
             selfTestWalk.setCavity(cavityReadback, FogCavityMap.publishedMinX(), FogCavityMap.publishedMinZ(),
-                    frameCavityFloor, frameCavityDecayLength);
+                    frameCavityFloor, frameCavityWindFactor, frameCavityDecayLength);
         } else {
             selfTestWalk.clearCavity();
         }
@@ -2669,6 +2677,7 @@ public final class WeatherFogRenderer {
         private int hasCavityMapUniform;
         private int cavityMinUniform;
         private int cavityFloorUniform;
+        private int cavityWindFactorUniform;
         private int cavityDecayLengthUniform;
         protected int partMaskUniform;
 
@@ -2734,6 +2743,7 @@ public final class WeatherFogRenderer {
                 hasCavityMapUniform = GL20.glGetUniformLocation(program.programId, "hasCavityMap");
                 cavityMinUniform = GL20.glGetUniformLocation(program.programId, "cavityMin");
                 cavityFloorUniform = GL20.glGetUniformLocation(program.programId, "cavityFloor");
+                cavityWindFactorUniform = GL20.glGetUniformLocation(program.programId, "cavityWindFactor");
                 cavityDecayLengthUniform = GL20.glGetUniformLocation(program.programId, "cavityDecayLength");
                 // The share volume and cavity map stay on their units for every frame, so their samplers are set once:
                 GL20.glUniform1i(GL20.glGetUniformLocation(program.programId, "shareVolume"), SHARE_VOLUME_UNIT);
@@ -2783,6 +2793,7 @@ public final class WeatherFogRenderer {
             if (frameCavityActive) {
                 GL20.glUniform2i(cavityMinUniform, FogCavityMap.publishedMinX(), FogCavityMap.publishedMinZ());
                 GL20.glUniform1f(cavityFloorUniform, (float) frameCavityFloor);
+                GL20.glUniform1f(cavityWindFactorUniform, (float) frameCavityWindFactor);
                 GL20.glUniform1f(cavityDecayLengthUniform, (float) frameCavityDecayLength);
             }
             setOwnUniforms(mainTarget);

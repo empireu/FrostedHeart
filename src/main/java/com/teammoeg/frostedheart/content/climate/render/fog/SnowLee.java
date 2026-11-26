@@ -129,6 +129,22 @@ public final class SnowLee {
      * jump instead of waiting for the next rebuild to finish.
      */
     public static final int MAX_ANCHOR_DRIFT_BLOCKS = 256;
+    /**
+     * Size in texels of the cavity enclosure map read for ravine wind braking, matching FogCavity.MAP_SIZE.
+     */
+    public static final int CAVITY_MAP_SIZE = FogCavity.MAP_SIZE;
+    /**
+     * Minimum horizontal wind speed multiplier deep inside a narrow ravine so flakes settle nearly straight down.
+     */
+    public static final double CAVITY_WIND_FLOOR = 0.01;
+    /**
+     * Vertical decay length in blocks over which horizontal flake wind brakes below a ravine's braking ceiling.
+     */
+    public static final double CAVITY_WIND_DECAY = 0.5;
+    /**
+     * Cavity depth (h_cav - H) in blocks over which the flake braking ceiling rises smoothly from h_cav to lowerRim.
+     */
+    public static final double CAVITY_RIM_BLEND_DEPTH = 2.0;
 
     private static final int CHUNK_WIDTH = 16;
     private static final int[] PASS_STRIDES = {1, 2, 4, 8, 16, 32, 64, 128};
@@ -242,7 +258,11 @@ public final class SnowLee {
         if (anchorX != builtAnchorX || anchorZ != builtAnchorZ || smoothVersion != builtSmoothVersion) {
             return true;
         }
-        if (Double.compare(fallSpeed, builtFallSpeed) != 0 || Double.compare(leeFill, builtLeeFill) != 0) {
+        if (Double.compare(leeFill, builtLeeFill) != 0) {
+            return true;
+        }
+        double fallScale = Math.max(builtFallSpeed, MINIMUM_WIND_SPEED);
+        if (Math.abs(fallSpeed - builtFallSpeed) >= SPEED_REBUILD_SHARE * fallScale) {
             return true;
         }
         if (angleDifference(direction, builtDirection) >= DIRECTION_REBUILD_RADIANS) {
@@ -253,18 +273,81 @@ public final class SnowLee {
     }
 
     /**
-     * The visibility share from 0 to 1 of falling snow at height y over a column with lee surface height leeHeight,
-     * no-leaves terrain height columnHeight and smoothed macro surface height smoothHeight.
-     * <p>
-     * At or above columnHeight - OVERHANG_MARGIN (open air and partial top blocks such as snow layers, slabs and
-     * stairs), flat ground and gentle slopes (leeHeight <= columnHeight) give 1, below leeHeight gives 0, and above
-     * leeHeight fades linearly to 1 over min(leeBand, leeHeight - columnHeight). Strictly below an overhang
-     * (y < columnHeight - OVERHANG_MARGIN), the flat-ground shortcut does not apply: any point below leeHeight gives
-     * 0, and above leeHeight fades using min(columnHeight, smoothHeight) as the ground floor so snow under a bridge
-     * over an open plain stays visible while snow under a cliff lip in a lee is hidden.
+     * The height below which flakes brake horizontally inside an open-sky cavity, blending smoothly from cavityHeight
+     * to the lower opposing rim over CAVITY_RIM_BLEND_DEPTH blocks of cavity depth, or NO_HEIGHT outside a cavity.
+     */
+    public static double cavityBrakeHeight(double cavityHeight, double cavityRim, double columnHeight) {
+        if (!(cavityHeight > NO_HEIGHT_THRESHOLD) || !(columnHeight > NO_HEIGHT_THRESHOLD)) {
+            return NO_HEIGHT;
+        }
+        double cavityDepth = cavityHeight - columnHeight;
+        if (!(cavityDepth > 0.0)) {
+            return NO_HEIGHT;
+        }
+        double rim = cavityRim > NO_HEIGHT_THRESHOLD ? Math.max(cavityHeight, cavityRim) : cavityHeight;
+        double strength = clamp(cavityDepth / CAVITY_RIM_BLEND_DEPTH);
+        return cavityHeight + (rim - cavityHeight) * strength;
+    }
+
+    /**
+     * Depth-only cavity openness factor in (0, 1] for falling flakes at height y, matching snowCavityOpenFactor in
+     * snow_lee.glsl. Equals 1.0 outside cavities or above the braking ceiling, and decays exponentially below it.
+     */
+    public static double cavityOpenFactor(double y, double cavityHeight, double cavityRim, double columnHeight) {
+        double brakeHeight = cavityBrakeHeight(cavityHeight, cavityRim, columnHeight);
+        if (!(brakeHeight > NO_HEIGHT_THRESHOLD)) {
+            return 1.0;
+        }
+        double depth = brakeHeight - y;
+        if (!(depth > 0.0)) {
+            return 1.0;
+        }
+        return Math.exp(-depth / CAVITY_WIND_DECAY);
+    }
+
+    /**
+     * Horizontal flake wind multiplier in [CAVITY_WIND_FLOOR, 1.0] for a cavity openness factor, matching
+     * snowCavityWindScale in snow_lee.glsl.
+     */
+    public static double cavityWindScale(double cavityOpenFactor) {
+        double open = Double.isFinite(cavityOpenFactor) ? clamp(cavityOpenFactor) : 1.0;
+        return CAVITY_WIND_FLOOR + (1.0 - CAVITY_WIND_FLOOR) * open;
+    }
+
+    /**
+     * Horizontal wind multiplier in [CAVITY_WIND_FLOOR, 1.0] at world height y under a precomputed braking ceiling
+     * brakeHeight, matching snowBrakeWindScaleAt in snow_lee.glsl. Equals 1.0 outside cavities or at/above brakeHeight.
+     */
+    public static double brakeWindScaleAt(double y, double brakeHeight) {
+        if (!(brakeHeight > NO_HEIGHT_THRESHOLD)) {
+            return 1.0;
+        }
+        double depth = brakeHeight - y;
+        if (!(depth > 0.0)) {
+            return 1.0;
+        }
+        return CAVITY_WIND_FLOOR + (1.0 - CAVITY_WIND_FLOOR) * Math.exp(-depth / CAVITY_WIND_DECAY);
+    }
+
+    /**
+     * The visibility share from 0 to 1 of falling snow at height y outside any cavity.
      */
     public static double leeShare(double y, double leeHeight, double columnHeight, double smoothHeight,
             double leeBand) {
+        return leeShare(y, leeHeight, columnHeight, smoothHeight, 1.0, leeBand);
+    }
+
+    /**
+     * The visibility share from 0 to 1 of falling snow at height y over a column with lee surface height leeHeight,
+     * no-leaves terrain height columnHeight, smoothed macro surface height smoothHeight, and cavity openness
+     * cavityOpenFactor in (0, 1].
+     * <p>
+     * Strictly below an overhang (y < columnHeight - OVERHANG_MARGIN), the flat-ground shortcut and cavity release do
+     * not apply, keeping overhangs dry. On open-sky columns (y >= columnHeight - OVERHANG_MARGIN), a deep cavity
+     * (cavityOpenFactor < 1) releases the lee smoothly toward 1 so snow settles visibly onto ravine floors.
+     */
+    public static double leeShare(double y, double leeHeight, double columnHeight, double smoothHeight,
+            double cavityOpenFactor, double leeBand) {
         if (!(leeHeight > NO_HEIGHT_THRESHOLD) || !(columnHeight > NO_HEIGHT_THRESHOLD)) {
             return 1.0;
         }
@@ -281,15 +364,18 @@ public final class SnowLee {
             double effectiveBand = Math.min(leeBand, leeDepth);
             return clamp((y - leeHeight) / effectiveBand);
         }
+        double open = Double.isFinite(cavityOpenFactor) ? clamp(cavityOpenFactor) : 1.0;
         double leeDepth = leeHeight - columnHeight;
+        double share;
         if (!(leeDepth > 0.0)) {
-            return 1.0;
+            share = 1.0;
+        } else if (!(leeBand > 0.0)) {
+            share = y >= leeHeight ? 1.0 : 0.0;
+        } else {
+            double effectiveBand = Math.min(leeBand, leeDepth);
+            share = clamp((y - leeHeight) / effectiveBand);
         }
-        if (!(leeBand > 0.0)) {
-            return y >= leeHeight ? 1.0 : 0.0;
-        }
-        double effectiveBand = Math.min(leeBand, leeDepth);
-        return clamp((y - leeHeight) / effectiveBand);
+        return share + (1.0 - share) * (1.0 - open);
     }
 
     /**
@@ -347,24 +433,42 @@ public final class SnowLee {
     }
 
     /**
-     * Places a flake that just left the camera's periodic box onto one of the box's inflow faces weighted by the
-     * relative horizontal step and the relative vertical steps at the box's top and bottom faces, matching
-     * snowReenterBoxOffset in snow_flake_update.fsh. Prevents vertical divergence on hills from compounding across box
-     * crossings, starving the lower face on upwind slopes, or piling flakes at the top face on downwind slopes.
+     * Places a flake that just left the camera's periodic box onto one of the box's inflow faces with uniform
+     * horizontal wind (outside any cavity), matching snowReenterBoxOffset when centerBrakeHeight is NO_HEIGHT.
      */
     public static void reenterBoxOffset(int flake, int frameCounter, double relStepX, double relStepTopY,
             double relStepBottomY, double relStepZ, double boxSide, double[] offsetOut) {
+        reenterBoxOffset(flake, frameCounter, relStepX, 0.0, relStepTopY, relStepBottomY, relStepZ, 0.0, 0.0,
+                NO_HEIGHT, boxSide, offsetOut);
+    }
+
+    /**
+     * Places a flake that just left the camera's periodic box onto one of the box's inflow faces weighted by the
+     * height-profiled horizontal side-face flux (full wind above centerBrakeHeight, braked wind below it) and the
+     * top/bottom vertical fluxes, placing side-face entries by height in proportion to that local flux. Matches
+     * snowReenterBoxOffset in snow_flake_update.fsh.
+     */
+    public static void reenterBoxOffset(int flake, int frameCounter, double windStepX, double cameraStepX,
+            double relStepTopY, double relStepBottomY, double windStepZ, double cameraStepZ, double cameraWorldY,
+            double centerBrakeHeight, double boxSide, double[] offsetOut) {
         int reseed = SnowFlakes.hash(flake ^ (frameCounter * 0x9e3779b9));
         double pickUnit = ((SnowFlakes.hash(reseed + 1) >>> 8) + 0.5) * UNIT_SCALE;
         double depthUnit = ((SnowFlakes.hash(reseed + 2) >>> 8) + 0.5) * UNIT_SCALE;
         double firstUnit = ((SnowFlakes.hash(reseed + 3) >>> 8) + 0.5) * UNIT_SCALE;
         double secondUnit = ((SnowFlakes.hash(reseed + 4) >>> 8) + 0.5) * UNIT_SCALE;
-        double fluxX = Math.abs(relStepX);
+        double halfSide = 0.5 * boxSide;
+        double yMin = cameraWorldY - halfSide;
+        double yMax = cameraWorldY + halfSide;
+        boolean profiled = centerBrakeHeight > NO_HEIGHT_THRESHOLD && centerBrakeHeight > yMin;
+        double fluxX = profiled
+                ? sideFluxArea(yMin, yMax, windStepX, cameraStepX, centerBrakeHeight) / boxSide
+                : Math.abs(windStepX - cameraStepX);
         double fluxTop = Math.max(0.0, -relStepTopY);
         double fluxBottom = Math.max(0.0, relStepBottomY);
-        double fluxZ = Math.abs(relStepZ);
+        double fluxZ = profiled
+                ? sideFluxArea(yMin, yMax, windStepZ, cameraStepZ, centerBrakeHeight) / boxSide
+                : Math.abs(windStepZ - cameraStepZ);
         double totalFlux = fluxX + fluxTop + fluxBottom + fluxZ;
-        double halfSide = 0.5 * boxSide;
         if (!(totalFlux > 1.0e-6) || Math.max(Math.max(fluxX, fluxZ), Math.max(fluxTop, fluxBottom)) >= boxSide) {
             offsetOut[0] = (depthUnit - 0.5) * boxSide;
             offsetOut[1] = (firstUnit - 0.5) * boxSide;
@@ -373,8 +477,17 @@ public final class SnowLee {
         }
         double pick = pickUnit * totalFlux;
         if (pick < fluxX) {
-            offsetOut[0] = (relStepX > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * fluxX);
-            offsetOut[1] = (firstUnit - 0.5) * boxSide;
+            if (!profiled) {
+                double relStepX = windStepX - cameraStepX;
+                offsetOut[0] = (relStepX > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * fluxX);
+                offsetOut[1] = (firstUnit - 0.5) * boxSide;
+            } else {
+                double worldY = sampleSideHeight(yMin, yMax, windStepX, cameraStepX, centerBrakeHeight, firstUnit);
+                double localStep = windStepX * brakeWindScaleAt(worldY, centerBrakeHeight) - cameraStepX;
+                double clampedStep = Math.min(Math.abs(localStep), boxSide);
+                offsetOut[0] = (localStep > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * clampedStep);
+                offsetOut[1] = Math.max(-halfSide, Math.min(halfSide, worldY - cameraWorldY));
+            }
             offsetOut[2] = (secondUnit - 0.5) * boxSide;
         } else if (pick < fluxX + fluxTop) {
             offsetOut[0] = (firstUnit - 0.5) * boxSide;
@@ -386,9 +499,103 @@ public final class SnowLee {
             offsetOut[2] = (secondUnit - 0.5) * boxSide;
         } else {
             offsetOut[0] = (firstUnit - 0.5) * boxSide;
-            offsetOut[1] = (secondUnit - 0.5) * boxSide;
-            offsetOut[2] = (relStepZ > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * fluxZ);
+            if (!profiled) {
+                double relStepZ = windStepZ - cameraStepZ;
+                offsetOut[1] = (secondUnit - 0.5) * boxSide;
+                offsetOut[2] = (relStepZ > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * fluxZ);
+            } else {
+                double worldY = sampleSideHeight(yMin, yMax, windStepZ, cameraStepZ, centerBrakeHeight, secondUnit);
+                double localStep = windStepZ * brakeWindScaleAt(worldY, centerBrakeHeight) - cameraStepZ;
+                double clampedStep = Math.min(Math.abs(localStep), boxSide);
+                offsetOut[1] = Math.max(-halfSide, Math.min(halfSide, worldY - cameraWorldY));
+                offsetOut[2] = (localStep > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * clampedStep);
+            }
         }
+    }
+
+    private static double sideBelowIntegral(double a, double b, double windStep, double cameraStep, double brakeHeight) {
+        double span = b - a;
+        if (!(span > 0.0)) {
+            return 0.0;
+        }
+        double expB = Math.exp(-(brakeHeight - b) / CAVITY_WIND_DECAY);
+        double expA = Math.exp(-(brakeHeight - a) / CAVITY_WIND_DECAY);
+        return (windStep * CAVITY_WIND_FLOOR - cameraStep) * span
+                + windStep * (1.0 - CAVITY_WIND_FLOOR) * CAVITY_WIND_DECAY * (expB - expA);
+    }
+
+    private static double sideSignSplit(double yMin, double yMid, double windStep, double cameraStep,
+            double brakeHeight) {
+        if (!(Math.abs(windStep) > 1.0e-9)) {
+            return yMid;
+        }
+        double targetScale = cameraStep / windStep;
+        double minScale = brakeWindScaleAt(yMin, brakeHeight);
+        double midScale = brakeWindScaleAt(yMid, brakeHeight);
+        if (targetScale > minScale && targetScale < midScale && targetScale > CAVITY_WIND_FLOOR
+                && targetScale < 1.0) {
+            double root = brakeHeight + CAVITY_WIND_DECAY
+                    * Math.log((targetScale - CAVITY_WIND_FLOOR) / (1.0 - CAVITY_WIND_FLOOR));
+            return Math.max(yMin, Math.min(yMid, root));
+        }
+        return yMid;
+    }
+
+    private static double sideFluxArea(double yMin, double yMax, double windStep, double cameraStep,
+            double brakeHeight) {
+        double yMid = Math.min(yMax, brakeHeight);
+        double split = sideSignSplit(yMin, yMid, windStep, cameraStep, brakeHeight);
+        double areaBelow1 = Math.abs(sideBelowIntegral(yMin, split, windStep, cameraStep, brakeHeight));
+        double areaBelow2 = Math.abs(sideBelowIntegral(split, yMid, windStep, cameraStep, brakeHeight));
+        double areaAbove = Math.abs(windStep - cameraStep) * Math.max(0.0, yMax - yMid);
+        return areaBelow1 + areaBelow2 + areaAbove;
+    }
+
+    private static double sampleSideHeight(double yMin, double yMax, double windStep, double cameraStep,
+            double brakeHeight, double unit) {
+        double yMid = Math.min(yMax, brakeHeight);
+        double split = sideSignSplit(yMin, yMid, windStep, cameraStep, brakeHeight);
+        double areaBelow1 = Math.abs(sideBelowIntegral(yMin, split, windStep, cameraStep, brakeHeight));
+        double areaBelow2 = Math.abs(sideBelowIntegral(split, yMid, windStep, cameraStep, brakeHeight));
+        double areaAbove = Math.abs(windStep - cameraStep) * Math.max(0.0, yMax - yMid);
+        double totalArea = areaBelow1 + areaBelow2 + areaAbove;
+        if (!(totalArea > 0.0)) {
+            return yMin + unit * (yMax - yMin);
+        }
+        double target = unit * totalArea;
+        if (target < areaBelow1) {
+            return solveSideBelowHeight(yMin, split, target, windStep, cameraStep, brakeHeight);
+        }
+        if (target < areaBelow1 + areaBelow2) {
+            return solveSideBelowHeight(split, yMid, target - areaBelow1, windStep, cameraStep, brakeHeight);
+        }
+        if (areaAbove > 0.0) {
+            double share = clamp((target - areaBelow1 - areaBelow2) / areaAbove);
+            return yMid + share * (yMax - yMid);
+        }
+        return yMid;
+    }
+
+    private static double solveSideBelowHeight(double a, double b, double targetArea, double windStep,
+            double cameraStep, double brakeHeight) {
+        double lo = a;
+        double hi = b;
+        double y = 0.5 * (lo + hi);
+        for (int iter = 0; iter < 8; iter++) {
+            double fVal = Math.abs(sideBelowIntegral(a, y, windStep, cameraStep, brakeHeight)) - targetArea;
+            if (fVal < 0.0) {
+                lo = y;
+            } else {
+                hi = y;
+            }
+            double deriv = Math.abs(windStep * brakeWindScaleAt(y, brakeHeight) - cameraStep);
+            double next = deriv > 1.0e-7 ? y - fVal / deriv : 0.5 * (lo + hi);
+            if (!(next > lo && next < hi)) {
+                next = 0.5 * (lo + hi);
+            }
+            y = next;
+        }
+        return y;
     }
 
     /**

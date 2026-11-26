@@ -87,7 +87,8 @@ public final class SnowfallRenderer {
     static final int LEE_MAP_UNIT = 6;
     static final int NO_LEAVES_HEIGHT_UNIT = 7;
     static final int SMOOTH_HEIGHT_UNIT = 8;
-    private static final int TEXTURE_UNITS = 9;
+    static final int CAVITY_MAP_UNIT = 9;
+    private static final int TEXTURE_UNITS = 10;
     private static final int CHUNK_WIDTH = 16;
     /**
      * Distance in blocks along any axis beyond which the fixed splat origin resets with a state refill to keep float
@@ -243,20 +244,29 @@ public final class SnowfallRenderer {
             RenderSystem.disableScissor();
             RenderSystem.disableCull();
             FarHeights farHeights = ClientSnowField.farHeights();
-            int noLeavesTexture = SkySetting.SNOW_LEE.isOn() ? ClientSnowField.prepareNoLeavesHeights() : 0;
-            SnowLeeMap.step(level, farHeights, noLeavesTexture, WeatherFogRenderer.wind());
-            boolean leeActive = SnowLeeMap.isActive() && noLeavesTexture != 0 && farHeights != null
-                    && farHeights.isPlaced();
+            WeatherConditions conditions = WeatherFogRenderer.weather();
+            WeatherWind wind = WeatherFogRenderer.wind();
+            double flakeFallSpeed = SnowFlakes.fallSpeed(SkySetting.SNOW_FALL_SPEED.get(),
+                    SkySetting.SNOW_BLIZZARD_FALL_SPEED.get(), conditions.stormIntensity());
+            double flakeWindSpeed = SnowFlakes.windSpeed(wind.speed(), SkySetting.SNOW_WIND_SHARE.get());
+            double windDirection = wind.direction();
+            boolean wantsNoLeaves = SkySetting.SNOW_LEE.isOn() || FogCavityMap.isActive();
+            int noLeavesTexture = wantsNoLeaves ? ClientSnowField.prepareNoLeavesHeights() : 0;
+            SnowLeeMap.step(level, farHeights, noLeavesTexture, windDirection, flakeWindSpeed, flakeFallSpeed);
+            boolean hasHeights = noLeavesTexture != 0 && farHeights != null && farHeights.isPlaced();
+            boolean leeActive = SnowLeeMap.isActive() && hasHeights;
+            boolean cavityActive = FogCavityMap.isActive() && hasHeights;
             updateTimer.begin();
             try {
-                update(level, camera, boxSide, farHeights, noLeavesTexture, leeActive);
+                update(level, camera, boxSide, farHeights, noLeavesTexture, leeActive, cavityActive, windDirection,
+                        flakeWindSpeed, flakeFallSpeed);
             } finally {
                 updateTimer.end();
             }
             drawTimer.begin();
             try {
                 draw(camera, boxSide, flakeSize, drawnCount, instances, pixelsPerBlock, farHeights, noLeavesTexture,
-                        leeActive);
+                        leeActive, cavityActive, windDirection, flakeWindSpeed, flakeFallSpeed);
             } finally {
                 drawTimer.end();
             }
@@ -310,7 +320,8 @@ public final class SnowfallRenderer {
      * nothing.
      */
     private static void update(ClientLevel level, Vec3 camera, double boxSide, @Nullable FarHeights farHeights,
-            int noLeavesTexture, boolean leeActive) {
+            int noLeavesTexture, boolean leeActive, boolean cavityActive, double windDirection, double flakeWindSpeed,
+            double flakeFallSpeed) {
         double stepSeconds = WeatherFogRenderer.frameStepSeconds();
         int blockX = Mth.floor(camera.x);
         int blockY = Mth.floor(camera.y);
@@ -351,13 +362,14 @@ public final class SnowfallRenderer {
         GL11.glBindTexture(GL12.GL_TEXTURE_3D, SnowShapeTextures.volumeTexture());
         bindTexture(SHAPE_ROWS_UNIT, SnowShapeTextures.rowsTexture());
         bindTexture(LEE_MAP_UNIT, leeActive ? SnowLeeMap.texture() : 0);
-        bindTexture(NO_LEAVES_HEIGHT_UNIT, leeActive ? noLeavesTexture : 0);
+        bindTexture(NO_LEAVES_HEIGHT_UNIT, (leeActive || cavityActive) ? noLeavesTexture : 0);
         bindTexture(SMOOTH_HEIGHT_UNIT, leeActive ? SnowLeeMap.smoothTexture() : 0);
+        bindTexture(CAVITY_MAP_UNIT, cavityActive ? FogCavityMap.texture() : 0);
         updateFrameCounter++;
         updateProgram.use();
         updateProgram.setDrawBuffers();
-        updateProgram.setUniforms(fill, stepSeconds, WeatherFogRenderer.wind(), boxSide, camera, blockX, blockY, blockZ,
-                volume, farHeights, leeActive, updateFrameCounter);
+        updateProgram.setUniforms(fill, stepSeconds, windDirection, flakeWindSpeed, flakeFallSpeed, boxSide, camera,
+                blockX, blockY, blockZ, volume, farHeights, leeActive, cavityActive, updateFrameCounter);
         SkyGlPass.drawFullScreenQuad();
         lastUpdateCameraX = camera.x;
         lastUpdateCameraY = camera.y;
@@ -371,7 +383,8 @@ public final class SnowfallRenderer {
      * test of the scene and no depth writes. Face culling is off, since the quads' winding is not kept.
      */
     private static void draw(Vec3 camera, double boxSide, double flakeSize, double drawnCount, int instances,
-            float pixelsPerBlock, @Nullable FarHeights farHeights, int noLeavesTexture, boolean leeActive) {
+            float pixelsPerBlock, @Nullable FarHeights farHeights, int noLeavesTexture, boolean leeActive,
+            boolean cavityActive, double windDirection, double flakeWindSpeed, double flakeFallSpeed) {
         RenderTarget mainTarget = Minecraft.getInstance().getMainRenderTarget();
         GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, mainTarget.frameBufferId);
         RenderSystem.viewport(0, 0, mainTarget.width, mainTarget.height);
@@ -388,12 +401,13 @@ public final class SnowfallRenderer {
         int shareVolume = WeatherFogRenderer.shareVolumeTexture();
         bindTexture(SHARE_VOLUME_UNIT, shareVolume);
         bindTexture(LEE_MAP_UNIT, leeActive ? SnowLeeMap.texture() : 0);
-        bindTexture(NO_LEAVES_HEIGHT_UNIT, leeActive ? noLeavesTexture : 0);
+        bindTexture(NO_LEAVES_HEIGHT_UNIT, (leeActive || cavityActive) ? noLeavesTexture : 0);
         bindTexture(SMOOTH_HEIGHT_UNIT, leeActive ? SnowLeeMap.smoothTexture() : 0);
+        bindTexture(CAVITY_MAP_UNIT, cavityActive ? FogCavityMap.texture() : 0);
         drawProgram.use();
         double splatSeconds = SkySetting.SNOW_SPLAT_SECONDS.get();
         drawProgram.setUniforms(mainTarget, camera, boxSide, flakeSize, drawnCount, pixelsPerBlock, shareVolume != 0,
-                splatSeconds, farHeights, leeActive);
+                splatSeconds, farHeights, leeActive, cavityActive, windDirection, flakeWindSpeed, flakeFallSpeed);
         if (vertexArray == 0) {
             vertexArray = GL30.glGenVertexArrays();
         }
@@ -547,6 +561,8 @@ public final class SnowfallRenderer {
         private int splatSecondsUniform;
         private int frameCounterUniform;
         private int hasLeeMapUniform;
+        private int hasCavityMapUniform;
+        private int cavityMinUniform;
         private int cameraFromLeeAnchorUniform;
         private int cameraFromSmoothMinUniform;
         private int leeWindDirectionUniform;
@@ -594,6 +610,7 @@ public final class SnowfallRenderer {
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "leeMap"), LEE_MAP_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "noLeavesHeights"), NO_LEAVES_HEIGHT_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "smoothHeights"), SMOOTH_HEIGHT_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "cavityMap"), CAVITY_MAP_UNIT);
                 fillStateUniform = GL20.glGetUniformLocation(programId, "fillState");
                 stepSecondsUniform = GL20.glGetUniformLocation(programId, "stepSeconds");
                 windVelocityUniform = GL20.glGetUniformLocation(programId, "windVelocity");
@@ -612,6 +629,8 @@ public final class SnowfallRenderer {
                 splatSecondsUniform = GL20.glGetUniformLocation(programId, "splatSeconds");
                 frameCounterUniform = GL20.glGetUniformLocation(programId, "frameCounter");
                 hasLeeMapUniform = GL20.glGetUniformLocation(programId, "hasLeeMap");
+                hasCavityMapUniform = GL20.glGetUniformLocation(programId, "hasCavityMap");
+                cavityMinUniform = GL20.glGetUniformLocation(programId, "cavityMin");
                 cameraFromLeeAnchorUniform = GL20.glGetUniformLocation(programId, "cameraFromLeeAnchor");
                 cameraFromSmoothMinUniform = GL20.glGetUniformLocation(programId, "cameraFromSmoothMin");
                 leeWindDirectionUniform = GL20.glGetUniformLocation(programId, "leeWindDirection");
@@ -639,14 +658,15 @@ public final class SnowfallRenderer {
          * as its motion since the last update.
          * @param volume the shapes to collide with, or null for flakes that fall through blocks
          */
-        private void setUniforms(boolean fill, double stepSeconds, WeatherWind wind, double boxSide, Vec3 camera,
-                int blockX, int blockY, int blockZ, @Nullable SnowShapeVolume volume, @Nullable FarHeights farHeights,
-                boolean leeActive, int frameCounter) {
+        private void setUniforms(boolean fill, double stepSeconds, double windDirection, double flakeWindSpeed,
+                double flakeFallSpeed, double boxSide, Vec3 camera, int blockX, int blockY, int blockZ,
+                @Nullable SnowShapeVolume volume, @Nullable FarHeights farHeights, boolean leeActive,
+                boolean cavityActive, int frameCounter) {
             GL20.glUniform1i(fillStateUniform, fill ? 1 : 0);
             GL20.glUniform1f(stepSecondsUniform, (float) stepSeconds);
-            GL20.glUniform2f(windVelocityUniform, (float) (wind.speed() * Math.cos(wind.direction())),
-                    (float) (wind.speed() * Math.sin(wind.direction())));
-            GL20.glUniform1f(fallSpeedUniform, (float) SkySetting.SNOW_FALL_SPEED.get());
+            GL20.glUniform2f(windVelocityUniform, (float) (flakeWindSpeed * Math.cos(windDirection)),
+                    (float) (flakeWindSpeed * Math.sin(windDirection)));
+            GL20.glUniform1f(fallSpeedUniform, (float) flakeFallSpeed);
             GL20.glUniform1f(boxSideUniform, (float) boxSide);
             GL20.glUniform1f(flutterRadiusUniform, (float) SkySetting.SNOW_FLUTTER.get());
             GL20.glUniform3f(previousCameraInBoxUniform, (float) SnowFlakes.wrap(lastUpdateCameraX, boxSide),
@@ -670,6 +690,14 @@ public final class SnowfallRenderer {
             GL20.glUniform1f(splatSecondsUniform, (float) SkySetting.SNOW_SPLAT_SECONDS.get());
             GL20.glUniform1i(frameCounterUniform, frameCounter);
             GL20.glUniform1i(hasLeeMapUniform, leeActive ? 1 : 0);
+            GL20.glUniform1i(hasCavityMapUniform, cavityActive ? 1 : 0);
+            if (cavityActive) {
+                GL20.glUniform2i(cavityMinUniform, FogCavityMap.publishedMinX(), FogCavityMap.publishedMinZ());
+            }
+            if ((leeActive || cavityActive) && farHeights != null) {
+                GL20.glUniform2i(farHeightsMinUniform, farHeights.originChunkX() * CHUNK_WIDTH,
+                        farHeights.originChunkZ() * CHUNK_WIDTH);
+            }
             if (leeActive && farHeights != null) {
                 GL20.glUniform2f(cameraFromLeeAnchorUniform, (float) (camera.x - SnowLeeMap.publishedAnchorX()),
                         (float) (camera.z - SnowLeeMap.publishedAnchorZ()));
@@ -678,10 +706,8 @@ public final class SnowfallRenderer {
                 GL20.glUniform2f(leeWindDirectionUniform, (float) SnowLeeMap.publishedDirX(),
                         (float) SnowLeeMap.publishedDirZ());
                 GL20.glUniform1f(leeFallSpeedUniform,
-                        (float) SnowLee.leeFallSpeed(SnowLeeMap.publishedSlope(), wind.speed()));
+                        (float) SnowLee.leeFallSpeed(SnowLeeMap.publishedSlope(), flakeWindSpeed));
                 GL20.glUniform1f(leeBandUniform, (float) SkySetting.SNOW_LEE_BAND.get());
-                GL20.glUniform2i(farHeightsMinUniform, farHeights.originChunkX() * CHUNK_WIDTH,
-                        farHeights.originChunkZ() * CHUNK_WIDTH);
             }
         }
     }
@@ -726,6 +752,8 @@ public final class SnowfallRenderer {
         private int splatPassUniform;
         private int splatSecondsUniform;
         private int hasLeeMapUniform;
+        private int hasCavityMapUniform;
+        private int cavityMinUniform;
         private int cameraFromLeeAnchorUniform;
         private int cameraFromSmoothMinUniform;
         private int leeWindDirectionUniform;
@@ -760,6 +788,7 @@ public final class SnowfallRenderer {
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "leeMap"), LEE_MAP_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "noLeavesHeights"), NO_LEAVES_HEIGHT_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "smoothHeights"), SMOOTH_HEIGHT_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "cavityMap"), CAVITY_MAP_UNIT);
                 GL20.glUniform3i(GL20.glGetUniformLocation(programId, "shareLayout"), FogShareVolume.SIDE,
                         FogShareVolume.ORIGIN, FogShareVolume.TILES_ACROSS);
                 GL20.glUniform1f(GL20.glGetUniformLocation(programId, "boxFadeWidth"), BOX_FADE_WIDTH);
@@ -792,6 +821,8 @@ public final class SnowfallRenderer {
                 splatPassUniform = GL20.glGetUniformLocation(programId, "splatPass");
                 splatSecondsUniform = GL20.glGetUniformLocation(programId, "splatSeconds");
                 hasLeeMapUniform = GL20.glGetUniformLocation(programId, "hasLeeMap");
+                hasCavityMapUniform = GL20.glGetUniformLocation(programId, "hasCavityMap");
+                cavityMinUniform = GL20.glGetUniformLocation(programId, "cavityMin");
                 cameraFromLeeAnchorUniform = GL20.glGetUniformLocation(programId, "cameraFromLeeAnchor");
                 cameraFromSmoothMinUniform = GL20.glGetUniformLocation(programId, "cameraFromSmoothMin");
                 leeWindDirectionUniform = GL20.glGetUniformLocation(programId, "leeWindDirection");
@@ -816,7 +847,8 @@ public final class SnowfallRenderer {
          */
         private void setUniforms(RenderTarget mainTarget, Vec3 camera, double boxSide, double flakeSize,
                 double drawnCount, float pixelsPerBlock, boolean hasShareVolume, double splatSeconds,
-                @Nullable FarHeights farHeights, boolean leeActive) {
+                @Nullable FarHeights farHeights, boolean leeActive, boolean cavityActive, double windDirection,
+                double flakeWindSpeed, double flakeFallSpeed) {
             GL20.glUniform1f(splatSecondsUniform, (float) splatSeconds);
             viewProjection.get(matrixBuffer);
             GL20.glUniformMatrix4fv(viewProjectionUniform, false, matrixBuffer);
@@ -836,10 +868,9 @@ public final class SnowfallRenderer {
             GL20.glUniform1f(drawnCountUniform, (float) drawnCount);
             GL20.glUniform1f(flakeSizeUniform, (float) flakeSize);
             GL20.glUniform1f(flutterRadiusUniform, (float) SkySetting.SNOW_FLUTTER.get());
-            WeatherWind wind = WeatherFogRenderer.wind();
-            GL20.glUniform2f(windVelocityUniform, (float) (wind.speed() * Math.cos(wind.direction())),
-                    (float) (wind.speed() * Math.sin(wind.direction())));
-            GL20.glUniform1f(fallSpeedUniform, (float) SkySetting.SNOW_FALL_SPEED.get());
+            GL20.glUniform2f(windVelocityUniform, (float) (flakeWindSpeed * Math.cos(windDirection)),
+                    (float) (flakeWindSpeed * Math.sin(windDirection)));
+            GL20.glUniform1f(fallSpeedUniform, (float) flakeFallSpeed);
             GL20.glUniform1f(shutterSecondsUniform, (float) SkySetting.SNOW_STREAK_SECONDS.get());
             GL20.glUniform1f(flakeBrightnessUniform, (float) SkySetting.SNOW_FLAKE_BRIGHTNESS.get());
             GL20.glUniform3f(snowColorUniform, WeatherFogRenderer.snowColor(0), WeatherFogRenderer.snowColor(1),
@@ -857,6 +888,14 @@ public final class SnowfallRenderer {
             GL20.glUniform1f(rangeDistanceUniform, (float) WeatherFogRenderer.froxelRangeDistance());
             GL20.glUniform1i(divisorUniform, WeatherFogRenderer.froxelDivisor());
             GL20.glUniform1i(hasLeeMapUniform, leeActive ? 1 : 0);
+            GL20.glUniform1i(hasCavityMapUniform, cavityActive ? 1 : 0);
+            if (cavityActive) {
+                GL20.glUniform2i(cavityMinUniform, FogCavityMap.publishedMinX(), FogCavityMap.publishedMinZ());
+            }
+            if ((leeActive || cavityActive) && farHeights != null) {
+                GL20.glUniform2i(farHeightsMinUniform, farHeights.originChunkX() * CHUNK_WIDTH,
+                        farHeights.originChunkZ() * CHUNK_WIDTH);
+            }
             if (leeActive && farHeights != null) {
                 GL20.glUniform2f(cameraFromLeeAnchorUniform, (float) (camera.x - SnowLeeMap.publishedAnchorX()),
                         (float) (camera.z - SnowLeeMap.publishedAnchorZ()));
@@ -865,10 +904,8 @@ public final class SnowfallRenderer {
                 GL20.glUniform2f(leeWindDirectionUniform, (float) SnowLeeMap.publishedDirX(),
                         (float) SnowLeeMap.publishedDirZ());
                 GL20.glUniform1f(leeFallSpeedUniform,
-                        (float) SnowLee.leeFallSpeed(SnowLeeMap.publishedSlope(), wind.speed()));
+                        (float) SnowLee.leeFallSpeed(SnowLeeMap.publishedSlope(), flakeWindSpeed));
                 GL20.glUniform1f(leeBandUniform, (float) SkySetting.SNOW_LEE_BAND.get());
-                GL20.glUniform2i(farHeightsMinUniform, farHeights.originChunkX() * CHUNK_WIDTH,
-                        farHeights.originChunkZ() * CHUNK_WIDTH);
             }
         }
     }

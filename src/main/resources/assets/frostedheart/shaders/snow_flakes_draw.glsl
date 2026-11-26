@@ -264,17 +264,23 @@ void main() {
     float nearWeight = smoothstep(SNOW_NEAR_FADE_START, SNOW_NEAR_FADE_END, distance);
     float leeHeight = SNOW_LEE_NO_HEIGHT;
     float terrainSlope = 0.0;
-    float columnHeight = SNOW_LEE_NO_HEIGHT;
+    float columnHeight = (hasLeeMap != 0 || hasCavityMap != 0)
+            ? snowLeeColumnHeight(center, cameraBlock, cameraFraction) : SNOW_LEE_NO_HEIGHT;
     float smoothHeight = SNOW_LEE_NO_HEIGHT;
     float worldY = float(cameraBlock.y) + cameraFraction.y + center.y;
+    float cavityOpen = 1.0;
+    if (hasCavityMap != 0) {
+        vec2 cavity = snowCavitySampleAt(center, cameraBlock, cameraFraction);
+        cavityOpen = snowCavityOpenFactor(worldY, cavity.x, cavity.y, columnHeight);
+    }
+    float windScale = snowCavityWindScale(cavityOpen);
     float leeWeight = 1.0;
     if (hasLeeMap != 0) {
         vec2 leeSample = snowLeeSampleAt(center);
         leeHeight = leeSample.x;
         terrainSlope = leeSample.y;
-        columnHeight = snowLeeColumnHeight(center, cameraBlock, cameraFraction);
         smoothHeight = snowSmoothHeightAt(center);
-        leeWeight = snowLeeWeightAt(flake, worldY, leeHeight, columnHeight, smoothHeight);
+        leeWeight = snowLeeWeightAt(flake, worldY, leeHeight, columnHeight, smoothHeight, cavityOpen);
     }
     float weight = countWeight * boxWeight * shelterWeight * leeWeight * nearWeight;
     if (!(weight > SNOW_LEAST_ALPHA)) {
@@ -283,11 +289,12 @@ void main() {
     }
 
     float ownFall = fallSpeed * snowFlakeFallShare(flake);
+    vec2 localWind = windVelocity * windScale;
     float verticalVelocity = hasLeeMap != 0
             ? snowLeeVerticalVelocityAt(worldY, leeHeight, columnHeight, smoothHeight, terrainSlope, ownFall,
-                    length(windVelocity))
+                    length(localWind), leeFallSpeed * windScale)
             : -ownFall;
-    vec3 velocity = vec3(windVelocity.x, verticalVelocity, windVelocity.y)
+    vec3 velocity = vec3(localWind.x, verticalVelocity, localWind.y)
             + vec3(-sin(phase), 0.0, cos(phase)) * (circleRadius * flutterRate);
 
     vec3 halfStreak = 0.5 * shutterSeconds * velocity;

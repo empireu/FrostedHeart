@@ -40,12 +40,15 @@ import org.slf4j.Logger;
 
 import javax.annotation.Nullable;
 import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
 import java.util.Locale;
 
 /**
- * Builds and publishes the wind-direction-free fog cavity enclosure map (512 by 512 R32F) on the GPU, one pass per
- * frame over 12 passes while the fog walk keeps reading the published map untouched. Rebuilds only when the FarHeights
- * window moves or its no-leaves heights change, never when the wind turns or changes speed.
+ * Builds and publishes the wind-direction-free flat fog cavity enclosure map (512 by 512 RG32F holding flat enclosure
+ * surface h_cav in R and lower opposing rim height in G) on the GPU, one pass per frame over 12 passes while the fog
+ * walk and snowfall keep reading the published map untouched. Intermediate passes track sloped walls in RGBA32F and
+ * raw wall heights in RGBA16F via MRT. Rebuilds only when the FarHeights window moves or its no-leaves heights change,
+ * never when the wind turns or changes speed.
  * Render thread only.
  */
 @OnlyIn(Dist.CLIENT)
@@ -61,11 +64,15 @@ final class FogCavityMap {
     private static final int SOURCE_UNIT = 0;
     private static final int HEIGHTS_UNIT = 1;
     private static final int CARDINAL_UNIT = 2;
+    private static final int RAW_SOURCE_UNIT = 3;
 
     private static final int[] workTextures = new int[WORK_COUNT];
+    private static final int[] workRawTextures = new int[WORK_COUNT];
     private static final int[] workFramebuffers = new int[WORK_COUNT];
     private static final int[] publishedTextures = new int[PUBLISHED_COUNT];
     private static final int[] publishedFramebuffers = new int[PUBLISHED_COUNT];
+    private static final IntBuffer workDrawBuffers = BufferUtils.createIntBuffer(2);
+    private static final IntBuffer singleDrawBuffers = BufferUtils.createIntBuffer(2);
     private static int cardinalTexture;
     private static int cardinalFramebuffer;
 
@@ -273,28 +280,38 @@ final class FogCavityMap {
     private static void runOnePass(int noLeavesHeightTexture) {
         int targetFramebuffer;
         int sourceTex = 0;
+        int sourceRawTex = 0;
         int stride = 0;
+        boolean writesWorkPair = false;
         int cardinalFinalPass = FogCavity.DIAGONAL_FIRST_PASS - 1;
         int diagonalFinalPass = FogCavity.TOTAL_PASSES - 1;
         if (nextPass == 0) {
             targetFramebuffer = workFramebuffers[0];
+            writesWorkPair = true;
         } else if (nextPass < cardinalFinalPass) {
             targetFramebuffer = workFramebuffers[workTargetSlot];
             sourceTex = workTextures[workSourceSlot];
+            sourceRawTex = workRawTextures[workSourceSlot];
             stride = FogCavity.cardinalStride(nextPass);
+            writesWorkPair = true;
         } else if (nextPass == cardinalFinalPass) {
             targetFramebuffer = cardinalFramebuffer;
             sourceTex = workTextures[workSourceSlot];
+            sourceRawTex = workRawTextures[workSourceSlot];
             stride = FogCavity.cardinalStride(nextPass);
         } else if (nextPass == FogCavity.DIAGONAL_FIRST_PASS) {
             targetFramebuffer = workFramebuffers[0];
+            writesWorkPair = true;
         } else if (nextPass < diagonalFinalPass) {
             targetFramebuffer = workFramebuffers[workTargetSlot];
             sourceTex = workTextures[workSourceSlot];
+            sourceRawTex = workRawTextures[workSourceSlot];
             stride = FogCavity.diagonalStride(nextPass - FogCavity.DIAGONAL_FIRST_PASS);
+            writesWorkPair = true;
         } else {
             targetFramebuffer = publishedFramebuffers[backSlot];
             sourceTex = workTextures[workSourceSlot];
+            sourceRawTex = workRawTextures[workSourceSlot];
             stride = FogCavity.diagonalStride(nextPass - FogCavity.DIAGONAL_FIRST_PASS);
         }
 
@@ -308,7 +325,14 @@ final class FogCavityMap {
         RenderSystem.bindTexture(noLeavesHeightTexture);
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + CARDINAL_UNIT);
         RenderSystem.bindTexture(nextPass == diagonalFinalPass ? cardinalTexture : 0);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + RAW_SOURCE_UNIT);
+        RenderSystem.bindTexture(sourceRawTex);
         buildProgram.use();
+        if (writesWorkPair) {
+            buildProgram.setWorkDrawBuffers();
+        } else {
+            buildProgram.setSingleDrawBuffers();
+        }
         buildProgram.setUniforms(nextPass, stride, buildMinX, buildMinZ, buildFarHeightsMinX, buildFarHeightsMinZ);
         SkyGlPass.drawFullScreenQuad();
     }
@@ -318,6 +342,7 @@ final class FogCavityMap {
             return true;
         }
         int[] createdWorkTextures = new int[WORK_COUNT];
+        int[] createdWorkRawTextures = new int[WORK_COUNT];
         int[] createdWorkFramebuffers = new int[WORK_COUNT];
         int[] createdPublishedTextures = new int[PUBLISHED_COUNT];
         int[] createdPublishedFramebuffers = new int[PUBLISHED_COUNT];
@@ -329,17 +354,20 @@ final class FogCavityMap {
         try {
             for (int slot = 0; slot < WORK_COUNT; slot++) {
                 createdWorkTextures[slot] = createFloatTexture(GL30.GL_RGBA32F, GL11.GL_RGBA);
-                createdWorkFramebuffers[slot] = createTargetFramebuffer(createdWorkTextures[slot], "fog cavity work");
+                createdWorkRawTextures[slot] = createFloatTexture(GL30.GL_RGBA16F, GL11.GL_RGBA);
+                createdWorkFramebuffers[slot] = createPairFramebuffer(createdWorkTextures[slot],
+                        createdWorkRawTextures[slot], "fog cavity work");
             }
             for (int slot = 0; slot < PUBLISHED_COUNT; slot++) {
-                createdPublishedTextures[slot] = createFloatTexture(GL30.GL_R32F, GL11.GL_RED);
+                createdPublishedTextures[slot] = createFloatTexture(GL30.GL_RG32F, GL30.GL_RG);
                 createdPublishedFramebuffers[slot] = createTargetFramebuffer(createdPublishedTextures[slot],
                         "fog cavity");
             }
-            createdCardinalTexture = createFloatTexture(GL30.GL_R32F, GL11.GL_RED);
+            createdCardinalTexture = createFloatTexture(GL30.GL_RG32F, GL30.GL_RG);
             createdCardinalFramebuffer = createTargetFramebuffer(createdCardinalTexture, "fog cavity cardinal");
         } catch (RuntimeException exception) {
             deleteTargets(createdWorkTextures, createdWorkFramebuffers);
+            deleteTexturesOnly(createdWorkRawTextures);
             deleteTargets(createdPublishedTextures, createdPublishedFramebuffers);
             if (createdCardinalTexture != 0) {
                 GL11.glDeleteTextures(createdCardinalTexture);
@@ -357,6 +385,7 @@ final class FogCavityMap {
             GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, previousReadFramebuffer);
         }
         System.arraycopy(createdWorkTextures, 0, workTextures, 0, WORK_COUNT);
+        System.arraycopy(createdWorkRawTextures, 0, workRawTextures, 0, WORK_COUNT);
         System.arraycopy(createdWorkFramebuffers, 0, workFramebuffers, 0, WORK_COUNT);
         System.arraycopy(createdPublishedTextures, 0, publishedTextures, 0, PUBLISHED_COUNT);
         System.arraycopy(createdPublishedFramebuffers, 0, publishedFramebuffers, 0, PUBLISHED_COUNT);
@@ -395,6 +424,21 @@ final class FogCavityMap {
         return framebuffer;
     }
 
+    private static int createPairFramebuffer(int slopedTexture, int rawTexture, String label) {
+        int framebuffer = GL30.glGenFramebuffers();
+        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, framebuffer);
+        GL30.glFramebufferTexture2D(GL30.GL_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, GL11.GL_TEXTURE_2D,
+                slopedTexture, 0);
+        GL30.glFramebufferTexture2D(GL30.GL_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT1, GL11.GL_TEXTURE_2D,
+                rawTexture, 0);
+        int status = GL30.glCheckFramebufferStatus(GL30.GL_FRAMEBUFFER);
+        if (status != GL30.GL_FRAMEBUFFER_COMPLETE) {
+            GL30.glDeleteFramebuffers(framebuffer);
+            throw new IllegalStateException("The " + label + " framebuffer is incomplete with status " + status);
+        }
+        return framebuffer;
+    }
+
     private static void deleteTargets(int[] targetTextures, int[] targetFramebuffers) {
         for (int slot = 0; slot < targetTextures.length; slot++) {
             if (targetTextures[slot] != 0) {
@@ -402,6 +446,14 @@ final class FogCavityMap {
             }
             if (targetFramebuffers[slot] != 0) {
                 GL30.glDeleteFramebuffers(targetFramebuffers[slot]);
+            }
+        }
+    }
+
+    private static void deleteTexturesOnly(int[] targetTextures) {
+        for (int slot = 0; slot < targetTextures.length; slot++) {
+            if (targetTextures[slot] != 0) {
+                GL11.glDeleteTextures(targetTextures[slot]);
             }
         }
     }
@@ -415,6 +467,8 @@ final class FogCavityMap {
         private int strideUniform;
         private int cavityMinUniform;
         private int farHeightsMinUniform;
+        private int slopedOutput;
+        private int rawOutput;
 
         private void use() {
             Shader newFragment = FHShaders.getFogCavityBuild();
@@ -424,17 +478,30 @@ final class FogCavityMap {
                     program = null;
                 }
                 ShaderProgram created = new ShaderProgram();
+                int createdSlopedOutput;
+                int createdRawOutput;
                 try {
                     created.attach(FHShaders.IMAGE_V).attach(newFragment);
+                    created.linkProgram();
+                    createdSlopedOutput = GL30.glGetFragDataLocation(created.programId, "outSloped");
+                    createdRawOutput = GL30.glGetFragDataLocation(created.programId, "outRaw");
+                    if (createdSlopedOutput < 0 || createdSlopedOutput > 1 || createdRawOutput < 0
+                            || createdRawOutput > 1 || createdSlopedOutput == createdRawOutput) {
+                        throw new IllegalStateException("The fog cavity build writes its outputs to locations "
+                                + createdSlopedOutput + " and " + createdRawOutput + " instead of 0 and 1");
+                    }
                 } catch (RuntimeException exception) {
                     created.delete();
                     throw exception;
                 }
                 program = created;
                 fragment = newFragment;
+                slopedOutput = createdSlopedOutput;
+                rawOutput = createdRawOutput;
                 program.use();
                 int programId = program.programId;
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "sourceMap"), SOURCE_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "sourceRawMap"), RAW_SOURCE_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "noLeavesHeights"), HEIGHTS_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "cardinalMap"), CARDINAL_UNIT);
                 passIndexUniform = GL20.glGetUniformLocation(programId, "passIndex");
@@ -443,6 +510,20 @@ final class FogCavityMap {
                 farHeightsMinUniform = GL20.glGetUniformLocation(programId, "farHeightsMin");
             }
             program.use();
+        }
+
+        private void setWorkDrawBuffers() {
+            workDrawBuffers.clear();
+            workDrawBuffers.put(slopedOutput, GL30.GL_COLOR_ATTACHMENT0);
+            workDrawBuffers.put(rawOutput, GL30.GL_COLOR_ATTACHMENT1);
+            GL20.glDrawBuffers(workDrawBuffers);
+        }
+
+        private void setSingleDrawBuffers() {
+            singleDrawBuffers.clear();
+            singleDrawBuffers.put(slopedOutput, GL30.GL_COLOR_ATTACHMENT0);
+            singleDrawBuffers.put(rawOutput, GL11.GL_NONE);
+            GL20.glDrawBuffers(singleDrawBuffers);
         }
 
         private void setUniforms(int passIndex, int stride, int minX, int minZ, int farHeightsMinX,

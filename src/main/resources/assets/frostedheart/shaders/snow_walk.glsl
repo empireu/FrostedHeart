@@ -59,12 +59,14 @@ uniform vec3 structureEye;
 uniform vec3 structureAlong;
 uniform vec3 structureUp;
 uniform vec3 structureAcross;
-// The cavity enclosure map (512 by 512 R32F), whether cavity thinning is active, its lowest world corner, the
-// effective floor density share (1 when calm or off), and the decay length in blocks below the enclosure surface:
+// The cavity enclosure map (512 by 512 RG32F), whether cavity thinning is active, its lowest world corner, the
+// effective floor density share (1 when calm or off), the wind ramp factor in [0, 1] for wisp damping, and the decay
+// length in blocks below the enclosure surface:
 uniform sampler2D cavityMap;
 uniform int hasCavityMap;
 uniform ivec2 cavityMin;
 uniform float cavityFloor;
+uniform float cavityWindFactor;
 uniform float cavityDecayLength;
 
 // The side in blocks of the world-aligned cells that the far stretch of a piece is walked in, and the most cells that
@@ -152,25 +154,29 @@ float snowWalkHeightShare(ivec3 cell) {
     return float(eyeBlock.y + cell.y) >= float(snowWalkColumnHeight(cell.x, cell.z)) ? 1.0 : 0.0;
 }
 
-// The fog density multiplier in [cavityFloor, 1.0] inside a deep open-sky cavity at world position (worldX, worldY,
-// worldZ), as FogCavity.cavityFactor. Does not affect shareVolume or falling snow:
-float snowWalkCavityFactor(int worldX, float worldY, int worldZ) {
+// The fog density multiplier (x, in [cavityFloor, 1.0]) and structure wisp contrast multiplier (y, in [0.0, 1.0])
+// inside a deep open-sky cavity at world position (worldX, worldY, worldZ), as FogCavity.cavityFactor and
+// FogCavity.wispFactor. Does not affect shareVolume:
+vec2 snowWalkCavityFactors(int worldX, float worldY, int worldZ) {
     if (hasCavityMap == 0 || !(cavityFloor < 1.0)) {
-        return 1.0;
+        return vec2(1.0);
     }
     ivec2 local = ivec2(worldX, worldZ) - cavityMin;
     if (local.x < 0 || local.x >= FOG_CAVITY_MAP_SIZE || local.y < 0 || local.y >= FOG_CAVITY_MAP_SIZE) {
-        return 1.0;
+        return vec2(1.0);
     }
     float cavityHeight = texelFetch(cavityMap, local, 0).r;
     if (!(cavityHeight > FOG_CAVITY_NO_HEIGHT_THRESHOLD)) {
-        return 1.0;
+        return vec2(1.0);
     }
     float depth = cavityHeight - worldY;
     if (!(depth > 0.0)) {
-        return 1.0;
+        return vec2(1.0);
     }
-    return cavityFloor + (1.0 - cavityFloor) * exp(-depth / cavityDecayLength);
+    float openFactor = exp(-depth / cavityDecayLength);
+    float densityFactor = cavityFloor + (1.0 - cavityFloor) * openFactor;
+    float wispFactor = 1.0 - cavityWindFactor * (1.0 - openFactor);
+    return vec2(densityFactor, wispFactor);
 }
 
 // The share of a far cell of SNOW_WALK_FAR_CELL blocks, which is the height share of the 1-block cell that holds its
@@ -276,13 +282,17 @@ float snowWalkNearCells(vec3 unit, float startDistance, float endDistance, int m
         float share = snowWalkCellShare(cell);
         float partDepth = max(0.0, exitDepth - enterDepth);
         if (share > 0.0) {
+            float wispFactor = 1.0;
             if (hasCavityMap != 0) {
-                partDepth *= snowWalkCavityFactor(eyeBlock.x + cell.x, float(eyeBlock.y + cell.y) + 0.5,
+                vec2 cavity = snowWalkCavityFactors(eyeBlock.x + cell.x, float(eyeBlock.y + cell.y) + 0.5,
                         eyeBlock.z + cell.z);
+                partDepth *= cavity.x;
+                wispFactor = cavity.y;
             }
             if (structureOn) {
                 float middle = (enter + exit) * 0.5;
-                partDepth *= snowWalkStructureDensity(middle * unit);
+                float structureDensity = snowWalkStructureDensity(middle * unit);
+                partDepth *= 1.0 + wispFactor * (structureDensity - 1.0);
             }
         }
         depth += share * partDepth;
@@ -368,13 +378,17 @@ float snowWalkFarCells(vec3 unit, float startDistance, float endDistance, int ma
         float share = snowWalkHeightShare(columnCell);
         if (share > 0.0) {
             float partDepth = max(0.0, exitDepth - enterDepth);
+            float wispFactor = 1.0;
             if (hasCavityMap != 0) {
-                partDepth *= snowWalkCavityFactor(eyeBlock.x + columnCell.x, float(eyeBlock.y + columnCell.y),
+                vec2 cavity = snowWalkCavityFactors(eyeBlock.x + columnCell.x, float(eyeBlock.y + columnCell.y),
                         eyeBlock.z + columnCell.z);
+                partDepth *= cavity.x;
+                wispFactor = cavity.y;
             }
             if (structureOn) {
                 float middle = (enter + exit) * 0.5;
-                partDepth *= snowWalkStructureDensity(middle * unit);
+                float structureDensity = snowWalkStructureDensity(middle * unit);
+                partDepth *= 1.0 + wispFactor * (structureDensity - 1.0);
             }
             depth += share * partDepth;
         }

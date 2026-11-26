@@ -126,28 +126,128 @@ int snowHitFace(vec3 passed, vec3 inside, uint flake, out vec3 hitPoint) {
     return direction.z > 0.0 ? 2 : 3;
 }
 
-// Places a flake leaving the camera's box onto a flux-weighted inflow face using the relative horizontal motion and the
-// relative vertical motions at the box's top and bottom faces, as SnowLee.reenterBoxOffset:
-vec3 snowReenterBoxOffset(uint flake, uint counter, float relStepX, float relStepTopY, float relStepBottomY,
-        float relStepZ, float side) {
+// Exact integral of (windStep * s(y) - cameraStep) over [a, b] below brakeHeight, as SnowLee.sideBelowIntegral:
+float snowSideBelowIntegral(float a, float b, float windStep, float cameraStep, float brakeHeight) {
+    float span = b - a;
+    if (!(span > 0.0)) {
+        return 0.0;
+    }
+    float expB = exp(-(brakeHeight - b) / SNOW_CAVITY_WIND_DECAY);
+    float expA = exp(-(brakeHeight - a) / SNOW_CAVITY_WIND_DECAY);
+    return (windStep * SNOW_CAVITY_WIND_FLOOR - cameraStep) * span
+            + windStep * (1.0 - SNOW_CAVITY_WIND_FLOOR) * SNOW_CAVITY_WIND_DECAY * (expB - expA);
+}
+
+// Root in (yMin, yMid) where windStep * s(y) - cameraStep crosses 0, or yMid when sign stays constant:
+float snowSideSignSplit(float yMin, float yMid, float windStep, float cameraStep, float brakeHeight) {
+    if (!(abs(windStep) > 1.0e-9)) {
+        return yMid;
+    }
+    float targetScale = cameraStep / windStep;
+    float minScale = snowBrakeWindScaleAt(yMin, brakeHeight);
+    float midScale = snowBrakeWindScaleAt(yMid, brakeHeight);
+    if (targetScale > minScale && targetScale < midScale && targetScale > SNOW_CAVITY_WIND_FLOOR
+            && targetScale < 1.0) {
+        float root = brakeHeight + SNOW_CAVITY_WIND_DECAY
+                * log((targetScale - SNOW_CAVITY_WIND_FLOOR) / (1.0 - SNOW_CAVITY_WIND_FLOOR));
+        return clamp(root, yMin, yMid);
+    }
+    return yMid;
+}
+
+float snowSideFluxArea(float yMin, float yMax, float windStep, float cameraStep, float brakeHeight) {
+    float yMid = min(yMax, brakeHeight);
+    float split = snowSideSignSplit(yMin, yMid, windStep, cameraStep, brakeHeight);
+    float areaBelow1 = abs(snowSideBelowIntegral(yMin, split, windStep, cameraStep, brakeHeight));
+    float areaBelow2 = abs(snowSideBelowIntegral(split, yMid, windStep, cameraStep, brakeHeight));
+    float areaAbove = abs(windStep - cameraStep) * max(0.0, yMax - yMid);
+    return areaBelow1 + areaBelow2 + areaAbove;
+}
+
+float snowSolveSideBelowHeight(float a, float b, float targetArea, float windStep, float cameraStep,
+        float brakeHeight) {
+    float lo = a;
+    float hi = b;
+    float y = 0.5 * (lo + hi);
+    for (int iter = 0; iter < 8; iter++) {
+        float fVal = abs(snowSideBelowIntegral(a, y, windStep, cameraStep, brakeHeight)) - targetArea;
+        if (fVal < 0.0) {
+            lo = y;
+        } else {
+            hi = y;
+        }
+        float deriv = abs(windStep * snowBrakeWindScaleAt(y, brakeHeight) - cameraStep);
+        float next = deriv > 1.0e-7 ? y - fVal / deriv : 0.5 * (lo + hi);
+        if (!(next > lo && next < hi)) {
+            next = 0.5 * (lo + hi);
+        }
+        y = next;
+    }
+    return y;
+}
+
+float snowSampleSideHeight(float yMin, float yMax, float windStep, float cameraStep, float brakeHeight, float unit) {
+    float yMid = min(yMax, brakeHeight);
+    float split = snowSideSignSplit(yMin, yMid, windStep, cameraStep, brakeHeight);
+    float areaBelow1 = abs(snowSideBelowIntegral(yMin, split, windStep, cameraStep, brakeHeight));
+    float areaBelow2 = abs(snowSideBelowIntegral(split, yMid, windStep, cameraStep, brakeHeight));
+    float areaAbove = abs(windStep - cameraStep) * max(0.0, yMax - yMid);
+    float totalArea = areaBelow1 + areaBelow2 + areaAbove;
+    if (!(totalArea > 0.0)) {
+        return yMin + unit * (yMax - yMin);
+    }
+    float target = unit * totalArea;
+    if (target < areaBelow1) {
+        return snowSolveSideBelowHeight(yMin, split, target, windStep, cameraStep, brakeHeight);
+    }
+    if (target < areaBelow1 + areaBelow2) {
+        return snowSolveSideBelowHeight(split, yMid, target - areaBelow1, windStep, cameraStep, brakeHeight);
+    }
+    if (areaAbove > 0.0) {
+        float share = clamp((target - areaBelow1 - areaBelow2) / areaAbove, 0.0, 1.0);
+        return yMid + share * (yMax - yMid);
+    }
+    return yMid;
+}
+
+// Places a flake leaving the camera's box onto a flux-weighted inflow face using the height-profiled horizontal wind
+// (full wind above centerBrakeHeight, braked below it) and top/bottom vertical motions, as SnowLee.reenterBoxOffset:
+vec3 snowReenterBoxOffset(uint flake, uint counter, float windStepX, float cameraStepX, float relStepTopY,
+        float relStepBottomY, float windStepZ, float cameraStepZ, float cameraWorldY, float centerBrakeHeight,
+        float side) {
     uint reseed = snowHash(flake ^ (counter * 0x9e3779b9u));
     float pickUnit = (float(snowHash(reseed + 1u) >> 8) + 0.5) * (1.0 / 16777216.0);
     float depthUnit = (float(snowHash(reseed + 2u) >> 8) + 0.5) * (1.0 / 16777216.0);
     float firstUnit = (float(snowHash(reseed + 3u) >> 8) + 0.5) * (1.0 / 16777216.0);
     float secondUnit = (float(snowHash(reseed + 4u) >> 8) + 0.5) * (1.0 / 16777216.0);
-    float fluxX = abs(relStepX);
+    float halfSide = 0.5 * side;
+    float yMin = cameraWorldY - halfSide;
+    float yMax = cameraWorldY + halfSide;
+    bool profiled = centerBrakeHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD && centerBrakeHeight > yMin;
+    float fluxX = profiled
+            ? snowSideFluxArea(yMin, yMax, windStepX, cameraStepX, centerBrakeHeight) / side
+            : abs(windStepX - cameraStepX);
     float fluxTop = max(0.0, -relStepTopY);
     float fluxBottom = max(0.0, relStepBottomY);
-    float fluxZ = abs(relStepZ);
+    float fluxZ = profiled
+            ? snowSideFluxArea(yMin, yMax, windStepZ, cameraStepZ, centerBrakeHeight) / side
+            : abs(windStepZ - cameraStepZ);
     float totalFlux = fluxX + fluxTop + fluxBottom + fluxZ;
-    float halfSide = 0.5 * side;
     if (!(totalFlux > 1.0e-6) || max(max(fluxX, fluxZ), max(fluxTop, fluxBottom)) >= side) {
         return (vec3(depthUnit, firstUnit, secondUnit) - vec3(0.5)) * side;
     }
     float pick = pickUnit * totalFlux;
     if (pick < fluxX) {
-        float x = (relStepX > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * fluxX);
-        return vec3(x, (firstUnit - 0.5) * side, (secondUnit - 0.5) * side);
+        if (!profiled) {
+            float relStepX = windStepX - cameraStepX;
+            float x = (relStepX > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * fluxX);
+            return vec3(x, (firstUnit - 0.5) * side, (secondUnit - 0.5) * side);
+        }
+        float worldY = snowSampleSideHeight(yMin, yMax, windStepX, cameraStepX, centerBrakeHeight, firstUnit);
+        float localStep = windStepX * snowBrakeWindScaleAt(worldY, centerBrakeHeight) - cameraStepX;
+        float clampedStep = min(abs(localStep), side);
+        float x = (localStep > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * clampedStep);
+        return vec3(x, clamp(worldY - cameraWorldY, -halfSide, halfSide), (secondUnit - 0.5) * side);
     }
     if (pick < fluxX + fluxTop) {
         return vec3((firstUnit - 0.5) * side, halfSide - depthUnit * fluxTop, (secondUnit - 0.5) * side);
@@ -155,8 +255,16 @@ vec3 snowReenterBoxOffset(uint flake, uint counter, float relStepX, float relSte
     if (pick < fluxX + fluxTop + fluxBottom) {
         return vec3((firstUnit - 0.5) * side, -halfSide + depthUnit * fluxBottom, (secondUnit - 0.5) * side);
     }
-    float z = (relStepZ > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * fluxZ);
-    return vec3((firstUnit - 0.5) * side, (secondUnit - 0.5) * side, z);
+    if (!profiled) {
+        float relStepZ = windStepZ - cameraStepZ;
+        float z = (relStepZ > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * fluxZ);
+        return vec3((firstUnit - 0.5) * side, (secondUnit - 0.5) * side, z);
+    }
+    float worldY = snowSampleSideHeight(yMin, yMax, windStepZ, cameraStepZ, centerBrakeHeight, secondUnit);
+    float localStep = windStepZ * snowBrakeWindScaleAt(worldY, centerBrakeHeight) - cameraStepZ;
+    float clampedStep = min(abs(localStep), side);
+    float z = (localStep > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * clampedStep);
+    return vec3((firstUnit - 0.5) * side, clamp(worldY - cameraWorldY, -halfSide, halfSide), z);
 }
 
 void main() {
@@ -186,32 +294,65 @@ void main() {
     vec3 pathStart = snowNearestOffset(state.xyz - previousCameraInBox, boxSide) - cameraStep;
     float ownFall = fallSpeed * snowFlakeFallShare(flake);
     float windSpeed = length(windVelocity);
-    float verticalVelocity = stopped ? -ownFall
-            : snowLeeVerticalVelocity(pathStart + snowFlutterOffset(phase, circleRadius), ownFall, windSpeed,
-                    cameraBlock, cameraFraction);
-    vec3 velocity = vec3(windVelocity.x, verticalVelocity, windVelocity.y);
+    float cameraWorldY = float(cameraBlock.y) + cameraFraction.y;
+    float halfSide = 0.5 * boxSide;
+    float centerColumn = (hasLeeMap != 0 || hasCavityMap != 0)
+            ? snowLeeColumnHeight(vec3(0.0), cameraBlock, cameraFraction) : SNOW_LEE_NO_HEIGHT;
+    vec2 centerCavity = hasCavityMap != 0
+            ? snowCavitySampleAt(vec3(0.0), cameraBlock, cameraFraction) : vec2(SNOW_LEE_NO_HEIGHT);
+    float centerBrakeHeight = hasCavityMap != 0
+            ? snowCavityBrakeHeight(centerCavity.x, centerCavity.y, centerColumn) : SNOW_LEE_NO_HEIGHT;
+    // Stopped flakes move with the wind of their own height under the center column's braking profile, so flakes
+    // stopped on roofs and rims above the brake height leave at full wind while flakes below it stay braked:
+    vec2 flakeWind = windVelocity * snowBrakeWindScaleAt(cameraWorldY + pathStart.y, centerBrakeHeight);
+    float verticalVelocity = -ownFall;
+    if (!stopped) {
+        vec3 samplePoint = pathStart + snowFlutterOffset(phase, circleRadius);
+        float sampleWorldY = cameraWorldY + samplePoint.y;
+        float sampleColumn = (hasLeeMap != 0 || hasCavityMap != 0)
+                ? snowLeeColumnHeight(samplePoint, cameraBlock, cameraFraction) : SNOW_LEE_NO_HEIGHT;
+        float windScale = 1.0;
+        if (hasCavityMap != 0) {
+            vec2 sampleCavity = snowCavitySampleAt(samplePoint, cameraBlock, cameraFraction);
+            windScale = snowCavityWindScale(
+                    snowCavityOpenFactor(sampleWorldY, sampleCavity.x, sampleCavity.y, sampleColumn));
+        }
+        flakeWind = windVelocity * windScale;
+        if (hasLeeMap != 0) {
+            vec2 leeSample = snowLeeSampleAt(samplePoint);
+            float sampleSmooth = snowSmoothHeightAt(samplePoint);
+            verticalVelocity = snowLeeVerticalVelocityAt(sampleWorldY, leeSample.x, sampleColumn, sampleSmooth,
+                    leeSample.y, ownFall, windSpeed * windScale, leeFallSpeed * windScale);
+        }
+    }
+    vec3 velocity = vec3(flakeWind.x, verticalVelocity, flakeWind.y);
     vec3 step = velocity * stepSeconds;
     float turn = snowFlakeFlutterRate(flake) * stepSeconds;
     vec3 position = snowWrap(state.xyz + step, boxSide);
     float nextPhase = mod(phase + turn, SNOW_TWO_PI);
     vec3 pathEnd = pathStart + step;
-    if (any(greaterThanEqual(abs(pathEnd), vec3(0.5 * boxSide)))) {
-        // The flake comes in as a new one; when terrain-following or lee sinking is active, re-enter on a
-        // flux-weighted inflow face using the box's top and bottom vertical velocities so slopes stay balanced:
-        if (hasLeeMap != 0) {
-            vec2 centerLee = snowLeeSampleAt(vec3(0.0));
-            float centerColumn = snowLeeColumnHeight(vec3(0.0), cameraBlock, cameraFraction);
-            float centerSmooth = snowSmoothHeightAt(vec3(0.0));
-            float cameraWorldY = float(cameraBlock.y) + cameraFraction.y;
-            float halfSide = 0.5 * boxSide;
-            float topVelocityY = snowLeeVerticalVelocityAt(cameraWorldY + halfSide, centerLee.x, centerColumn,
-                    centerSmooth, centerLee.y, ownFall, windSpeed);
-            float bottomVelocityY = snowLeeVerticalVelocityAt(cameraWorldY - halfSide, centerLee.x, centerColumn,
-                    centerSmooth, centerLee.y, ownFall, windSpeed);
+    if (any(greaterThanEqual(abs(pathEnd), vec3(halfSide)))) {
+        // The flake comes in as a new one; when terrain-following, lee sinking or cavity braking intersects the box,
+        // re-enter on a flux-weighted inflow face with height-profiled horizontal wind on the side faces:
+        bool cavityInBox = centerBrakeHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD && centerBrakeHeight > cameraWorldY - halfSide;
+        if (hasLeeMap != 0 || cavityInBox) {
+            float topVelocityY = -ownFall;
+            float bottomVelocityY = -ownFall;
+            if (hasLeeMap != 0) {
+                vec2 centerLee = snowLeeSampleAt(vec3(0.0));
+                float centerSmooth = snowSmoothHeightAt(vec3(0.0));
+                float topWindScale = snowBrakeWindScaleAt(cameraWorldY + halfSide, centerBrakeHeight);
+                float bottomWindScale = snowBrakeWindScaleAt(cameraWorldY - halfSide, centerBrakeHeight);
+                topVelocityY = snowLeeVerticalVelocityAt(cameraWorldY + halfSide, centerLee.x, centerColumn,
+                        centerSmooth, centerLee.y, ownFall, windSpeed * topWindScale, leeFallSpeed * topWindScale);
+                bottomVelocityY = snowLeeVerticalVelocityAt(cameraWorldY - halfSide, centerLee.x, centerColumn,
+                        centerSmooth, centerLee.y, ownFall, windSpeed * bottomWindScale,
+                        leeFallSpeed * bottomWindScale);
+            }
             vec3 entryOffset = snowReenterBoxOffset(flake, uint(frameCounter),
-                    windVelocity.x * stepSeconds - cameraStep.x, topVelocityY * stepSeconds - cameraStep.y,
-                    bottomVelocityY * stepSeconds - cameraStep.y, windVelocity.y * stepSeconds - cameraStep.z,
-                    boxSide);
+                    windVelocity.x * stepSeconds, cameraStep.x, topVelocityY * stepSeconds - cameraStep.y,
+                    bottomVelocityY * stepSeconds - cameraStep.y, windVelocity.y * stepSeconds, cameraStep.z,
+                    cameraWorldY, centerBrakeHeight, boxSide);
             position = snowWrap(cameraInBox + entryOffset, boxSide);
         }
         vec3 drawn = snowNearestOffset(position - cameraInBox, boxSide) + snowFlutterOffset(nextPhase, circleRadius);

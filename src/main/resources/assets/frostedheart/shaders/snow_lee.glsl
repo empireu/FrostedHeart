@@ -1,10 +1,13 @@
-// Shared snowfall lee map lookup, smoothed terrain lookup, overhang-aware fade weight and terrain-following vertical
-// velocity, as SnowLee defines them in Java.
+// Shared snowfall lee map lookup, smoothed terrain lookup, ravine cavity braking, overhang-aware fade weight and
+// terrain-following vertical velocity, as SnowLee defines them in Java.
 // FHShaders prepends snow_flakes.glsl before it, and prepends it to snow_flake_update.fsh and snow_flakes_draw.glsl.
 uniform int hasLeeMap;
 uniform sampler2D leeMap;
 uniform isampler2D noLeavesHeights;
 uniform sampler2D smoothHeights;
+uniform int hasCavityMap;
+uniform sampler2D cavityMap;
+uniform ivec2 cavityMin;
 // The camera's horizontal offset from the published lee map's anchor block and from the smoothed terrain's minimum
 // corner, both computed in double precision on the CPU:
 uniform vec2 cameraFromLeeAnchor;
@@ -28,6 +31,10 @@ const int SNOW_SMOOTH_SIZE = 512;
 const float SNOW_TERRAIN_FOLLOW_HEIGHT = 32.0;
 const float SNOW_OVERHANG_MARGIN = 1.0;
 const float SNOW_LEE_MINIMUM_WIND_SPEED = 0.01;
+const int SNOW_CAVITY_MAP_SIZE = 512;
+const float SNOW_CAVITY_WIND_FLOOR = 0.01;
+const float SNOW_CAVITY_WIND_DECAY = 0.5;
+const float SNOW_CAVITY_RIM_BLEND_DEPTH = 2.0;
 
 // The no-leaves terrain height of the column containing a point given as an offset from the camera:
 float snowLeeColumnHeight(vec3 fromCamera, ivec3 cameraBlock, vec3 cameraFraction) {
@@ -42,6 +49,65 @@ float snowLeeColumnHeight(vec3 fromCamera, ivec3 cameraBlock, vec3 cameraFractio
         return SNOW_LEE_NO_HEIGHT;
     }
     return float(height);
+}
+
+// The published flat cavity enclosure surface (x) and lower opposing rim height (y) at a point given from the camera:
+vec2 snowCavitySampleAt(vec3 fromCamera, ivec3 cameraBlock, vec3 cameraFraction) {
+    if (hasCavityMap == 0) {
+        return vec2(SNOW_LEE_NO_HEIGHT);
+    }
+    vec2 localXZ = cameraFraction.xz + fromCamera.xz;
+    ivec2 column = cameraBlock.xz + ivec2(floor(localXZ));
+    ivec2 local = column - cavityMin;
+    if (local.x < 0 || local.x >= SNOW_CAVITY_MAP_SIZE || local.y < 0 || local.y >= SNOW_CAVITY_MAP_SIZE) {
+        return vec2(SNOW_LEE_NO_HEIGHT);
+    }
+    return texelFetch(cavityMap, local, 0).rg;
+}
+
+// The braking ceiling inside an open-sky cavity, as SnowLee.cavityBrakeHeight:
+float snowCavityBrakeHeight(float cavityHeight, float cavityRim, float columnHeight) {
+    if (!(cavityHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD) || !(columnHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD)) {
+        return SNOW_LEE_NO_HEIGHT;
+    }
+    float cavityDepth = cavityHeight - columnHeight;
+    if (!(cavityDepth > 0.0)) {
+        return SNOW_LEE_NO_HEIGHT;
+    }
+    float rim = cavityRim > SNOW_LEE_NO_HEIGHT_THRESHOLD ? max(cavityHeight, cavityRim) : cavityHeight;
+    float strength = clamp(cavityDepth / SNOW_CAVITY_RIM_BLEND_DEPTH, 0.0, 1.0);
+    return mix(cavityHeight, rim, strength);
+}
+
+// Depth-only cavity openness factor in (0, 1] for falling flakes, as SnowLee.cavityOpenFactor:
+float snowCavityOpenFactor(float worldY, float cavityHeight, float cavityRim, float columnHeight) {
+    float brakeHeight = snowCavityBrakeHeight(cavityHeight, cavityRim, columnHeight);
+    if (!(brakeHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD)) {
+        return 1.0;
+    }
+    float depth = brakeHeight - worldY;
+    if (!(depth > 0.0)) {
+        return 1.0;
+    }
+    return exp(-depth / SNOW_CAVITY_WIND_DECAY);
+}
+
+// Horizontal flake wind speed multiplier in [SNOW_CAVITY_WIND_FLOOR, 1.0], as SnowLee.cavityWindScale:
+float snowCavityWindScale(float cavityOpen) {
+    return SNOW_CAVITY_WIND_FLOOR + (1.0 - SNOW_CAVITY_WIND_FLOOR) * clamp(cavityOpen, 0.0, 1.0);
+}
+
+// Horizontal wind multiplier in [SNOW_CAVITY_WIND_FLOOR, 1.0] at worldY under a precomputed braking ceiling
+// brakeHeight, as SnowLee.brakeWindScaleAt:
+float snowBrakeWindScaleAt(float worldY, float brakeHeight) {
+    if (!(brakeHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD)) {
+        return 1.0;
+    }
+    float depth = brakeHeight - worldY;
+    if (!(depth > 0.0)) {
+        return 1.0;
+    }
+    return SNOW_CAVITY_WIND_FLOOR + (1.0 - SNOW_CAVITY_WIND_FLOOR) * exp(-depth / SNOW_CAVITY_WIND_DECAY);
 }
 
 // Valid-only bilinear sample of the smoothed macro terrain surface S at a point given from the camera, as
@@ -102,8 +168,9 @@ vec2 snowLeeSampleAt(vec3 fromCamera) {
     return textureLod(leeMap, uv, 0.0).rg;
 }
 
-// The overhang-aware lee visibility share from 0 to 1, as SnowLee.leeShare:
-float snowLeeShare(float worldY, float leeHeight, float columnHeight, float smoothHeight) {
+// The overhang-aware lee visibility share from 0 to 1, releasing the lee below a ravine's braking ceiling on open-sky
+// columns while keeping overhangs dry, as SnowLee.leeShare:
+float snowLeeShare(float worldY, float leeHeight, float columnHeight, float smoothHeight, float cavityOpen) {
     if (!(leeHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD) || !(columnHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD)) {
         return 1.0;
     }
@@ -121,19 +188,22 @@ float snowLeeShare(float worldY, float leeHeight, float columnHeight, float smoo
         return clamp((worldY - leeHeight) / effectiveBand, 0.0, 1.0);
     }
     float leeDepth = leeHeight - columnHeight;
+    float share;
     if (!(leeDepth > 0.0)) {
-        return 1.0;
+        share = 1.0;
+    } else if (!(leeBand > 0.0)) {
+        share = worldY >= leeHeight ? 1.0 : 0.0;
+    } else {
+        float effectiveBand = min(leeBand, leeDepth);
+        share = clamp((worldY - leeHeight) / effectiveBand, 0.0, 1.0);
     }
-    if (!(leeBand > 0.0)) {
-        return worldY >= leeHeight ? 1.0 : 0.0;
-    }
-    float effectiveBand = min(leeBand, leeDepth);
-    return clamp((worldY - leeHeight) / effectiveBand, 0.0, 1.0);
+    return share + (1.0 - share) * (1.0 - clamp(cavityOpen, 0.0, 1.0));
 }
 
-// The per-flake opacity weight for pre-fetched heights, as SnowLee.leeWeight:
-float snowLeeWeightAt(uint flake, float worldY, float leeHeight, float columnHeight, float smoothHeight) {
-    float share = snowLeeShare(worldY, leeHeight, columnHeight, smoothHeight);
+// The per-flake opacity weight for pre-fetched heights and cavity openness, as SnowLee.leeWeight:
+float snowLeeWeightAt(uint flake, float worldY, float leeHeight, float columnHeight, float smoothHeight,
+        float cavityOpen) {
+    float share = snowLeeShare(worldY, leeHeight, columnHeight, smoothHeight, cavityOpen);
     return clamp((share - snowFlakeLeeThreshold(flake)) / SNOW_SHELTER_SOFTNESS, 0.0, 1.0);
 }
 
@@ -146,18 +216,20 @@ float snowLeeWeight(uint flake, vec3 fromCamera, ivec3 cameraBlock, vec3 cameraF
     float columnHeight = snowLeeColumnHeight(fromCamera, cameraBlock, cameraFraction);
     float smoothHeight = snowSmoothHeightAt(fromCamera);
     float worldY = float(cameraBlock.y) + cameraFraction.y + fromCamera.y;
-    return snowLeeWeightAt(flake, worldY, leeHeight, columnHeight, smoothHeight);
+    vec2 cavity = snowCavitySampleAt(fromCamera, cameraBlock, cameraFraction);
+    float cavityOpen = snowCavityOpenFactor(worldY, cavity.x, cavity.y, columnHeight);
+    return snowLeeWeightAt(flake, worldY, leeHeight, columnHeight, smoothHeight, cavityOpen);
 }
 
-// The vertical velocity in blocks per second (positive upward) for pre-fetched heights and terrain slope, as
-// SnowLee.verticalVelocity:
+// The vertical velocity in blocks per second (positive upward) for pre-fetched heights, terrain slope and braked wind
+// speeds, as SnowLee.verticalVelocity:
 float snowLeeVerticalVelocityAt(float worldY, float leeHeight, float columnHeight, float smoothHeight,
-        float terrainSlope, float ownFallSpeed, float windSpeed) {
+        float terrainSlope, float ownFallSpeed, float localWindSpeed, float localLeeFallSpeed) {
     float velocityY = -ownFallSpeed;
     bool hasSmooth = smoothHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD;
-    if (hasSmooth && windSpeed > SNOW_LEE_MINIMUM_WIND_SPEED) {
+    if (hasSmooth && localWindSpeed > SNOW_LEE_MINIMUM_WIND_SPEED) {
         float heightFade = 1.0 - clamp((worldY - smoothHeight) / SNOW_TERRAIN_FOLLOW_HEIGHT, 0.0, 1.0);
-        velocityY += clamp(terrainSlope, -1.0, 1.0) * windSpeed * heightFade;
+        velocityY += clamp(terrainSlope, -1.0, 1.0) * localWindSpeed * heightFade;
     }
     if (!(leeHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD) || !(columnHeight > SNOW_LEE_NO_HEIGHT_THRESHOLD)) {
         return velocityY;
@@ -168,27 +240,13 @@ float snowLeeVerticalVelocityAt(float worldY, float leeHeight, float columnHeigh
     if (!(leeDepth > 0.0)) {
         return velocityY;
     }
-    float extraSlopeDown = hasSmooth && windSpeed > SNOW_LEE_MINIMUM_WIND_SPEED && terrainSlope < 0.0
-            ? -max(-1.0, terrainSlope) * windSpeed : 0.0;
-    float leeTargetVelocityY = -(leeFallSpeed + extraSlopeDown);
+    float extraSlopeDown = hasSmooth && localWindSpeed > SNOW_LEE_MINIMUM_WIND_SPEED && terrainSlope < 0.0
+            ? -max(-1.0, terrainSlope) * localWindSpeed : 0.0;
+    float leeTargetVelocityY = -(localLeeFallSpeed + extraSlopeDown);
     if (!(leeTargetVelocityY < velocityY)) {
         return velocityY;
     }
     float above = clamp((worldY - leeHeight) / leeDepth, 0.0, 1.0);
     float weight = 1.0 - above * above * (3.0 - 2.0 * above);
     return velocityY + (leeTargetVelocityY - velocityY) * weight;
-}
-
-// The vertical velocity in blocks per second at a point given as an offset from the camera:
-float snowLeeVerticalVelocity(vec3 fromCamera, float ownFallSpeed, float windSpeed, ivec3 cameraBlock,
-        vec3 cameraFraction) {
-    if (hasLeeMap == 0) {
-        return -ownFallSpeed;
-    }
-    vec2 leeSample = snowLeeSampleAt(fromCamera);
-    float columnHeight = snowLeeColumnHeight(fromCamera, cameraBlock, cameraFraction);
-    float smoothHeight = snowSmoothHeightAt(fromCamera);
-    float worldY = float(cameraBlock.y) + cameraFraction.y + fromCamera.y;
-    return snowLeeVerticalVelocityAt(worldY, leeSample.x, columnHeight, smoothHeight, leeSample.y, ownFallSpeed,
-            windSpeed);
 }

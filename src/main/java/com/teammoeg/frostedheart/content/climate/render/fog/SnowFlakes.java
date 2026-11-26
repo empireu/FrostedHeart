@@ -136,6 +136,29 @@ public final class SnowFlakes {
     }
 
     /**
+     * The median flake fall speed in blocks per second for the current storm intensity, keeping plain snowfall at
+     * snowFallSpeed when stormIntensity is 0 and blending to blizzardFallSpeed at stormIntensity 1.
+     */
+    public static double fallSpeed(double snowFallSpeed, double blizzardFallSpeed, double stormIntensity) {
+        double snow = Double.isFinite(snowFallSpeed) && snowFallSpeed > 0.0 ? snowFallSpeed : 0.0;
+        double blizzard = Double.isFinite(blizzardFallSpeed) && blizzardFallSpeed > 0.0 ? blizzardFallSpeed : snow;
+        double storm = Double.isFinite(stormIntensity) ? clamp(stormIntensity) : 0.0;
+        return snow + (blizzard - snow) * storm;
+    }
+
+    /**
+     * The horizontal wind speed in blocks per second that snowflakes and the lee map follow, while the fog keeps the
+     * full wind speed.
+     */
+    public static double windSpeed(double fogWindSpeed, double windShare) {
+        if (!(fogWindSpeed > 0.0) || !Double.isFinite(fogWindSpeed) || !(windShare > 0.0)
+                || !Double.isFinite(windShare)) {
+            return 0.0;
+        }
+        return fogWindSpeed * clamp(windShare);
+    }
+
+    /**
      * The flake's width as a share of the mean width.
      */
     public static double sizeShare(int flake) {

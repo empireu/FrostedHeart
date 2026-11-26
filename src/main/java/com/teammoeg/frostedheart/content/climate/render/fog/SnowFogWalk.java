@@ -136,6 +136,7 @@ public final class SnowFogWalk {
     private int cavityMinX;
     private int cavityMinZ;
     private double cavityFloor = 1.0;
+    private double cavityWindFactor = 0.0;
     private double cavityDecayLength = MINIMUM_DECAY_LENGTH;
     private int lastNearSteps;
     private boolean lastNearCapped;
@@ -528,9 +529,20 @@ public final class SnowFogWalk {
 
     /**
      * Keeps the cavity enclosure map that the fog walk reads, which it does not copy, together with its world origin,
-     * effective floor share and vertical decay length. Leaves cellShare and heightShare unchanged.
+     * effective floor share and vertical decay length, using full wisp damping whenever effectiveFloor < 1.0. Leaves
+     * cellShare and heightShare unchanged.
      */
     public void setCavity(float[] cavityHeights, int minX, int minZ, double effectiveFloor, double decayLength) {
+        setCavity(cavityHeights, minX, minZ, effectiveFloor, effectiveFloor < 1.0 ? 1.0 : 0.0, decayLength);
+    }
+
+    /**
+     * Keeps the cavity enclosure map that the fog walk reads, which it does not copy, together with its world origin,
+     * effective floor share, wind ramp factor for wisp damping, and vertical decay length. Leaves cellShare and
+     * heightShare unchanged.
+     */
+    public void setCavity(float[] cavityHeights, int minX, int minZ, double effectiveFloor, double windFactor,
+            double decayLength) {
         if (cavityHeights.length != FogCavity.MAP_SIZE * FogCavity.MAP_SIZE) {
             throw new IllegalArgumentException("The cavity map has " + cavityHeights.length + " entries instead of "
                     + (FogCavity.MAP_SIZE * FogCavity.MAP_SIZE));
@@ -544,6 +556,13 @@ public final class SnowFogWalk {
             this.cavityFloor = 1.0;
         } else {
             this.cavityFloor = effectiveFloor;
+        }
+        if (!(windFactor > 0.0)) {
+            this.cavityWindFactor = 0.0;
+        } else if (windFactor > 1.0) {
+            this.cavityWindFactor = 1.0;
+        } else {
+            this.cavityWindFactor = windFactor;
         }
         if (!(decayLength >= MINIMUM_DECAY_LENGTH)) {
             this.cavityDecayLength = MINIMUM_DECAY_LENGTH;
@@ -560,13 +579,13 @@ public final class SnowFogWalk {
     public void clearCavity() {
         this.cavityHeights = null;
         this.cavityFloor = 1.0;
+        this.cavityWindFactor = 0.0;
     }
 
     /**
-     * The fog density multiplier in [cavityFloor, 1.0] at world position (worldX, worldY, worldZ), matching
-     * snowWalkCavityFactor in snow_walk.glsl. Allocates nothing.
+     * The depth-only openness factor in (0, 1] at world position (worldX, worldY, worldZ). Allocates nothing.
      */
-    public double cavityFactor(int worldX, double worldY, int worldZ) {
+    public double cavityOpenFactor(int worldX, double worldY, int worldZ) {
         float[] currentCavity = cavityHeights;
         if (currentCavity == null || !(cavityFloor < 1.0)) {
             return 1.0;
@@ -576,8 +595,19 @@ public final class SnowFogWalk {
         if (localX < 0 || localX >= FogCavity.MAP_SIZE || localZ < 0 || localZ >= FogCavity.MAP_SIZE) {
             return 1.0;
         }
-        return FogCavity.cavityFactor(worldY, currentCavity[localZ * FogCavity.MAP_SIZE + localX],
-                cavityDecayLength, cavityFloor);
+        return FogCavity.openFactor(worldY, currentCavity[localZ * FogCavity.MAP_SIZE + localX], cavityDecayLength);
+    }
+
+    /**
+     * The fog density multiplier in [cavityFloor, 1.0] at world position (worldX, worldY, worldZ), matching
+     * snowWalkCavityFactors.x in snow_walk.glsl. Allocates nothing.
+     */
+    public double cavityFactor(int worldX, double worldY, int worldZ) {
+        if (!(cavityFloor < 1.0)) {
+            return 1.0;
+        }
+        double openFactor = cavityOpenFactor(worldX, worldY, worldZ);
+        return cavityFloor + (1.0 - cavityFloor) * openFactor;
     }
 
     /**
@@ -718,12 +748,17 @@ public final class SnowFogWalk {
             double share = cellShare(cellX, cellY, cellZ);
             double partDepth = Math.max(0.0, exitDepth - enterDepth);
             if (share > 0.0) {
+                double wispFactor = 1.0;
                 if (cavityOn) {
-                    partDepth *= cavityFactor(eyeBlockX + cellX, eyeBlockY + cellY + 0.5, eyeBlockZ + cellZ);
+                    double openFactor = cavityOpenFactor(eyeBlockX + cellX, eyeBlockY + cellY + 0.5, eyeBlockZ + cellZ);
+                    partDepth *= cavityFloor + (1.0 - cavityFloor) * openFactor;
+                    wispFactor = 1.0 - cavityWindFactor * (1.0 - openFactor);
                 }
                 if (structureOn) {
                     double middle = (enter + exit) * 0.5;
-                    partDepth *= currentStructure.densityAt(middle * unitX, middle * unitY, middle * unitZ);
+                    double structureDensity = currentStructure.densityAt(middle * unitX, middle * unitY,
+                            middle * unitZ);
+                    partDepth *= 1.0 + wispFactor * (structureDensity - 1.0);
                 }
             }
             depth += share * partDepth;
@@ -825,13 +860,18 @@ public final class SnowFogWalk {
             double share = heightShare(columnOffsetX, columnOffsetY, columnOffsetZ);
             if (share > 0.0) {
                 double partDepth = Math.max(0.0, exitDepth - enterDepth);
+                double wispFactor = 1.0;
                 if (cavityOn) {
-                    partDepth *= cavityFactor(eyeBlockX + columnOffsetX, eyeBlockY + columnOffsetY,
+                    double openFactor = cavityOpenFactor(eyeBlockX + columnOffsetX, eyeBlockY + columnOffsetY,
                             eyeBlockZ + columnOffsetZ);
+                    partDepth *= cavityFloor + (1.0 - cavityFloor) * openFactor;
+                    wispFactor = 1.0 - cavityWindFactor * (1.0 - openFactor);
                 }
                 if (structureOn) {
                     double middle = (enter + exit) * 0.5;
-                    partDepth *= currentStructure.densityAt(middle * unitX, middle * unitY, middle * unitZ);
+                    double structureDensity = currentStructure.densityAt(middle * unitX, middle * unitY,
+                            middle * unitZ);
+                    partDepth *= 1.0 + wispFactor * (structureDensity - 1.0);
                 }
                 depth += share * partDepth;
             }
