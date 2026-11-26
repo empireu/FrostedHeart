@@ -86,7 +86,8 @@ public final class SnowfallRenderer {
     private static final int SHAPE_ROWS_UNIT = 5;
     static final int LEE_MAP_UNIT = 6;
     static final int NO_LEAVES_HEIGHT_UNIT = 7;
-    private static final int TEXTURE_UNITS = 8;
+    static final int SMOOTH_HEIGHT_UNIT = 8;
+    private static final int TEXTURE_UNITS = 9;
     private static final int CHUNK_WIDTH = 16;
     /**
      * Distance in blocks along any axis beyond which the fixed splat origin resets with a state refill to keep float
@@ -141,6 +142,10 @@ public final class SnowfallRenderer {
     private static double lastUpdateCameraY;
     private static double lastUpdateCameraZ;
     private static boolean lastCollided;
+    /**
+     * Incremented on every non-paused flake update to reseed flux-weighted box-face re-entry.
+     */
+    private static int updateFrameCounter;
     /**
      * An empty vertex array, which a core profile needs to draw without vertex data.
      */
@@ -347,10 +352,12 @@ public final class SnowfallRenderer {
         bindTexture(SHAPE_ROWS_UNIT, SnowShapeTextures.rowsTexture());
         bindTexture(LEE_MAP_UNIT, leeActive ? SnowLeeMap.texture() : 0);
         bindTexture(NO_LEAVES_HEIGHT_UNIT, leeActive ? noLeavesTexture : 0);
+        bindTexture(SMOOTH_HEIGHT_UNIT, leeActive ? SnowLeeMap.smoothTexture() : 0);
+        updateFrameCounter++;
         updateProgram.use();
         updateProgram.setDrawBuffers();
         updateProgram.setUniforms(fill, stepSeconds, WeatherFogRenderer.wind(), boxSide, camera, blockX, blockY, blockZ,
-                volume, farHeights, leeActive);
+                volume, farHeights, leeActive, updateFrameCounter);
         SkyGlPass.drawFullScreenQuad();
         lastUpdateCameraX = camera.x;
         lastUpdateCameraY = camera.y;
@@ -382,6 +389,7 @@ public final class SnowfallRenderer {
         bindTexture(SHARE_VOLUME_UNIT, shareVolume);
         bindTexture(LEE_MAP_UNIT, leeActive ? SnowLeeMap.texture() : 0);
         bindTexture(NO_LEAVES_HEIGHT_UNIT, leeActive ? noLeavesTexture : 0);
+        bindTexture(SMOOTH_HEIGHT_UNIT, leeActive ? SnowLeeMap.smoothTexture() : 0);
         drawProgram.use();
         double splatSeconds = SkySetting.SNOW_SPLAT_SECONDS.get();
         drawProgram.setUniforms(mainTarget, camera, boxSide, flakeSize, drawnCount, pixelsPerBlock, shareVolume != 0,
@@ -537,8 +545,10 @@ public final class SnowfallRenderer {
         private int volumeCornerUniform;
         private int leafPorosityUniform;
         private int splatSecondsUniform;
+        private int frameCounterUniform;
         private int hasLeeMapUniform;
         private int cameraFromLeeAnchorUniform;
+        private int cameraFromSmoothMinUniform;
         private int leeWindDirectionUniform;
         private int leeFallSpeedUniform;
         private int leeBandUniform;
@@ -583,6 +593,7 @@ public final class SnowfallRenderer {
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "shapeRows"), SHAPE_ROWS_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "leeMap"), LEE_MAP_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "noLeavesHeights"), NO_LEAVES_HEIGHT_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "smoothHeights"), SMOOTH_HEIGHT_UNIT);
                 fillStateUniform = GL20.glGetUniformLocation(programId, "fillState");
                 stepSecondsUniform = GL20.glGetUniformLocation(programId, "stepSeconds");
                 windVelocityUniform = GL20.glGetUniformLocation(programId, "windVelocity");
@@ -599,8 +610,10 @@ public final class SnowfallRenderer {
                 volumeCornerUniform = GL20.glGetUniformLocation(programId, "volumeCorner");
                 leafPorosityUniform = GL20.glGetUniformLocation(programId, "leafPorosity");
                 splatSecondsUniform = GL20.glGetUniformLocation(programId, "splatSeconds");
+                frameCounterUniform = GL20.glGetUniformLocation(programId, "frameCounter");
                 hasLeeMapUniform = GL20.glGetUniformLocation(programId, "hasLeeMap");
                 cameraFromLeeAnchorUniform = GL20.glGetUniformLocation(programId, "cameraFromLeeAnchor");
+                cameraFromSmoothMinUniform = GL20.glGetUniformLocation(programId, "cameraFromSmoothMin");
                 leeWindDirectionUniform = GL20.glGetUniformLocation(programId, "leeWindDirection");
                 leeFallSpeedUniform = GL20.glGetUniformLocation(programId, "leeFallSpeed");
                 leeBandUniform = GL20.glGetUniformLocation(programId, "leeBand");
@@ -628,7 +641,7 @@ public final class SnowfallRenderer {
          */
         private void setUniforms(boolean fill, double stepSeconds, WeatherWind wind, double boxSide, Vec3 camera,
                 int blockX, int blockY, int blockZ, @Nullable SnowShapeVolume volume, @Nullable FarHeights farHeights,
-                boolean leeActive) {
+                boolean leeActive, int frameCounter) {
             GL20.glUniform1i(fillStateUniform, fill ? 1 : 0);
             GL20.glUniform1f(stepSecondsUniform, (float) stepSeconds);
             GL20.glUniform2f(windVelocityUniform, (float) (wind.speed() * Math.cos(wind.direction())),
@@ -655,10 +668,13 @@ public final class SnowfallRenderer {
             }
             GL20.glUniform1f(leafPorosityUniform, (float) SkySetting.FOG_LEAF_POROSITY.get());
             GL20.glUniform1f(splatSecondsUniform, (float) SkySetting.SNOW_SPLAT_SECONDS.get());
+            GL20.glUniform1i(frameCounterUniform, frameCounter);
             GL20.glUniform1i(hasLeeMapUniform, leeActive ? 1 : 0);
             if (leeActive && farHeights != null) {
                 GL20.glUniform2f(cameraFromLeeAnchorUniform, (float) (camera.x - SnowLeeMap.publishedAnchorX()),
                         (float) (camera.z - SnowLeeMap.publishedAnchorZ()));
+                GL20.glUniform2f(cameraFromSmoothMinUniform, (float) (camera.x - SnowLeeMap.publishedSmoothMinX()),
+                        (float) (camera.z - SnowLeeMap.publishedSmoothMinZ()));
                 GL20.glUniform2f(leeWindDirectionUniform, (float) SnowLeeMap.publishedDirX(),
                         (float) SnowLeeMap.publishedDirZ());
                 GL20.glUniform1f(leeFallSpeedUniform,
@@ -711,6 +727,7 @@ public final class SnowfallRenderer {
         private int splatSecondsUniform;
         private int hasLeeMapUniform;
         private int cameraFromLeeAnchorUniform;
+        private int cameraFromSmoothMinUniform;
         private int leeWindDirectionUniform;
         private int leeFallSpeedUniform;
         private int leeBandUniform;
@@ -742,6 +759,7 @@ public final class SnowfallRenderer {
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "splatState"), SPLAT_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "leeMap"), LEE_MAP_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "noLeavesHeights"), NO_LEAVES_HEIGHT_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "smoothHeights"), SMOOTH_HEIGHT_UNIT);
                 GL20.glUniform3i(GL20.glGetUniformLocation(programId, "shareLayout"), FogShareVolume.SIDE,
                         FogShareVolume.ORIGIN, FogShareVolume.TILES_ACROSS);
                 GL20.glUniform1f(GL20.glGetUniformLocation(programId, "boxFadeWidth"), BOX_FADE_WIDTH);
@@ -775,6 +793,7 @@ public final class SnowfallRenderer {
                 splatSecondsUniform = GL20.glGetUniformLocation(programId, "splatSeconds");
                 hasLeeMapUniform = GL20.glGetUniformLocation(programId, "hasLeeMap");
                 cameraFromLeeAnchorUniform = GL20.glGetUniformLocation(programId, "cameraFromLeeAnchor");
+                cameraFromSmoothMinUniform = GL20.glGetUniformLocation(programId, "cameraFromSmoothMin");
                 leeWindDirectionUniform = GL20.glGetUniformLocation(programId, "leeWindDirection");
                 leeFallSpeedUniform = GL20.glGetUniformLocation(programId, "leeFallSpeed");
                 leeBandUniform = GL20.glGetUniformLocation(programId, "leeBand");
@@ -841,6 +860,8 @@ public final class SnowfallRenderer {
             if (leeActive && farHeights != null) {
                 GL20.glUniform2f(cameraFromLeeAnchorUniform, (float) (camera.x - SnowLeeMap.publishedAnchorX()),
                         (float) (camera.z - SnowLeeMap.publishedAnchorZ()));
+                GL20.glUniform2f(cameraFromSmoothMinUniform, (float) (camera.x - SnowLeeMap.publishedSmoothMinX()),
+                        (float) (camera.z - SnowLeeMap.publishedSmoothMinZ()));
                 GL20.glUniform2f(leeWindDirectionUniform, (float) SnowLeeMap.publishedDirX(),
                         (float) SnowLeeMap.publishedDirZ());
                 GL20.glUniform1f(leeFallSpeedUniform,

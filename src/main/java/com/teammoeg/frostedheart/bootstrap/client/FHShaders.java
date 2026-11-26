@@ -86,6 +86,10 @@ public class FHShaders extends Shaders {
     private static boolean snowFlakesUnloadOnReload;
     private static Shader SNOW_LEE_BUILD;
     private static boolean snowLeeBuildUnloadOnReload;
+    private static Shader SNOW_SMOOTH_BUILD;
+    private static boolean snowSmoothBuildUnloadOnReload;
+    private static Shader FOG_CAVITY_BUILD;
+    private static boolean fogCavityBuildUnloadOnReload;
     public static Shader getCalculatedSky() {
         if (CALCULATED_SKY == null) {
             runAndAddReloadListener(() -> CALCULATED_SKY = load(Shader.ShaderType.FRAGMENT, FHMain.rl("calculated_sky")));
@@ -386,6 +390,59 @@ public class FHShaders extends Shaders {
         if (SNOW_LEE_BUILD != null) {
             SNOW_LEE_BUILD.deleteShader();
             SNOW_LEE_BUILD = null;
+        }
+    }
+
+    /**
+     * The fragment stage of the pass that builds the smoothed macro terrain surface S, snow_smooth_build.fsh, compiled
+     * on first use.
+     */
+    public static Shader getSnowSmoothBuild() {
+        if (!snowSmoothBuildUnloadOnReload) {
+            addReloadListener(FHShaders::unloadSnowSmoothBuild);
+            snowSmoothBuildUnloadOnReload = true;
+        }
+        if (SNOW_SMOOTH_BUILD == null) {
+            String source = readShaderSource(FHMain.rl("shaders/snow_smooth_build.fsh"));
+            SNOW_SMOOTH_BUILD = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
+        }
+        return SNOW_SMOOTH_BUILD;
+    }
+
+    /**
+     * Deletes the smoothed terrain build stage after a resource reload, so the next use compiles it from the new
+     * resources.
+     */
+    private static void unloadSnowSmoothBuild() {
+        if (SNOW_SMOOTH_BUILD != null) {
+            SNOW_SMOOTH_BUILD.deleteShader();
+            SNOW_SMOOTH_BUILD = null;
+        }
+    }
+
+    /**
+     * The fragment stage of the pass that builds the fog cavity enclosure map, fog_cavity_build.fsh, compiled on first
+     * use.
+     */
+    public static Shader getFogCavityBuild() {
+        if (!fogCavityBuildUnloadOnReload) {
+            addReloadListener(FHShaders::unloadFogCavityBuild);
+            fogCavityBuildUnloadOnReload = true;
+        }
+        if (FOG_CAVITY_BUILD == null) {
+            String source = readShaderSource(FHMain.rl("shaders/fog_cavity_build.fsh"));
+            FOG_CAVITY_BUILD = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
+        }
+        return FOG_CAVITY_BUILD;
+    }
+
+    /**
+     * Deletes the fog cavity build stage after a resource reload, so the next use compiles it from the new resources.
+     */
+    private static void unloadFogCavityBuild() {
+        if (FOG_CAVITY_BUILD != null) {
+            FOG_CAVITY_BUILD.deleteShader();
+            FOG_CAVITY_BUILD = null;
         }
     }
 

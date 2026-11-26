@@ -59,6 +59,13 @@ uniform vec3 structureEye;
 uniform vec3 structureAlong;
 uniform vec3 structureUp;
 uniform vec3 structureAcross;
+// The cavity enclosure map (512 by 512 R32F), whether cavity thinning is active, its lowest world corner, the
+// effective floor density share (1 when calm or off), and the decay length in blocks below the enclosure surface:
+uniform sampler2D cavityMap;
+uniform int hasCavityMap;
+uniform ivec2 cavityMin;
+uniform float cavityFloor;
+uniform float cavityDecayLength;
 
 // The side in blocks of the world-aligned cells that the far stretch of a piece is walked in, and the most cells that
 // the near and the far stretch of a piece visit, as SnowFogWalk.FAR_CELL_BLOCKS, SnowFogWalk.PIECE_MAXIMUM_STEPS and
@@ -81,6 +88,9 @@ const float SNOW_WALK_MINIMUM_MEAN = 1.0e-6;
 
 // The number of texels per axis of the window of far heights minus one, as FarHeights.SIZE - 1:
 const int FAR_HEIGHTS_MASK = 1023;
+// The size and valid threshold of the cavity enclosure map, as FogCavity:
+const int FOG_CAVITY_MAP_SIZE = 512;
+const float FOG_CAVITY_NO_HEIGHT_THRESHOLD = -30000.0;
 // The layout of the share volume, as FogShareVolume: the cells per axis of the cube of cells around the eye's block, the
 // index of the cell of the eye's block on every axis, the tiles of the atlas across and down, and the size of the atlas
 // in texels:
@@ -140,6 +150,27 @@ int snowWalkColumnHeight(int columnOffsetX, int columnOffsetZ) {
 // FarHeights.UNKNOWN, which stands below every cell, counts as open:
 float snowWalkHeightShare(ivec3 cell) {
     return float(eyeBlock.y + cell.y) >= float(snowWalkColumnHeight(cell.x, cell.z)) ? 1.0 : 0.0;
+}
+
+// The fog density multiplier in [cavityFloor, 1.0] inside a deep open-sky cavity at world position (worldX, worldY,
+// worldZ), as FogCavity.cavityFactor. Does not affect shareVolume or falling snow:
+float snowWalkCavityFactor(int worldX, float worldY, int worldZ) {
+    if (hasCavityMap == 0 || !(cavityFloor < 1.0)) {
+        return 1.0;
+    }
+    ivec2 local = ivec2(worldX, worldZ) - cavityMin;
+    if (local.x < 0 || local.x >= FOG_CAVITY_MAP_SIZE || local.y < 0 || local.y >= FOG_CAVITY_MAP_SIZE) {
+        return 1.0;
+    }
+    float cavityHeight = texelFetch(cavityMap, local, 0).r;
+    if (!(cavityHeight > FOG_CAVITY_NO_HEIGHT_THRESHOLD)) {
+        return 1.0;
+    }
+    float depth = cavityHeight - worldY;
+    if (!(depth > 0.0)) {
+        return 1.0;
+    }
+    return cavityFloor + (1.0 - cavityFloor) * exp(-depth / cavityDecayLength);
 }
 
 // The share of a far cell of SNOW_WALK_FAR_CELL blocks, which is the height share of the 1-block cell that holds its
@@ -244,9 +275,15 @@ float snowWalkNearCells(vec3 unit, float startDistance, float endDistance, int m
         float exitDepth = snowWalkTauAt(exit, 1.0, unit.y);
         float share = snowWalkCellShare(cell);
         float partDepth = max(0.0, exitDepth - enterDepth);
-        if (structureOn && share > 0.0) {
-            float middle = (enter + exit) * 0.5;
-            partDepth *= snowWalkStructureDensity(middle * unit);
+        if (share > 0.0) {
+            if (hasCavityMap != 0) {
+                partDepth *= snowWalkCavityFactor(eyeBlock.x + cell.x, float(eyeBlock.y + cell.y) + 0.5,
+                        eyeBlock.z + cell.z);
+            }
+            if (structureOn) {
+                float middle = (enter + exit) * 0.5;
+                partDepth *= snowWalkStructureDensity(middle * unit);
+            }
         }
         depth += share * partDepth;
         enter = exit;
@@ -326,9 +363,15 @@ float snowWalkFarCells(vec3 unit, float startDistance, float endDistance, int ma
         cellsWalked = cellIndex + 1;
         float exit = min(min(nextBoundary.x, nextBoundary.y), min(nextBoundary.z, endDistance));
         float exitDepth = snowWalkTauAt(exit, 1.0, unit.y);
-        float share = snowWalkFarShare(cell);
+        ivec3 columnCell = ivec3(floor((vec3(cell) + vec3(0.5)) * SNOW_WALK_FAR_CELL))
+                - (eyeBlock & ivec3(SNOW_WALK_FAR_CELL_MASK));
+        float share = snowWalkHeightShare(columnCell);
         if (share > 0.0) {
             float partDepth = max(0.0, exitDepth - enterDepth);
+            if (hasCavityMap != 0) {
+                partDepth *= snowWalkCavityFactor(eyeBlock.x + columnCell.x, float(eyeBlock.y + columnCell.y),
+                        eyeBlock.z + columnCell.z);
+            }
             if (structureOn) {
                 float middle = (enter + exit) * 0.5;
                 partDepth *= snowWalkStructureDensity(middle * unit);

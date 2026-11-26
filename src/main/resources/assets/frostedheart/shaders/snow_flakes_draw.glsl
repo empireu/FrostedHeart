@@ -263,13 +263,18 @@ void main() {
     float shelterWeight = snowShelterWeight(flake, fromFogEye);
     float nearWeight = smoothstep(SNOW_NEAR_FADE_START, SNOW_NEAR_FADE_END, distance);
     float leeHeight = SNOW_LEE_NO_HEIGHT;
+    float terrainSlope = 0.0;
     float columnHeight = SNOW_LEE_NO_HEIGHT;
+    float smoothHeight = SNOW_LEE_NO_HEIGHT;
     float worldY = float(cameraBlock.y) + cameraFraction.y + center.y;
     float leeWeight = 1.0;
     if (hasLeeMap != 0) {
-        leeHeight = snowLeeHeightAt(center);
+        vec2 leeSample = snowLeeSampleAt(center);
+        leeHeight = leeSample.x;
+        terrainSlope = leeSample.y;
         columnHeight = snowLeeColumnHeight(center, cameraBlock, cameraFraction);
-        leeWeight = snowLeeWeightAt(flake, worldY, leeHeight, columnHeight);
+        smoothHeight = snowSmoothHeightAt(center);
+        leeWeight = snowLeeWeightAt(flake, worldY, leeHeight, columnHeight, smoothHeight);
     }
     float weight = countWeight * boxWeight * shelterWeight * leeWeight * nearWeight;
     if (!(weight > SNOW_LEAST_ALPHA)) {
@@ -278,8 +283,11 @@ void main() {
     }
 
     float ownFall = fallSpeed * snowFlakeFallShare(flake);
-    float effectiveFall = hasLeeMap != 0 ? snowLeeFallSpeedAt(worldY, leeHeight, columnHeight, ownFall) : ownFall;
-    vec3 velocity = vec3(windVelocity.x, -effectiveFall, windVelocity.y)
+    float verticalVelocity = hasLeeMap != 0
+            ? snowLeeVerticalVelocityAt(worldY, leeHeight, columnHeight, smoothHeight, terrainSlope, ownFall,
+                    length(windVelocity))
+            : -ownFall;
+    vec3 velocity = vec3(windVelocity.x, verticalVelocity, windVelocity.y)
             + vec3(-sin(phase), 0.0, cos(phase)) * (circleRadius * flutterRate);
 
     vec3 halfStreak = 0.5 * shutterSeconds * velocity;

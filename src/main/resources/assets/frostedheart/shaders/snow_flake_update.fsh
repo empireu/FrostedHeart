@@ -34,9 +34,11 @@ uniform usampler2D shapeRows;
 uniform ivec3 cameraBlock;
 uniform vec3 cameraFraction;
 uniform ivec3 volumeCorner;
-// The share of leaf blocks that a flake passes through, and the seconds a splat shows:
+// The share of leaf blocks that a flake passes through, the seconds a splat shows, and the update counter for box
+// re-entry reseeding:
 uniform float leafPorosity;
 uniform float splatSeconds;
+uniform int frameCounter;
 out vec4 nextState;
 out vec4 nextSplat;
 
@@ -124,6 +126,39 @@ int snowHitFace(vec3 passed, vec3 inside, uint flake, out vec3 hitPoint) {
     return direction.z > 0.0 ? 2 : 3;
 }
 
+// Places a flake leaving the camera's box onto a flux-weighted inflow face using the relative horizontal motion and the
+// relative vertical motions at the box's top and bottom faces, as SnowLee.reenterBoxOffset:
+vec3 snowReenterBoxOffset(uint flake, uint counter, float relStepX, float relStepTopY, float relStepBottomY,
+        float relStepZ, float side) {
+    uint reseed = snowHash(flake ^ (counter * 0x9e3779b9u));
+    float pickUnit = (float(snowHash(reseed + 1u) >> 8) + 0.5) * (1.0 / 16777216.0);
+    float depthUnit = (float(snowHash(reseed + 2u) >> 8) + 0.5) * (1.0 / 16777216.0);
+    float firstUnit = (float(snowHash(reseed + 3u) >> 8) + 0.5) * (1.0 / 16777216.0);
+    float secondUnit = (float(snowHash(reseed + 4u) >> 8) + 0.5) * (1.0 / 16777216.0);
+    float fluxX = abs(relStepX);
+    float fluxTop = max(0.0, -relStepTopY);
+    float fluxBottom = max(0.0, relStepBottomY);
+    float fluxZ = abs(relStepZ);
+    float totalFlux = fluxX + fluxTop + fluxBottom + fluxZ;
+    float halfSide = 0.5 * side;
+    if (!(totalFlux > 1.0e-6) || max(max(fluxX, fluxZ), max(fluxTop, fluxBottom)) >= side) {
+        return (vec3(depthUnit, firstUnit, secondUnit) - vec3(0.5)) * side;
+    }
+    float pick = pickUnit * totalFlux;
+    if (pick < fluxX) {
+        float x = (relStepX > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * fluxX);
+        return vec3(x, (firstUnit - 0.5) * side, (secondUnit - 0.5) * side);
+    }
+    if (pick < fluxX + fluxTop) {
+        return vec3((firstUnit - 0.5) * side, halfSide - depthUnit * fluxTop, (secondUnit - 0.5) * side);
+    }
+    if (pick < fluxX + fluxTop + fluxBottom) {
+        return vec3((firstUnit - 0.5) * side, -halfSide + depthUnit * fluxBottom, (secondUnit - 0.5) * side);
+    }
+    float z = (relStepZ > 0.0 ? -1.0 : 1.0) * (halfSide - depthUnit * fluxZ);
+    return vec3((firstUnit - 0.5) * side, (secondUnit - 0.5) * side, z);
+}
+
 void main() {
     ivec2 texel = ivec2(gl_FragCoord.xy);
     uint flake = snowFlakeIndex(texel);
@@ -150,17 +185,35 @@ void main() {
     // The flake's path from the camera as it is now, which the draw continues from:
     vec3 pathStart = snowNearestOffset(state.xyz - previousCameraInBox, boxSide) - cameraStep;
     float ownFall = fallSpeed * snowFlakeFallShare(flake);
-    float effectiveFall = stopped ? ownFall
-            : snowLeeFallSpeed(pathStart + snowFlutterOffset(phase, circleRadius), ownFall, cameraBlock,
-                    cameraFraction);
-    vec3 velocity = vec3(windVelocity.x, -effectiveFall, windVelocity.y);
+    float windSpeed = length(windVelocity);
+    float verticalVelocity = stopped ? -ownFall
+            : snowLeeVerticalVelocity(pathStart + snowFlutterOffset(phase, circleRadius), ownFall, windSpeed,
+                    cameraBlock, cameraFraction);
+    vec3 velocity = vec3(windVelocity.x, verticalVelocity, windVelocity.y);
     vec3 step = velocity * stepSeconds;
     float turn = snowFlakeFlutterRate(flake) * stepSeconds;
     vec3 position = snowWrap(state.xyz + step, boxSide);
     float nextPhase = mod(phase + turn, SNOW_TWO_PI);
     vec3 pathEnd = pathStart + step;
     if (any(greaterThanEqual(abs(pathEnd), vec3(0.5 * boxSide)))) {
-        // The flake comes in at the opposite face as a new one, stopped only when it comes in inside a block:
+        // The flake comes in as a new one; when terrain-following or lee sinking is active, re-enter on a
+        // flux-weighted inflow face using the box's top and bottom vertical velocities so slopes stay balanced:
+        if (hasLeeMap != 0) {
+            vec2 centerLee = snowLeeSampleAt(vec3(0.0));
+            float centerColumn = snowLeeColumnHeight(vec3(0.0), cameraBlock, cameraFraction);
+            float centerSmooth = snowSmoothHeightAt(vec3(0.0));
+            float cameraWorldY = float(cameraBlock.y) + cameraFraction.y;
+            float halfSide = 0.5 * boxSide;
+            float topVelocityY = snowLeeVerticalVelocityAt(cameraWorldY + halfSide, centerLee.x, centerColumn,
+                    centerSmooth, centerLee.y, ownFall, windSpeed);
+            float bottomVelocityY = snowLeeVerticalVelocityAt(cameraWorldY - halfSide, centerLee.x, centerColumn,
+                    centerSmooth, centerLee.y, ownFall, windSpeed);
+            vec3 entryOffset = snowReenterBoxOffset(flake, uint(frameCounter),
+                    windVelocity.x * stepSeconds - cameraStep.x, topVelocityY * stepSeconds - cameraStep.y,
+                    bottomVelocityY * stepSeconds - cameraStep.y, windVelocity.y * stepSeconds - cameraStep.z,
+                    boxSide);
+            position = snowWrap(cameraInBox + entryOffset, boxSide);
+        }
         vec3 drawn = snowNearestOffset(position - cameraInBox, boxSide) + snowFlutterOffset(nextPhase, circleRadius);
         stopped = collides != 0 && snowHitId(drawn, flake) != 0u;
     } else if (!stopped && collides != 0) {

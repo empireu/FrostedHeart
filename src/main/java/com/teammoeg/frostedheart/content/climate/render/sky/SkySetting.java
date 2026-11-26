@@ -205,7 +205,10 @@ public enum SkySetting {
     FOG_STRUCTURE_RANGE("fogStructureRange", "Distance in blocks out to which the fog shows structures. Beyond it the "
             + "fog has its mean density. More costs GPU time.", Rebuilds.NOTHING, 96.0, 32.0, 160.0),
     FOG_WIND_SCALE("fogWindScale", "Wind speed in blocks per second at the wind level 100, which sets how fast the "
-            + "structures of the fog drift along with it.", Rebuilds.NOTHING, 12.0, 0.0, 40.0);
+            + "structures of the fog drift along with it.", Rebuilds.NOTHING, 12.0, 0.0, 40.0),
+    FOG_CAVITY_SHARE("fogCavityShare", "Lowest fog density share deep inside a narrow open-sky ravine or walled "
+            + "cavity in windy weather, while falling snow still enters it. 1 turns cavity thinning off.",
+            Rebuilds.NOTHING, 0.5, 0.0, 1.0);
 
     /**
      * What a build does again when a setting changes. The views are built again with either part.

@@ -124,6 +124,7 @@ public final class WeatherFogRenderer {
     private static final int STRUCTURE_UNIT = 5;
     private static final int ATLAS_UNIT = 6;
     private static final int EXCESS_UNIT = 7;
+    private static final int CAVITY_UNIT = 8;
     private static final int COLOR_CHANNELS = 3;
     /**
      * The sky light of the two lightmap pixels whose mean the snow fog color is, at block light 0: the rows 14 and 15 of
@@ -166,7 +167,7 @@ public final class WeatherFogRenderer {
     private static final ClientMockWeather mockWeather = new ClientMockWeather();
     private static final SkyDrawTimer timer = new SkyDrawTimer();
     private static final FogPassTimer passTimer = new FogPassTimer();
-    private static final SkyGlPass pass = new SkyGlPass(8);
+    private static final SkyGlPass pass = new SkyGlPass(9);
     private static final ShareProgram sharePass = new ShareProgram();
     private static final InjectProgram injectPass = new InjectProgram();
     private static final IntegrateProgram integratePass = new IntegrateProgram();
@@ -320,6 +321,9 @@ public final class WeatherFogRenderer {
     private static double frameRadius;
     private static double frameHalfWidth;
     private static double frameFieldFade;
+    private static double frameCavityFloor = 1.0;
+    private static double frameCavityDecayLength = SnowFogWalk.MINIMUM_DECAY_LENGTH;
+    private static boolean frameCavityActive;
     /**
      * When the shown box was filled, and whether it held a cell in the frame before, for the fade of the field.
      */
@@ -366,6 +370,9 @@ public final class WeatherFogRenderer {
     private static int boundUpperHeight = Integer.MAX_VALUE;
     private static double boundClearAirDensity = 1.0;
     private static double boundClearRange;
+    private static double boundCavityDensity = 1.0;
+    private static double boundCavityRange;
+    private static double boundShelterRange;
     private static boolean boundApplied;
     /**
      * When the eye began to stand in open air, or 0 while it does not, which the bound of vanilla's fog waits on.
@@ -388,6 +395,9 @@ public final class WeatherFogRenderer {
     private static double cachedFarPlane;
     private static double cachedClearAirDensity;
     private static double cachedClearRange;
+    private static double cachedCavityDensity;
+    private static double cachedCavityRange;
+    private static double cachedShelterRange;
     private static double cachedDistance;
     /**
      * The bytes the fog's handlers allocated since the last weather stage ended.
@@ -452,6 +462,9 @@ public final class WeatherFogRenderer {
         long allocatedBefore = LightPillarSources.allocatedBytes();
         try {
             ClientLevel level = Minecraft.getInstance().level;
+            if (level != keptFrameLevel) {
+                FogCavityMap.onLevelChanged(level);
+            }
             if (level == null || !isActive(level) || !CalculatedSkyRenderer.isDrawnThisFrame()) {
                 return;
             }
@@ -602,8 +615,20 @@ public final class WeatherFogRenderer {
         updateStructureDensity();
         boundClearAirDensity = structure.isOn() ? structure.clearAirDensity() : 1.0;
         boundClearRange = structure.isOn() ? structure.range() : 0.0;
+        double cavityWind = Math.max(wind.speed(), conditions.windSpeed());
+        boundCavityDensity = FogCavity.effectiveFloor(settingValue(SkySetting.FOG_CAVITY_SHARE), cavityWind);
+        boundCavityRange = boundCavityDensity < 1.0
+                ? FogFroxelGrid.rangeOf(SkySetting.FOG_FROXEL_RANGE.get()) : 0.0;
+        double clampedRadius = SkySetting.FOG_FIELD_RADIUS.get();
+        if (!(clampedRadius >= SnowFogWalk.MINIMUM_RADIUS)) {
+            clampedRadius = SnowFogWalk.MINIMUM_RADIUS;
+        } else if (clampedRadius > SnowFogWalk.MAXIMUM_RADIUS) {
+            clampedRadius = SnowFogWalk.MAXIMUM_RADIUS;
+        }
+        boundShelterRange = clampedRadius - SnowFogWalk.REGION_MARGIN;
         boundDistance = cullingDistance(extinctionAtEye, eyeHeight, heightScale, level.getMinBuildHeight(),
-                boundUpperHeight, farPlane, boundClearAirDensity, boundClearRange);
+                boundUpperHeight, farPlane, boundClearAirDensity, boundClearRange, boundCavityDensity,
+                boundCavityRange, boundShelterRange);
         boundFarPlane = (float) farPlane;
         boundEnd = FogCullingDistance.fogEnd(boundDistance, previousEnd);
         previousEnd = boundEnd;
@@ -646,15 +671,17 @@ public final class WeatherFogRenderer {
      */
     private static double cullingDistance(double extinctionAtEye, double eyeHeight, double heightScale,
             double minimumHeight, double maximumHeight, double farPlane, double clearAirDensity,
-            double clearRange) {
+            double clearRange, double cavityDensity, double cavityRange, double shelterRange) {
         if (hasCachedDistance && extinctionAtEye == cachedEyeExtinction && eyeHeight == cachedEyeY
                 && heightScale == cachedHeightScale && minimumHeight == cachedMinimumHeight
                 && maximumHeight == cachedMaximumHeight && farPlane == cachedFarPlane
-                && clearAirDensity == cachedClearAirDensity && clearRange == cachedClearRange) {
+                && clearAirDensity == cachedClearAirDensity && clearRange == cachedClearRange
+                && cavityDensity == cachedCavityDensity && cavityRange == cachedCavityRange
+                && shelterRange == cachedShelterRange) {
             return cachedDistance;
         }
         double distance = FogCullingDistance.opaqueDistance(extinctionAtEye, eyeHeight, heightScale, minimumHeight,
-                maximumHeight, farPlane, clearAirDensity, clearRange);
+                maximumHeight, farPlane, clearAirDensity, clearRange, cavityDensity, cavityRange, shelterRange);
         hasCachedDistance = true;
         cachedEyeExtinction = extinctionAtEye;
         cachedEyeY = eyeHeight;
@@ -664,6 +691,9 @@ public final class WeatherFogRenderer {
         cachedFarPlane = farPlane;
         cachedClearAirDensity = clearAirDensity;
         cachedClearRange = clearRange;
+        cachedCavityDensity = cavityDensity;
+        cachedCavityRange = cavityRange;
+        cachedShelterRange = shelterRange;
         cachedDistance = distance;
         return distance;
     }
@@ -748,6 +778,8 @@ public final class WeatherFogRenderer {
         updateShareTable();
         updateFieldFade();
         updateRadius();
+        frameCavityFloor = FogCavity.effectiveFloor(settingValue(SkySetting.FOG_CAVITY_SHARE), wind.speed());
+        frameCavityDecayLength = conditions.decayLength();
         frameHeightScale = conditions.heightScale();
         frameEyeY = eyeY;
         RenderTarget mainTarget = Minecraft.getInstance().getMainRenderTarget();
@@ -1056,11 +1088,16 @@ public final class WeatherFogRenderer {
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
         int previousExcessTexture = GL11.glGetInteger(GL30.GL_TEXTURE_BINDING_2D_ARRAY);
         try {
-            passTimer.begin();
-            updateStructureTexture();
             RenderSystem.disableCull();
             RenderSystem.disableScissor();
             RenderSystem.disableBlend();
+            if (frameCavityFloor < 1.0) {
+                int noLeavesTexture = ClientSnowField.prepareNoLeavesHeights();
+                FogCavityMap.step(Minecraft.getInstance().level, ClientSnowField.farHeights(), noLeavesTexture);
+            }
+            frameCavityActive = frameCavityFloor < 1.0 && FogCavityMap.isActive();
+            passTimer.begin();
+            updateStructureTexture();
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SCENE_DEPTH_UNIT);
             RenderSystem.bindTexture(mainTarget.getDepthTextureId());
             bindFieldTextures();
@@ -1234,6 +1271,8 @@ public final class WeatherFogRenderer {
         RenderSystem.bindTexture(shareTableTexture);
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + STRUCTURE_UNIT);
         GL11.glBindTexture(GL12.GL_TEXTURE_3D, structureTexture);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + CAVITY_UNIT);
+        RenderSystem.bindTexture(frameCavityActive ? FogCavityMap.texture() : 0);
     }
 
     /**
@@ -1692,6 +1731,7 @@ public final class WeatherFogRenderer {
      */
     public static void clearFailure() {
         failed = false;
+        FogCavityMap.clearFailure();
     }
 
     /**
@@ -1784,14 +1824,14 @@ public final class WeatherFogRenderer {
                         + "visibility %.1f blocks, fitted fog end %s; reference extinction %.5f per block, height "
                         + "scale %.1f blocks; %s; %s, decay length %.2f blocks; R %.1f blocks, region half width %.1f "
                         + "blocks, fade %.2f, %s, %d of the %d cells of the region cube inside it, lag %d blocks, %s; "
-                        + "froxel divisor %d at %d by %d columns, %d slices out to %.1f blocks; %s; wind %.1f blocks "
-                        + "per second toward %.0f degrees, displacement (%.1f, %.1f) blocks%s",
+                        + "froxel divisor %d at %d by %d columns, %d slices out to %.1f blocks; %s; %s; wind %.1f "
+                        + "blocks per second toward %.0f degrees, displacement (%.1f, %.1f) blocks%s",
                 drawn, timer.describe(), eyeExtinction, visibility, fittedEnd, weather().referenceExtinction(),
                 weather().heightScale(), describeSnowColor(), describeEyeShare(), weather().decayLength(), frameRadius,
                 frameHalfWidth, frameFieldFade, hasShownBox ? "a shown box" : "no shown box", insideCells, regionCells,
                 lag, describeShareVolume(), frameFroxelDivisor, frameColumnCount, frameRowCount, frameSliceCount,
-                frameRangeDistance, describeStructures(visibility), wind.speed(),
-                windDegrees, wind.displacementX(), wind.displacementZ(), stopped);
+                frameRangeDistance, describeStructures(visibility), FogCavityMap.describe(frameCavityFloor),
+                wind.speed(), windDegrees, wind.displacementX(), wind.displacementZ(), stopped);
     }
 
     /**
@@ -1936,11 +1976,13 @@ public final class WeatherFogRenderer {
                 ? String.format(Locale.ROOT, "%d bytes allocated", lastFrameAllocatedBytes)
                 : "allocations not counted by this JVM";
         return String.format(Locale.ROOT, "Fog bound: opaque distance %s, fog end %s, far plane %s, %s; "
-                        + "clear air density %.2f out to %.0f blocks; visibility %s at sea level, height scale %.1f "
-                        + "blocks; open air %s for %.1f s, upper height %s; %s in the last frame",
+                        + "clear air density %.2f out to %.0f blocks, cavity floor %.2f out to %.0f blocks, shelter "
+                        + "%.0f blocks; visibility %s at sea level, height scale %.1f blocks; open air %s for %.1f s, "
+                        + "upper height %s; %s in the last frame",
                 distance, end, farPlane, boundApplied ? "applied" : "not applied", boundClearAirDensity,
-                boundClearRange, visibility, weather().heightScale(), openAirSinceNanos == 0L ? "no" : "yes",
-                openAirNanos * 1.0e-9, upperHeight, allocated);
+                boundClearRange, boundCavityDensity, boundCavityRange, boundShelterRange, visibility,
+                weather().heightScale(), openAirSinceNanos == 0L ? "no" : "yes", openAirNanos * 1.0e-9, upperHeight,
+                allocated);
     }
 
     /**
@@ -1999,6 +2041,13 @@ public final class WeatherFogRenderer {
         selfTestWalk.setRadius(frameRadius);
         selfTestWalk.setFieldFade(frameFieldFade);
         selfTestWalk.setStructure(structure);
+        float[] cavityReadback = frameCavityActive ? FogCavityMap.readbackPublished() : null;
+        if (cavityReadback != null) {
+            selfTestWalk.setCavity(cavityReadback, FogCavityMap.publishedMinX(), FogCavityMap.publishedMinZ(),
+                    frameCavityFloor, frameCavityDecayLength);
+        } else {
+            selfTestWalk.clearCavity();
+        }
         runSelfTest(lines, mainTarget, frameSliceCount);
         if (frameSliceCount < FogFroxelGrid.MAXIMUM_SLICES) {
             runSelfTest(lines, mainTarget, FogFroxelGrid.MAXIMUM_SLICES);
@@ -2617,6 +2666,10 @@ public final class WeatherFogRenderer {
         private int structureUpUniform;
         private int structureAcrossUniform;
         private int hasShareVolumeUniform;
+        private int hasCavityMapUniform;
+        private int cavityMinUniform;
+        private int cavityFloorUniform;
+        private int cavityDecayLengthUniform;
         protected int partMaskUniform;
 
         /**
@@ -2678,8 +2731,13 @@ public final class WeatherFogRenderer {
                 structureUpUniform = GL20.glGetUniformLocation(program.programId, "structureUp");
                 structureAcrossUniform = GL20.glGetUniformLocation(program.programId, "structureAcross");
                 hasShareVolumeUniform = GL20.glGetUniformLocation(program.programId, "hasShareVolume");
-                // The share volume stays on its unit for every frame, so its sampler is set once after the link:
+                hasCavityMapUniform = GL20.glGetUniformLocation(program.programId, "hasCavityMap");
+                cavityMinUniform = GL20.glGetUniformLocation(program.programId, "cavityMin");
+                cavityFloorUniform = GL20.glGetUniformLocation(program.programId, "cavityFloor");
+                cavityDecayLengthUniform = GL20.glGetUniformLocation(program.programId, "cavityDecayLength");
+                // The share volume and cavity map stay on their units for every frame, so their samplers are set once:
                 GL20.glUniform1i(GL20.glGetUniformLocation(program.programId, "shareVolume"), SHARE_VOLUME_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(program.programId, "cavityMap"), CAVITY_UNIT);
             }
             program.use();
         }
@@ -2721,6 +2779,12 @@ public final class WeatherFogRenderer {
             GL20.glUniform3f(structureUpUniform, 0.0F, (float) structure.upY(), 0.0F);
             GL20.glUniform3f(structureAcrossUniform, (float) structure.acrossX(), 0.0F,
                     (float) structure.acrossZ());
+            GL20.glUniform1i(hasCavityMapUniform, frameCavityActive ? 1 : 0);
+            if (frameCavityActive) {
+                GL20.glUniform2i(cavityMinUniform, FogCavityMap.publishedMinX(), FogCavityMap.publishedMinZ());
+                GL20.glUniform1f(cavityFloorUniform, (float) frameCavityFloor);
+                GL20.glUniform1f(cavityDecayLengthUniform, (float) frameCavityDecayLength);
+            }
             setOwnUniforms(mainTarget);
         }
 

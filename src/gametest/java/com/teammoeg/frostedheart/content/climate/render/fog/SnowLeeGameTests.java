@@ -19,10 +19,12 @@
 
 package com.teammoeg.frostedheart.content.climate.render.fog;
 
+import com.mojang.logging.LogUtils;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
+import org.slf4j.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -35,133 +37,206 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Checks the snowfall lee map twin (SnowLee) against an independent brute-force ray maximum on synthetic layouts,
- * verifies the fade weight, sinking downdraft and rebuild trigger rules, and verifies that the shared GLSL constants
- * across the snow shaders match their Java definitions.
+ * Checks the smoothed macro terrain surface S and relief lee map twin (SnowLee) against independent brute-force
+ * references on synthetic terrain layouts, verifies overhang behavior, terrain-following vertical velocity, sub-box
+ * flake density over a hill, rebuild trigger rules, and shared GLSL constants across all snow and cavity shaders.
  */
 @GameTestHolder("frostedheart_weather")
 @PrefixGameTestTemplate(false)
 public final class SnowLeeGameTests {
+    private static final Logger LOGGER = LogUtils.getLogger();
     private static final double TOLERANCE = 1.0e-9;
-    private static final float SCAN_TOLERANCE = 1.0e-3F;
-    private static final int SMALL_MAP = 64;
-    private static final int SMALL_HALF = SMALL_MAP / 2;
-    private static final int SMALL_REACH = 48;
-    private static final int[] SMALL_STRIDES = {1, 2, 4, 8, 16, 16};
+    private static final float SCAN_TOLERANCE = 2.0e-3F;
+    private static final int TEST_MAP = 256;
+    private static final int TEST_HALF = TEST_MAP / 2;
+    private static final int TEST_SMOOTH = TEST_MAP / SnowLee.SMOOTH_SCALE;
+    private static final int TEST_REACH = 128;
+    private static final int[] TEST_STRIDES = {1, 2, 4, 8, 16, 32, 64};
     private static final short GROUND = 64;
     private static final Pattern GLSL_CONST_PATTERN = Pattern.compile(
             "^\\s*const\\s+(?:int|uint|float)\\s+([A-Z0-9_]+)\\s*=\\s*([^;]+);");
 
-    @GameTest(template = "phase0a_empty", timeoutTicks = 60)
-    public static void scanMatchesBruteForceOnWallRidgeSlopeDiagonalAndTower(GameTestHelper helper) {
-        float[] output = new float[SMALL_MAP * SMALL_MAP];
-        float[] scratch = new float[SMALL_MAP * SMALL_MAP];
-        double slope = 0.2;
+    @GameTest(template = "phase0a_empty", timeoutTicks = 120)
+    public static void smoothTerrainAndReliefScanMatchBruteForceOnAllShapes(GameTestHelper helper) {
+        float[] smooth = new float[TEST_SMOOTH * TEST_SMOOTH];
+        float[] smoothScratchA = new float[2 * TEST_SMOOTH * TEST_SMOOTH];
+        float[] smoothScratchB = new float[2 * TEST_SMOOTH * TEST_SMOOTH];
+        float[] leeOut = new float[TEST_MAP * TEST_MAP];
+        float[] slopeOut = new float[TEST_MAP * TEST_MAP];
+        float[] rawA = new float[TEST_MAP * TEST_MAP];
+        float[] rawB = new float[TEST_MAP * TEST_MAP];
+        float[] relA = new float[TEST_MAP * TEST_MAP];
+        float[] relB = new float[TEST_MAP * TEST_MAP];
+        double slope = 0.21;
 
-        // 1. A 1-block-thick, 7-block-wide wall across +x wind at x = -10, height 68 (drop 4, lee length 20):
-        SnowLee.HeightLookup wall = (x, z) -> (x == -10 && z >= -3 && z <= 3) ? (short) 68 : GROUND;
-        assertScanMatchesBruteForce(helper, "7-wide wall", SMALL_MAP, SMALL_REACH, SMALL_STRIDES, wall, 0, 0,
-                -SMALL_HALF, -SMALL_HALF, SMALL_MAP, 1.0, 0.0, slope, true, output, scratch);
-        // On top of the wall (t = 0 excluded): no lee above 68, lee height comes from upwind ground (64 - 0.2):
-        float wallTopLee = SnowLee.sampleBilinear(output, SMALL_MAP, -9.5, 0.5, 1.0, 0.0);
-        checkFloatNear(helper, "lee height on top of wall", wallTopLee, 63.8F, SCAN_TOLERANCE);
-        // 10 blocks behind the wall center: 68 - 0.2 * 10 = 66.0:
-        float behindWall = SnowLee.sampleBilinear(output, SMALL_MAP, 0.5, 0.5, 1.0, 0.0);
-        checkFloatNear(helper, "lee height 10 blocks behind wall", behindWall, 66.0F, SCAN_TOLERANCE);
-        // 20 blocks behind the wall center: 68 - 0.2 * 20 = 64.0 (lee ends at drop / c = 20):
-        float atLeeEnd = SnowLee.sampleBilinear(output, SMALL_MAP, 10.5, 0.5, 1.0, 0.0);
-        checkFloatNear(helper, "lee height at drop / c behind wall", atLeeEnd, 64.0F, SCAN_TOLERANCE);
-        // 25 blocks behind the wall: back to flat ground (64 - 0.2 = 63.8):
-        float pastLee = SnowLee.sampleBilinear(output, SMALL_MAP, 15.5, 0.5, 1.0, 0.0);
-        checkFloatNear(helper, "lee height past wall lee", pastLee, 63.8F, SCAN_TOLERANCE);
-
-        // 2. A 1-block tower 20 blocks tall casts NO lee at 0, 30 and 45 degrees:
-        SnowLee.HeightLookup tower = (x, z) -> (x == -10 && z == 0) ? (short) 84 : GROUND;
-        double[] towerAngles = {0.0, Math.toRadians(30.0), Math.toRadians(45.0)};
-        for (double angle : towerAngles) {
-            double dirX = Math.cos(angle);
-            double dirZ = Math.sin(angle);
-            assertScanMatchesBruteForce(helper, "1-block tower at " + Math.toDegrees(angle) + " deg", SMALL_MAP,
-                    SMALL_REACH, SMALL_STRIDES, tower, 0, 0, -SMALL_HALF, -SMALL_HALF, SMALL_MAP, dirX, dirZ, slope,
-                    true, output, scratch);
-            for (int index = 0; index < output.length; index++) {
-                if (output[index] > GROUND) {
-                    helper.fail("1-block tower at " + Math.toDegrees(angle) + " deg cast a lee of " + output[index]
-                            + " at texel " + index);
-                    return;
+        // 0. Normalized Gaussian smoothing matches brute force 2D sum and does not droop next to UNKNOWN columns:
+        SnowLee.HeightLookup partialFlat = (x, z) -> x < -40 ? FarHeights.UNKNOWN : GROUND;
+        SnowLee.buildSmoothHeights(TEST_MAP, partialFlat, -TEST_HALF, -TEST_HALF, smooth, smoothScratchA,
+                smoothScratchB);
+        int[] checkCoords = {0, 10, 44, 64, 90, 127};
+        for (int tz : checkCoords) {
+            for (int tx : checkCoords) {
+                float expected = SnowLee.bruteForceSmoothTexel(TEST_MAP, partialFlat, -TEST_HALF, -TEST_HALF, tx, tz);
+                float actual = smooth[tz * TEST_SMOOTH + tx];
+                checkFloatNear(helper, "partialFlat smooth at (" + tx + ", " + tz + ")", actual, expected, 1.0e-2F);
+                if (tx >= 44) {
+                    checkFloatNear(helper, "normalized smooth next to UNKNOWN", actual, GROUND, 1.0e-2F);
                 }
             }
         }
 
-        // A 2-block-wide pillar across +x wind casts NO lee; a 3-block-wide wall DOES cast a lee along its center:
-        SnowLee.HeightLookup twoWide = (x, z) -> (x == -10 && (z == 0 || z == 1)) ? (short) 84 : GROUND;
-        SnowLee.scan(SMALL_MAP, SMALL_STRIDES, twoWide, 0, 0, -SMALL_HALF, -SMALL_HALF, SMALL_MAP, 1.0, 0.0, slope,
-                true, output, scratch);
-        for (int index = 0; index < output.length; index++) {
-            if (output[index] > GROUND) {
-                helper.fail("2-block-wide pillar cast a lee of " + output[index] + " at texel " + index);
-                return;
+        // 1. Plain: S = 64 everywhere, h_lee < 64, terrainSlope = 0, full snow everywhere:
+        SnowLee.HeightLookup plain = (x, z) -> GROUND;
+        runSmoothAndScan(plain, TEST_MAP, TEST_STRIDES, 1.0, 0.0, slope, true, smooth, smoothScratchA, smoothScratchB,
+                leeOut, slopeOut, rawA, rawB, relA, relB);
+        assertScanMatchesBruteForceSampled(helper, "plain", plain, smooth, 1.0, 0.0, slope, true, leeOut);
+        float plainLee = SnowLee.sampleBilinear(leeOut, TEST_MAP, 0.5, 0.5, 1.0, 0.0);
+        float plainSlope = SnowLee.sampleBilinear(slopeOut, TEST_MAP, 0.5, 0.5, 1.0, 0.0);
+        helper.assertTrue(plainLee < GROUND, "plain got lee height " + plainLee + " instead of below " + GROUND);
+        checkFloatNear(helper, "plain terrain slope", plainSlope, 0.0F, 1.0e-3F);
+
+        // 2. Rounded 60-block hill centered at x = -56, z = 0 (radius 88 raised cosine, foot at x = +32):
+        // leaves the plain behind it (x = 40..100, where terrain is 64) its full snow (h_lee <= 64):
+        SnowLee.HeightLookup roundedHill = (x, z) -> {
+            double dx = x + 56.0;
+            double dz = z;
+            double radius = Math.sqrt(dx * dx + dz * dz);
+            if (radius >= 88.0) {
+                return GROUND;
             }
-        }
-        SnowLee.HeightLookup threeWide = (x, z) -> (x == -10 && z >= -1 && z <= 1) ? (short) 84 : GROUND;
-        SnowLee.scan(SMALL_MAP, SMALL_STRIDES, threeWide, 0, 0, -SMALL_HALF, -SMALL_HALF, SMALL_MAP, 1.0, 0.0, slope,
-                true, output, scratch);
-        float threeWideLee = SnowLee.sampleBilinear(output, SMALL_MAP, 0.5, 0.5, 1.0, 0.0);
-        checkFloatNear(helper, "3-wide wall lee 10 blocks behind center", threeWideLee, 82.0F, SCAN_TOLERANCE);
-
-        // 3. A ridge (plateau at 84 for x <= -10, dropping to 64 for x > -10):
-        SnowLee.HeightLookup ridge = (x, z) -> x <= -10 ? (short) 84 : GROUND;
-        assertScanMatchesBruteForce(helper, "ridge", SMALL_MAP, SMALL_REACH, SMALL_STRIDES, ridge, 0, 0, -SMALL_HALF,
-                -SMALL_HALF, SMALL_MAP, 1.0, 0.0, slope, true, output, scratch);
-        float ridgeTop = SnowLee.sampleBilinear(output, SMALL_MAP, -15.5, 0.5, 1.0, 0.0);
-        helper.assertTrue(ridgeTop < 84.0F, "ridge plateau top got lee height " + ridgeTop + " instead of below 84");
-        float ridgeLee = SnowLee.sampleBilinear(output, SMALL_MAP, 0.5, 0.5, 1.0, 0.0);
-        checkFloatNear(helper, "ridge lee 10 blocks downwind", ridgeLee, 82.0F, SCAN_TOLERANCE);
-
-        // 4. A gentle slope gentler than c casts no lee above its own terrain height:
-        // Steps down 1 block every 4 blocks (average 0.25) with c = 1.0 so even adjacent steps never exceed H(x):
-        SnowLee.HeightLookup gentleSlope = (x, z) -> (short) (80 - Math.floorDiv(x + 32, 4));
-        assertScanMatchesBruteForce(helper, "gentle slope", SMALL_MAP, SMALL_REACH, SMALL_STRIDES, gentleSlope, 0, 0,
-                -SMALL_HALF, -SMALL_HALF, SMALL_MAP, 1.0, 0.0, 1.0, true, output, scratch);
-        for (int x = -20; x <= 20; x++) {
-            float lee = SnowLee.sampleBilinear(output, SMALL_MAP, x + 0.5, 0.5, 1.0, 0.0);
-            short terrain = gentleSlope.heightAt(x, 0);
+            double rise = 60.0 * 0.5 * (1.0 + Math.cos(Math.PI * radius / 88.0));
+            return (short) Math.round(GROUND + rise);
+        };
+        runSmoothAndScan(roundedHill, TEST_MAP, TEST_STRIDES, 1.0, 0.0, slope, true, smooth, smoothScratchA,
+                smoothScratchB, leeOut, slopeOut, rawA, rawB, relA, relB);
+        assertScanMatchesBruteForceSampled(helper, "rounded 60-block hill", roundedHill, smooth, 1.0, 0.0, slope, true,
+                leeOut);
+        // Upwind slope has positive slope, downwind slope has negative slope:
+        float hillUpwindSlope = SnowLee.sampleBilinear(slopeOut, TEST_MAP, -85.5, 0.5, 1.0, 0.0);
+        float hillDownwindSlope = SnowLee.sampleBilinear(slopeOut, TEST_MAP, -25.5, 0.5, 1.0, 0.0);
+        helper.assertTrue(hillUpwindSlope > 0.3F, "hill upwind slope was " + hillUpwindSlope + ", expected > 0.3");
+        helper.assertTrue(hillDownwindSlope < -0.3F, "hill downwind slope was " + hillDownwindSlope
+                + ", expected < -0.3");
+        // Plain behind the rounded hill (x = 40..100, where terrain is back to 64) keeps full snow (h_lee <= H):
+        for (int x = 40; x <= 100; x += 10) {
+            float lee = SnowLee.sampleBilinear(leeOut, TEST_MAP, x + 0.5, 0.5, 1.0, 0.0);
+            short terrain = roundedHill.heightAt(x, 0);
             if (lee > terrain) {
-                helper.fail("gentle slope cast a lee of " + lee + " above terrain height " + terrain + " at x = " + x);
+                helper.fail("rounded 60-block hill cast lee " + lee + " onto plain of height " + terrain + " at x = "
+                        + x);
                 return;
             }
         }
 
-        // 5. Diagonal 45-degree wind across a 1-block-thick long wall: keeps its lee and matches brute force:
-        double diag = Math.sqrt(0.5);
-        SnowLee.HeightLookup longWall = (x, z) -> (x == -8 && z >= -24 && z <= 24) ? (short) 74 : GROUND;
-        assertScanMatchesBruteForce(helper, "diagonal wind over 1-thick wall", SMALL_MAP, SMALL_REACH, SMALL_STRIDES,
-                longWall, 0, 0, -SMALL_HALF, -SMALL_HALF, SMALL_MAP, diag, diag, slope, true, output, scratch);
-        // Point (0.5, 0.5) is 8 blocks east of x = -8, so along 45-deg ray upwind distance is ~8 * sqrt(2) = 11.31:
-        float diagLee = SnowLee.sampleBilinear(output, SMALL_MAP, 0.5, 0.5, diag, diag);
-        helper.assertTrue(diagLee > 70.5F && diagLee < 72.5F,
-                "diagonal wind over 1-block-thick wall gave lee height " + diagLee + " instead of about 71.5");
+        // 3. Sharp 45-degree ridge (50 blocks tall at x = -50, foot at x = 0): lee behind crest, reattaches past foot:
+        SnowLee.HeightLookup sharpRidge = (x, z) -> (short) Math.max(GROUND, 114 - Math.abs(x + 50));
+        runSmoothAndScan(sharpRidge, TEST_MAP, TEST_STRIDES, 1.0, 0.0, slope, true, smooth, smoothScratchA,
+                smoothScratchB, leeOut, slopeOut, rawA, rawB, relA, relB);
+        assertScanMatchesBruteForceSampled(helper, "45-degree ridge", sharpRidge, smooth, 1.0, 0.0, slope, true, leeOut);
+        float behindRidgeCrest = SnowLee.sampleBilinear(leeOut, TEST_MAP, -44.5, 0.5, 1.0, 0.0);
+        helper.assertTrue(behindRidgeCrest > sharpRidge.heightAt(-45, 0) + 1.0F,
+                "45-degree ridge crest cast no separation lee, got " + behindRidgeCrest);
+        // Far past foot (x = 50, 50 blocks past foot = 100 blocks from crest) has reattached (raw scan would be 93!):
+        float farPastRidge = SnowLee.sampleBilinear(leeOut, TEST_MAP, 50.5, 0.5, 1.0, 0.0);
+        helper.assertTrue(farPastRidge <= GROUND, "45-degree ridge failed to reattach by x = 50, got " + farPastRidge);
 
-        // 6. Calm wind casts no lee:
-        helper.assertTrue(SnowLee.isCalm(0.0), "wind speed 0.0 was not treated as calm");
-        helper.assertTrue(SnowLee.isCalm(0.005), "wind speed 0.005 was not treated as calm");
-        helper.assertTrue(SnowLee.isCalm(Double.NaN), "NaN wind speed was not treated as calm");
-        helper.assertFalse(SnowLee.isCalm(1.0), "wind speed 1.0 was treated as calm");
-        helper.assertTrue(Double.isInfinite(SnowLee.slope(0.6, 0.0, 0.15)),
-                "calm wind slope was finite instead of infinite");
-        checkNear(helper, "calm wind leeFallSpeed", SnowLee.leeFallSpeed(0.2, 0.0), 0.0);
+        // 4a. 20-block cliff downwind (plateau 84 for x <= -20, plain 64 for x > -20): lee behind rim, reattaches ~48:
+        SnowLee.HeightLookup downwindCliff = (x, z) -> x <= -20 ? (short) 84 : GROUND;
+        runSmoothAndScan(downwindCliff, TEST_MAP, TEST_STRIDES, 1.0, 0.0, slope, true, smooth, smoothScratchA,
+                smoothScratchB, leeOut, slopeOut, rawA, rawB, relA, relB);
+        assertScanMatchesBruteForceSampled(helper, "downwind 20-block cliff", downwindCliff, smooth, 1.0, 0.0, slope,
+                true, leeOut);
+        float cliffRim = SnowLee.sampleBilinear(leeOut, TEST_MAP, -18.5, 0.5, 1.0, 0.0);
+        helper.assertTrue(cliffRim > 81.0F && cliffRim <= 84.0F,
+                "20-block cliff rim lee at t=1 was " + cliffRim + " instead of near 83");
+        float cliffMid = SnowLee.sampleBilinear(leeOut, TEST_MAP, -9.5, 0.5, 1.0, 0.0);
+        helper.assertTrue(cliffMid > 72.0F, "20-block cliff lee 10 blocks behind was " + cliffMid + ", expected > 72");
+        float cliffReattached = SnowLee.sampleBilinear(leeOut, TEST_MAP, 40.5, 0.5, 1.0, 0.0);
+        helper.assertTrue(cliffReattached <= GROUND,
+                "20-block cliff lee did not reattach by 60 blocks behind, got " + cliffReattached);
+
+        // 4b. 20-block cliff upwind foot (plain 64 for x < 20, plateau 84 for x >= 20): NO false lee at upwind foot:
+        SnowLee.HeightLookup upwindCliff = (x, z) -> x >= 20 ? (short) 84 : GROUND;
+        runSmoothAndScan(upwindCliff, TEST_MAP, TEST_STRIDES, 1.0, 0.0, slope, true, smooth, smoothScratchA,
+                smoothScratchB, leeOut, slopeOut, rawA, rawB, relA, relB);
+        assertScanMatchesBruteForceSampled(helper, "upwind 20-block cliff", upwindCliff, smooth, 1.0, 0.0, slope,
+                true, leeOut);
+        for (int x = 0; x <= 19; x++) {
+            float upwindLee = SnowLee.sampleBilinear(leeOut, TEST_MAP, x + 0.5, 0.5, 1.0, 0.0);
+            if (upwindLee > GROUND) {
+                helper.fail("20-block cliff cast false lee " + upwindLee + " at upwind foot x = " + x);
+                return;
+            }
+        }
+
+        // 5. House (8x8 footprint, 5 blocks tall at x in [-24, -17], z in [-4, 3]): keeps its lee:
+        SnowLee.HeightLookup house = (x, z) -> (x >= -24 && x <= -17 && z >= -4 && z <= 3) ? (short) 69 : GROUND;
+        runSmoothAndScan(house, TEST_MAP, TEST_STRIDES, 1.0, 0.0, slope, true, smooth, smoothScratchA, smoothScratchB,
+                leeOut, slopeOut, rawA, rawB, relA, relB);
+        assertScanMatchesBruteForceSampled(helper, "8x8 house", house, smooth, 1.0, 0.0, slope, true, leeOut);
+        float behindHouse = SnowLee.sampleBilinear(leeOut, TEST_MAP, -6.5, 0.5, 1.0, 0.0);
+        helper.assertTrue(behindHouse > 66.0F && behindHouse < 67.5F,
+                "8x8 house lee 10 blocks behind was " + behindHouse + " instead of about 66.8");
+
+        // 6. 1-block-thick, 7-wide wall at x = -20, z in [-3, 3], height 68: keeps its lee, wall top stays open:
+        SnowLee.HeightLookup wall = (x, z) -> (x == -20 && z >= -3 && z <= 3) ? (short) 68 : GROUND;
+        runSmoothAndScan(wall, TEST_MAP, TEST_STRIDES, 1.0, 0.0, slope, true, smooth, smoothScratchA, smoothScratchB,
+                leeOut, slopeOut, rawA, rawB, relA, relB);
+        assertScanMatchesBruteForceSampled(helper, "7-wide wall", wall, smooth, 1.0, 0.0, slope, true, leeOut);
+        float wallTop = SnowLee.sampleBilinear(leeOut, TEST_MAP, -19.5, 0.5, 1.0, 0.0);
+        helper.assertTrue(wallTop < GROUND, "wall top got lee " + wallTop + " instead of below " + GROUND);
+        float behindWall = SnowLee.sampleBilinear(leeOut, TEST_MAP, -9.5, 0.5, 1.0, 0.0);
+        helper.assertTrue(behindWall > 65.5F && behindWall < 66.2F,
+                "7-wide wall lee 10 blocks behind was " + behindWall + " instead of about 65.9");
+
+        // Diagonal 45-degree wind over a 1-block-thick long wall: keeps its lee and matches brute force:
+        double diag = Math.sqrt(0.5);
+        SnowLee.HeightLookup longWall = (x, z) -> (x == -8 && z >= -40 && z <= 40) ? (short) 74 : GROUND;
+        runSmoothAndScan(longWall, TEST_MAP, TEST_STRIDES, diag, diag, slope, true, smooth, smoothScratchA,
+                smoothScratchB, leeOut, slopeOut, rawA, rawB, relA, relB);
+        assertScanMatchesBruteForceSampled(helper, "diagonal 1-thick wall", longWall, smooth, diag, diag, slope, true,
+                leeOut);
+        float diagLee = SnowLee.sampleBilinear(leeOut, TEST_MAP, 0.5, 0.5, diag, diag);
+        helper.assertTrue(diagLee > 70.0F && diagLee < 72.5F,
+                "diagonal 1-thick wall lee was " + diagLee + " instead of about 71.3");
+
+        // 7. 1-block tower at 0, 30, 45 deg and 2-wide pillar cast NO lee; 3-wide wall keeps its lee:
+        SnowLee.HeightLookup tower = (x, z) -> (x == -20 && z == 0) ? (short) 84 : GROUND;
+        double[] towerAngles = {0.0, Math.toRadians(30.0), Math.toRadians(45.0)};
+        for (double angle : towerAngles) {
+            double dirX = Math.cos(angle);
+            double dirZ = Math.sin(angle);
+            runSmoothAndScan(tower, TEST_MAP, TEST_STRIDES, dirX, dirZ, slope, true, smooth, smoothScratchA,
+                    smoothScratchB, leeOut, slopeOut, rawA, rawB, relA, relB);
+            for (int index = 0; index < leeOut.length; index++) {
+                if (leeOut[index] > GROUND) {
+                    helper.fail("1-block tower at " + Math.toDegrees(angle) + " deg cast lee " + leeOut[index]);
+                    return;
+                }
+            }
+        }
+        SnowLee.HeightLookup twoWide = (x, z) -> (x == -20 && (z == 0 || z == 1)) ? (short) 84 : GROUND;
+        runSmoothAndScan(twoWide, TEST_MAP, TEST_STRIDES, 1.0, 0.0, slope, true, smooth, smoothScratchA, smoothScratchB,
+                leeOut, slopeOut, rawA, rawB, relA, relB);
+        for (int index = 0; index < leeOut.length; index++) {
+            if (leeOut[index] > GROUND) {
+                helper.fail("2-wide pillar cast lee " + leeOut[index]);
+                return;
+            }
+        }
+        SnowLee.HeightLookup threeWide = (x, z) -> (x == -20 && z >= -1 && z <= 1) ? (short) 84 : GROUND;
+        runSmoothAndScan(threeWide, TEST_MAP, TEST_STRIDES, 1.0, 0.0, slope, true, smooth, smoothScratchA,
+                smoothScratchB, leeOut, slopeOut, rawA, rawB, relA, relB);
+        float threeWideLee = SnowLee.sampleBilinear(leeOut, TEST_MAP, -9.5, 0.5, 1.0, 0.0);
+        helper.assertTrue(threeWideLee > 81.0F, "3-wide wall lee 10 blocks behind was " + threeWideLee
+                + ", expected > 81");
 
         helper.succeed();
     }
 
-    @GameTest(template = "phase0a_empty", timeoutTicks = 100)
-    public static void fullSizeScanReaches480AndDoesNotWrapOutsideWindow(GameTestHelper helper) {
-        float[] output = new float[SnowLee.MAP_SIZE * SnowLee.MAP_SIZE];
-        float[] scratch = new float[SnowLee.MAP_SIZE * SnowLee.MAP_SIZE];
+    @GameTest(template = "phase0a_empty", timeoutTicks = 120)
+    public static void fullSizeScanReaches256AndDoesNotWrapOutsideWindow(GameTestHelper helper) {
         int[] strides = SnowLee.passStrides();
-        double slope = 0.2;
-
-        // Verify the production stride sum covers exactly REACH = 480:
         int covered = 1;
         for (int stride : strides) {
             helper.assertTrue(stride <= covered, "stride " + stride + " exceeds covered range " + covered
@@ -171,12 +246,20 @@ public final class SnowLeeGameTests {
         helper.assertTrue(covered == SnowLee.REACH, "production strides cover " + covered + " instead of "
                 + SnowLee.REACH);
 
-        // Place:
-        // - a ridge 450 blocks upwind of anchor (x = -450, height 200) -> reaches anchor at 200 - 0.2 * 450 = 110;
-        // - a huge mountain 400 blocks DOWNWIND of anchor (x = +400, height 300) -> must NEVER wrap to anchor;
-        // - a huge wall OUTSIDE the FarHeights window (x = -520, height 300) -> must NEVER be read.
+        float[] smooth = new float[SnowLee.SMOOTH_SIZE * SnowLee.SMOOTH_SIZE];
+        float[] smoothScratchA = new float[2 * SnowLee.SMOOTH_SIZE * SnowLee.SMOOTH_SIZE];
+        float[] smoothScratchB = new float[2 * SnowLee.SMOOTH_SIZE * SnowLee.SMOOTH_SIZE];
+        float[] leeOut = new float[SnowLee.MAP_SIZE * SnowLee.MAP_SIZE];
+        float[] slopeOut = new float[SnowLee.MAP_SIZE * SnowLee.MAP_SIZE];
+        float[] rawA = new float[SnowLee.MAP_SIZE * SnowLee.MAP_SIZE];
+        float[] rawB = new float[SnowLee.MAP_SIZE * SnowLee.MAP_SIZE];
+        float[] relA = new float[SnowLee.MAP_SIZE * SnowLee.MAP_SIZE];
+        float[] relB = new float[SnowLee.MAP_SIZE * SnowLee.MAP_SIZE];
+        double slope = 0.2;
+
+        // Narrow tall wall 200 blocks upwind (within REACH = 256), huge mountain 400 blocks downwind, huge wall outside:
         SnowLee.HeightLookup terrain = (x, z) -> {
-            if (x == -450) {
+            if (x == -200) {
                 return (short) 200;
             }
             if (x >= 400) {
@@ -187,56 +270,72 @@ public final class SnowLeeGameTests {
             }
             return GROUND;
         };
-        SnowLee.scan(SnowLee.MAP_SIZE, strides, terrain, 0, 0, -SnowLee.HALF_SIZE, -SnowLee.HALF_SIZE,
-                SnowLee.MAP_SIZE, 1.0, 0.0, slope, true, output, scratch);
+        SnowLee.buildSmoothHeights(SnowLee.MAP_SIZE, terrain, -SnowLee.HALF_SIZE, -SnowLee.HALF_SIZE, smooth,
+                smoothScratchA, smoothScratchB);
+        SnowLee.scan(SnowLee.MAP_SIZE, strides, terrain, smooth, SnowLee.SMOOTH_SIZE, -SnowLee.HALF_SIZE,
+                -SnowLee.HALF_SIZE, 0, 0, -SnowLee.HALF_SIZE, -SnowLee.HALF_SIZE, SnowLee.MAP_SIZE, 1.0, 0.0, slope,
+                true, leeOut, slopeOut, rawA, rawB, relA, relB);
 
-        float atAnchor = SnowLee.sampleBilinear(output, SnowLee.MAP_SIZE, 0.5, 0.5, 1.0, 0.0);
-        checkFloatNear(helper, "450-block upwind ridge at anchor", atAnchor, 110.0F, 0.05F);
+        float atAnchor = SnowLee.sampleBilinear(leeOut, SnowLee.MAP_SIZE, 0.5, 0.5, 1.0, 0.0);
+        // Raw gives 200 - 40 = 160; thin 1-block wall raises S(-200) by ~3.4 blocks -> S + e_rel ~ 156.6:
+        helper.assertTrue(atAnchor > 152.0F && atAnchor <= 160.1F,
+                "200-block upwind tall wall at anchor was " + atAnchor + " instead of about 156");
 
-        // Upwind of the -450 ridge (at x = -460), neither the x = -520 out-of-window wall nor the x >= +400 downwind
-        // mountain may wrap in, so lee height must be ground - slope = 63.8:
-        float upwindOfRidge = SnowLee.sampleBilinear(output, SnowLee.MAP_SIZE, -459.5, 0.5, 1.0, 0.0);
-        checkFloatNear(helper, "upwind of ridge with no wrap", upwindOfRidge, 63.8F, 0.05F);
+        // Upwind of the -200 wall (at x = -220), neither the out-of-window wall nor downwind mountain may wrap in:
+        float upwindOfWall = SnowLee.sampleBilinear(leeOut, SnowLee.MAP_SIZE, -219.5, 0.5, 1.0, 0.0);
+        helper.assertTrue(upwindOfWall <= GROUND, "upwind of wall leaked out-of-window or wrapped terrain: "
+                + upwindOfWall);
 
-        // At 45 degrees, corners of the rotated 1024 map lie outside FarHeights's [-512, 511]^2 window.
-        // Put a 300-block wall strictly outside [-512, 511]^2 and check nothing leaks in:
+        // Diagonal out-of-window terrain must not leak in:
         double diag = Math.sqrt(0.5);
         SnowLee.HeightLookup outsideOnly = (x, z) -> (x < -512 || x >= 512 || z < -512 || z >= 512)
                 ? (short) 300 : GROUND;
-        SnowLee.scan(SnowLee.MAP_SIZE, strides, outsideOnly, 0, 0, -SnowLee.HALF_SIZE, -SnowLee.HALF_SIZE,
-                SnowLee.MAP_SIZE, diag, diag, slope, true, output, scratch);
-        float diagCenter = SnowLee.sampleBilinear(output, SnowLee.MAP_SIZE, 0.5, 0.5, diag, diag);
-        helper.assertTrue(diagCenter <= GROUND, "diagonal scan leaked out-of-window terrain, giving " + diagCenter);
-        // Out-of-bounds bilinear lookup returns NO_HEIGHT:
-        float outOfBounds = SnowLee.sampleBilinear(output, SnowLee.MAP_SIZE, 600.0, 0.0, 1.0, 0.0);
+        SnowLee.buildSmoothHeights(SnowLee.MAP_SIZE, outsideOnly, -SnowLee.HALF_SIZE, -SnowLee.HALF_SIZE, smooth,
+                smoothScratchA, smoothScratchB);
+        SnowLee.scan(SnowLee.MAP_SIZE, strides, outsideOnly, smooth, SnowLee.SMOOTH_SIZE, -SnowLee.HALF_SIZE,
+                -SnowLee.HALF_SIZE, 0, 0, -SnowLee.HALF_SIZE, -SnowLee.HALF_SIZE, SnowLee.MAP_SIZE, diag, diag, slope,
+                true, leeOut, slopeOut, rawA, rawB, relA, relB);
+        float diagCenter = SnowLee.sampleBilinear(leeOut, SnowLee.MAP_SIZE, 0.5, 0.5, diag, diag);
+        helper.assertTrue(diagCenter <= GROUND, "diagonal scan leaked out-of-window terrain: " + diagCenter);
+
+        float outOfBounds = SnowLee.sampleBilinear(leeOut, SnowLee.MAP_SIZE, 600.0, 0.0, 1.0, 0.0);
         checkFloatNear(helper, "out-of-bounds lookup", outOfBounds, (float) SnowLee.NO_HEIGHT, 0.01F);
 
         helper.succeed();
     }
 
-    @GameTest(template = "phase0a_empty", timeoutTicks = 40)
-    public static void leeFadeWeightSinkingAndRebuildTriggersBehaveAsDesigned(GameTestHelper helper) {
-        // Lee share on flat ground (h <= H): 1.0 everywhere:
-        checkNear(helper, "flat ground at ground", SnowLee.leeShare(64.0, 63.85, 64.0, 3.0), 1.0);
-        checkNear(helper, "flat ground just above ground", SnowLee.leeShare(64.1, 63.85, 64.0, 3.0), 1.0);
-        checkNear(helper, "flat ground with band 0", SnowLee.leeShare(64.0, 63.85, 64.0, 0.0), 1.0);
-        // Deep lee (h - H = 6.0 >= band = 3.0):
-        checkNear(helper, "deep lee on floor", SnowLee.leeShare(64.0, 70.0, 64.0, 3.0), 0.0);
-        checkNear(helper, "deep lee at surface", SnowLee.leeShare(70.0, 70.0, 64.0, 3.0), 0.0);
-        checkNear(helper, "deep lee halfway through band", SnowLee.leeShare(71.5, 70.0, 64.0, 3.0), 0.5);
-        checkNear(helper, "deep lee above band", SnowLee.leeShare(73.0, 70.0, 64.0, 3.0), 1.0);
-        // Shallow lee tip (h - H = 1.0 < band = 3.0): effectiveBand = 1.0:
-        checkNear(helper, "shallow lee below surface", SnowLee.leeShare(64.5, 65.0, 64.0, 3.0), 0.0);
-        checkNear(helper, "shallow lee halfway through tip band", SnowLee.leeShare(65.5, 65.0, 64.0, 3.0), 0.5);
-        checkNear(helper, "shallow lee above tip band", SnowLee.leeShare(66.0, 65.0, 64.0, 3.0), 1.0);
-        // Band 0 in a lee: sharp step at h:
-        checkNear(helper, "sharp band below surface", SnowLee.leeShare(69.99, 70.0, 64.0, 0.0), 0.0);
-        checkNear(helper, "sharp band at surface", SnowLee.leeShare(70.0, 70.0, 64.0, 0.0), 1.0);
-        // Unknown heights give 1.0:
-        checkNear(helper, "unknown lee height", SnowLee.leeShare(65.0, SnowLee.NO_HEIGHT, 64.0, 3.0), 1.0);
-        checkNear(helper, "unknown column height", SnowLee.leeShare(65.0, 70.0, SnowLee.NO_HEIGHT, 3.0), 1.0);
+    @GameTest(template = "phase0a_empty", timeoutTicks = 60)
+    public static void leeShareOverhangVerticalVelocityAndRebuildTriggersBehaveAsDesigned(GameTestHelper helper) {
+        // Flat ground and slab/snow layer above columnHeight - 1.0:
+        checkNear(helper, "flat ground at ground", SnowLee.leeShare(64.0, 63.85, 64.0, 64.0, 3.0), 1.0);
+        checkNear(helper, "slab on flat ground", SnowLee.leeShare(63.5, 63.85, 64.0, 64.0, 3.0), 1.0);
+        checkNear(helper, "snow layer on flat ground", SnowLee.leeShare(63.125, 63.85, 64.0, 64.0, 3.0), 1.0);
+        checkNear(helper, "flat ground with band 0", SnowLee.leeShare(64.0, 63.85, 64.0, 64.0, 0.0), 1.0);
 
-        // Per-flake lee weight distribution and independence from shelter salt:
+        // Deep lee and shallow lee tip above ground:
+        checkNear(helper, "deep lee on floor", SnowLee.leeShare(64.0, 70.0, 64.0, 64.0, 3.0), 0.0);
+        checkNear(helper, "deep lee at surface", SnowLee.leeShare(70.0, 70.0, 64.0, 64.0, 3.0), 0.0);
+        checkNear(helper, "deep lee halfway through band", SnowLee.leeShare(71.5, 70.0, 64.0, 64.0, 3.0), 0.5);
+        checkNear(helper, "deep lee above band", SnowLee.leeShare(73.0, 70.0, 64.0, 64.0, 3.0), 1.0);
+        checkNear(helper, "shallow lee halfway through tip band", SnowLee.leeShare(65.5, 65.0, 64.0, 64.0, 3.0), 0.5);
+        checkNear(helper, "sharp band below surface", SnowLee.leeShare(69.99, 70.0, 64.0, 64.0, 0.0), 0.0);
+        checkNear(helper, "sharp band at surface", SnowLee.leeShare(70.0, 70.0, 64.0, 64.0, 0.0), 1.0);
+
+        // Overhang cases (worldY < columnHeight - 1.0):
+        // Under a 2-block ravine/cliff lip in cross-wind lee (H = 85, h = 82, S = 74, worldY = 70): hidden!
+        checkNear(helper, "under cliff lip in lee", SnowLee.leeShare(70.0, 82.0, 85.0, 74.0, 3.0), 0.0);
+        // Under a cave-mouth overhang where even S > h (H = 85, h = 78, S = 80, worldY = 70): still hidden!
+        checkNear(helper, "under cliff overhang with S > h", SnowLee.leeShare(70.0, 78.0, 85.0, 80.0, 3.0), 0.0);
+        // Under a bridge over an open plain (H = 75, h = 63.8, S = 64, worldY = 68 > h): full snow!
+        checkNear(helper, "under bridge over open plain", SnowLee.leeShare(68.0, 63.8, 75.0, 64.0, 3.0), 1.0);
+        // Under a high arch above a lee surface (H = 80, h = 71, S = 64, worldY = 72.5, band = 3): fades cleanly!
+        checkNear(helper, "under high arch above lee", SnowLee.leeShare(72.5, 71.0, 80.0, 64.0, 3.0), 0.5);
+
+        // Unknown heights give 1.0:
+        checkNear(helper, "unknown lee height", SnowLee.leeShare(65.0, SnowLee.NO_HEIGHT, 64.0, 64.0, 3.0), 1.0);
+        checkNear(helper, "unknown column height", SnowLee.leeShare(65.0, 70.0, SnowLee.NO_HEIGHT, 64.0, 3.0), 1.0);
+
+        // Per-flake lee weight distribution and salt independence:
         int flakes = 100000;
         double weightSum = 0.0;
         int identicalCount = 0;
@@ -254,50 +353,121 @@ public final class SnowLeeGameTests {
             }
         }
         double meanWeight = weightSum / flakes;
-        helper.assertTrue(Math.abs(meanWeight - 0.5) < 0.01, "mean leeWeight at share 0.5 is " + meanWeight
-                + " instead of 0.5");
+        helper.assertTrue(Math.abs(meanWeight - 0.5) < 0.01, "mean leeWeight at share 0.5 is " + meanWeight);
         helper.assertTrue(identicalCount < flakes * 0.6, "leeWeight coincided with shelterWeight on " + identicalCount
                 + " of " + flakes + " flakes");
 
-        // Sinking fall speed:
+        // Terrain-following vertical velocity + lee sinking:
         double ownFall = 0.6;
+        double windSpeed = 10.0;
         double leeFall = 2.1;
-        checkNear(helper, "sinking on flat ground", SnowLee.sinkingFallSpeed(65.0, 63.8, 64.0, ownFall, leeFall),
-                ownFall);
-        checkNear(helper, "sinking inside lee", SnowLee.sinkingFallSpeed(66.0, 70.0, 64.0, ownFall, leeFall), leeFall);
-        checkNear(helper, "sinking at lee surface", SnowLee.sinkingFallSpeed(70.0, 70.0, 64.0, ownFall, leeFall),
-                leeFall);
-        checkNear(helper, "sinking halfway above lee", SnowLee.sinkingFallSpeed(73.0, 70.0, 64.0, ownFall, leeFall),
-                0.5 * (ownFall + leeFall));
-        checkNear(helper, "sinking at top of fade zone", SnowLee.sinkingFallSpeed(76.0, 70.0, 64.0, ownFall, leeFall),
-                ownFall);
-        checkNear(helper, "sinking never slows a faster flake",
-                SnowLee.sinkingFallSpeed(66.0, 70.0, 64.0, 2.5, leeFall), 2.5);
+        // Flat ground, no lee: -ownFall:
+        checkNear(helper, "flat ground vy",
+                SnowLee.verticalVelocity(66.0, 63.8, 64.0, 64.0, 0.0, ownFall, windSpeed, leeFall), -ownFall);
+        // Upwind 1:2 slope (+0.5) at S: -0.6 + 5.0 = +4.4:
+        checkNear(helper, "upwind slope at S",
+                SnowLee.verticalVelocity(64.0, 63.8, 64.0, 64.0, 0.5, ownFall, windSpeed, leeFall), 4.4);
+        // Upwind 1:2 slope at S + 16 (half fade): -0.6 + 2.5 = +1.9:
+        checkNear(helper, "upwind slope at S + 16",
+                SnowLee.verticalVelocity(80.0, 63.8, 64.0, 64.0, 0.5, ownFall, windSpeed, leeFall), 1.9);
+        // Upwind 1:2 slope at S + 32 (faded out): -0.6:
+        checkNear(helper, "upwind slope at S + 32",
+                SnowLee.verticalVelocity(96.0, 63.8, 64.0, 64.0, 0.5, ownFall, windSpeed, leeFall), -ownFall);
+        // Downwind 1:2 slope (-0.5) at S: -0.6 - 5.0 = -5.6:
+        checkNear(helper, "downwind slope at S",
+                SnowLee.verticalVelocity(64.0, 63.8, 64.0, 64.0, -0.5, ownFall, windSpeed, leeFall), -5.6);
+        // Lee sinking on flat ground matches old sinkingFallSpeed:
+        checkNear(helper, "flat lee inside",
+                SnowLee.verticalVelocity(66.0, 70.0, 64.0, 64.0, 0.0, ownFall, windSpeed, leeFall), -leeFall);
+        checkNear(helper, "flat lee halfway above",
+                SnowLee.verticalVelocity(73.0, 70.0, 64.0, 64.0, 0.0, ownFall, windSpeed, leeFall),
+                -0.5 * (ownFall + leeFall));
+        checkNear(helper, "flat lee above fade zone",
+                SnowLee.verticalVelocity(76.0, 70.0, 64.0, 64.0, 0.0, ownFall, windSpeed, leeFall), -ownFall);
+        // Lee sinking behind cliff with downwind slope (-0.4): sinks at -(2.1 + 4.0) = -6.1:
+        checkNear(helper, "cliff lee with downwind slope",
+                SnowLee.verticalVelocity(70.0, 75.0, 64.0, 68.0, -0.4, ownFall, windSpeed, leeFall), -6.1);
+        // Calm wind disables both terrain-following and lee:
+        helper.assertTrue(SnowLee.isCalm(0.0), "wind speed 0.0 was not calm");
+        helper.assertTrue(Double.isInfinite(SnowLee.slope(0.6, 0.0, 0.15)), "calm wind slope was finite");
+        checkNear(helper, "calm wind vy",
+                SnowLee.verticalVelocity(64.0, 70.0, 64.0, 64.0, 0.5, ownFall, 0.0, 0.0), -ownFall);
 
-        // Rebuild triggers:
+        // Smooth and lee rebuild triggers:
+        helper.assertFalse(SnowLee.needsSmoothRebuild(true, 0, 0, 5L, 0, 0, 5L),
+                "identical smooth inputs triggered rebuild");
+        helper.assertTrue(SnowLee.needsSmoothRebuild(false, 0, 0, 5L, 0, 0, 5L),
+                "missing smooth map did not trigger rebuild");
+        helper.assertTrue(SnowLee.needsSmoothRebuild(true, 16, 0, 5L, 0, 0, 5L),
+                "window move did not trigger smooth rebuild");
+        helper.assertTrue(SnowLee.needsSmoothRebuild(true, 0, 0, 6L, 0, 0, 5L),
+                "heights edit did not trigger smooth rebuild");
         helper.assertFalse(SnowLee.needsRebuild(true, 0, 0, 5L, 1.0, 10.0, 0.6, 0.15, 0, 0, 5L, 1.0, 10.0, 0.6, 0.15),
-                "identical inputs triggered a lee map rebuild");
-        helper.assertTrue(SnowLee.needsRebuild(false, 0, 0, 5L, 1.0, 10.0, 0.6, 0.15, 0, 0, 5L, 1.0, 10.0, 0.6, 0.15),
-                "missing published map did not trigger a rebuild");
-        helper.assertTrue(SnowLee.needsRebuild(true, 16, 0, 5L, 1.0, 10.0, 0.6, 0.15, 0, 0, 5L, 1.0, 10.0, 0.6, 0.15),
-                "anchor move did not trigger a rebuild");
-        helper.assertTrue(SnowLee.needsRebuild(true, 0, 0, 6L, 1.0, 10.0, 0.6, 0.15, 0, 0, 5L, 1.0, 10.0, 0.6, 0.15),
-                "heights version change did not trigger a rebuild");
-        helper.assertFalse(SnowLee.needsRebuild(true, 0, 0, 5L, 1.0 + Math.toRadians(0.1), 10.0, 0.6, 0.15, 0, 0, 5L,
-                1.0, 10.0, 0.6, 0.15), "0.1 deg wind turn triggered a rebuild below 0.25 deg");
-        helper.assertTrue(SnowLee.needsRebuild(true, 0, 0, 5L, 1.0 + Math.toRadians(0.3), 10.0, 0.6, 0.15, 0, 0, 5L,
-                1.0, 10.0, 0.6, 0.15), "0.3 deg wind turn did not trigger a rebuild");
-        // Wrap across +pi / -pi must measure the small angle difference, not 2*pi:
+                "identical lee inputs triggered rebuild");
         helper.assertFalse(SnowLee.needsRebuild(true, 0, 0, 5L, -Math.PI + 0.001, 10.0, 0.6, 0.15, 0, 0, 5L,
-                Math.PI - 0.001, 10.0, 0.6, 0.15), "small turn across pi/-pi wrap triggered a rebuild");
-        helper.assertFalse(SnowLee.needsRebuild(true, 0, 0, 5L, 1.0, 10.1, 0.6, 0.15, 0, 0, 5L, 1.0, 10.0, 0.6, 0.15),
-                "1% speed change triggered a rebuild below 2%");
+                Math.PI - 0.001, 10.0, 0.6, 0.15), "small turn across pi/-pi triggered rebuild");
+        helper.assertTrue(SnowLee.needsRebuild(true, 0, 0, 5L, 1.0 + Math.toRadians(0.3), 10.0, 0.6, 0.15, 0, 0, 5L,
+                1.0, 10.0, 0.6, 0.15), "0.3 deg turn did not trigger rebuild");
         helper.assertTrue(SnowLee.needsRebuild(true, 0, 0, 5L, 1.0, 10.25, 0.6, 0.15, 0, 0, 5L, 1.0, 10.0, 0.6, 0.15),
-                "2.5% speed change did not trigger a rebuild");
-        helper.assertTrue(SnowLee.needsRebuild(true, 0, 0, 5L, 1.0, 10.0, 0.8, 0.15, 0, 0, 5L, 1.0, 10.0, 0.6, 0.15),
-                "fallSpeed change did not trigger a rebuild");
-        helper.assertTrue(SnowLee.needsRebuild(true, 0, 0, 5L, 1.0, 10.0, 0.6, 0.2, 0, 0, 5L, 1.0, 10.0, 0.6, 0.15),
-                "leeFill change did not trigger a rebuild");
+                "2.5% speed change did not trigger rebuild");
+
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 120)
+    public static void flakeCountsInSubBoxesOverHillStayWithinBand(GameTestHelper helper) {
+        // Build a 1D rounded hill (slope up to ~0.55) and simulate 16384 flakes for 300 frames (10 s = 2.5 crossings)
+        // on a plain, on the upwind slope, on the crest, and on the downwind slope to confirm no compounding bunching
+        // or top-of-box pileup occurs.
+        SnowLee.HeightLookup hill = (x, z) -> {
+            double dx = x;
+            double rise = 50.0 * Math.exp(-(dx * dx) / (76.0 * 76.0));
+            return (short) Math.round(GROUND + rise);
+        };
+        float[] smooth = new float[TEST_SMOOTH * TEST_SMOOTH];
+        float[] smoothScratchA = new float[2 * TEST_SMOOTH * TEST_SMOOTH];
+        float[] smoothScratchB = new float[2 * TEST_SMOOTH * TEST_SMOOTH];
+        float[] leeOut = new float[TEST_MAP * TEST_MAP];
+        float[] slopeOut = new float[TEST_MAP * TEST_MAP];
+        float[] rawA = new float[TEST_MAP * TEST_MAP];
+        float[] rawB = new float[TEST_MAP * TEST_MAP];
+        float[] relA = new float[TEST_MAP * TEST_MAP];
+        float[] relB = new float[TEST_MAP * TEST_MAP];
+        double windSpeed = 10.0;
+        double fallSpeed = 0.6;
+        double leeFill = 0.15;
+        double leeSlope = SnowLee.slope(fallSpeed, windSpeed, leeFill);
+        double leeFall = SnowLee.leeFallSpeed(leeSlope, windSpeed);
+        runSmoothAndScan(hill, TEST_MAP, TEST_STRIDES, 1.0, 0.0, leeSlope, true, smooth, smoothScratchA,
+                smoothScratchB, leeOut, slopeOut, rawA, rawB, relA, relB);
+
+        // Plain check: flat ground keeps tight [0.80, 1.25] sub-box density after 300 frames:
+        SnowLee.HeightLookup plain = (x, z) -> GROUND;
+        float[] plainSmooth = new float[TEST_SMOOTH * TEST_SMOOTH];
+        float[] plainLee = new float[TEST_MAP * TEST_MAP];
+        float[] plainSlope = new float[TEST_MAP * TEST_MAP];
+        runSmoothAndScan(plain, TEST_MAP, TEST_STRIDES, 1.0, 0.0, leeSlope, true, plainSmooth, smoothScratchA,
+                smoothScratchB, plainLee, plainSlope, rawA, rawB, relA, relB);
+        double[] plainBand = simulateHillSubBoxes(plain, plainSmooth, plainLee, plainSlope, 0.0, GROUND + 18.0,
+                windSpeed, fallSpeed, leeFall);
+        helper.assertTrue(plainBand[0] >= 0.80 && plainBand[1] <= 1.25,
+                "plain sub-box density band was [" + plainBand[0] + ", " + plainBand[1] + "] instead of [0.80, 1.25]");
+
+        // Hill checks: upwind slope (x = -54), crest (x = 0), downwind slope (x = +54):
+        double[] cameraPositions = {-54.0, 0.0, 54.0};
+        String[] labels = {"upwind slope", "crest", "downwind slope"};
+        for (int index = 0; index < cameraPositions.length; index++) {
+            double camX = cameraPositions[index];
+            double camY = hill.heightAt((int) camX, 0) + 18.0;
+            double[] band = simulateHillSubBoxes(hill, smooth, leeOut, slopeOut, camX, camY, windSpeed, fallSpeed,
+                    leeFall);
+            LOGGER.info("Hill sub-box flake density on {} (camX={}): min={}, max={}", labels[index], camX,
+                    String.format(java.util.Locale.ROOT, "%.3f", band[0]),
+                    String.format(java.util.Locale.ROOT, "%.3f", band[1]));
+            helper.assertTrue(band[0] >= 0.45 && band[1] <= 2.10,
+                    "hill " + labels[index] + " sub-box density band was [" + band[0] + ", " + band[1]
+                            + "], outside [0.45, 2.10]");
+        }
 
         helper.succeed();
     }
@@ -309,7 +479,11 @@ public final class SnowLeeGameTests {
         Map<String, Double> drawGlsl = parseShaderConstants(helper, "snow_flakes_draw.glsl");
         Map<String, Double> leeGlsl = parseShaderConstants(helper, "snow_lee.glsl");
         Map<String, Double> leeBuildFsh = parseShaderConstants(helper, "snow_lee_build.fsh");
-        if (flakesGlsl == null || updateFsh == null || drawGlsl == null || leeGlsl == null || leeBuildFsh == null) {
+        Map<String, Double> smoothBuildFsh = parseShaderConstants(helper, "snow_smooth_build.fsh");
+        Map<String, Double> cavityBuildFsh = parseShaderConstants(helper, "fog_cavity_build.fsh");
+        Map<String, Double> snowWalkGlsl = parseShaderConstants(helper, "snow_walk.glsl");
+        if (flakesGlsl == null || updateFsh == null || drawGlsl == null || leeGlsl == null || leeBuildFsh == null
+                || smoothBuildFsh == null || cavityBuildFsh == null || snowWalkGlsl == null) {
             return;
         }
 
@@ -367,7 +541,6 @@ public final class SnowLeeGameTests {
         checkShaderConstant(helper, "snow_flakes.glsl", flakesGlsl, "SNOW_SHELTER_SOFTNESS",
                 SnowFlakes.SHELTER_SOFTNESS, 0.0);
 
-        // Verify all 16 salts in snow_flakes.glsl are distinct and in [0, 15]:
         Set<Integer> salts = new HashSet<>();
         for (Map.Entry<String, Double> entry : flakesGlsl.entrySet()) {
             if (entry.getKey().startsWith("SNOW_SALT_")) {
@@ -405,13 +578,184 @@ public final class SnowLeeGameTests {
         checkShaderConstant(helper, "snow_flakes_draw.glsl", drawGlsl, "SNOW_COUNT_FADE",
                 SnowFlakes.COUNT_FADE_FLAKES, 0.0);
 
-        // snow_lee.glsl and snow_lee_build.fsh:
+        // snow_lee.glsl:
         checkLeeShaderConstants(helper, "snow_lee.glsl", leeGlsl);
+        checkShaderConstant(helper, "snow_lee.glsl", leeGlsl, "SNOW_SMOOTH_SCALE", SnowLee.SMOOTH_SCALE, 0.0);
+        checkShaderConstant(helper, "snow_lee.glsl", leeGlsl, "SNOW_SMOOTH_SIZE", SnowLee.SMOOTH_SIZE, 0.0);
+        checkShaderConstant(helper, "snow_lee.glsl", leeGlsl, "SNOW_TERRAIN_FOLLOW_HEIGHT",
+                SnowLee.TERRAIN_FOLLOW_HEIGHT, 0.0);
+        checkShaderConstant(helper, "snow_lee.glsl", leeGlsl, "SNOW_OVERHANG_MARGIN", SnowLee.OVERHANG_MARGIN, 0.0);
+        checkShaderConstant(helper, "snow_lee.glsl", leeGlsl, "SNOW_LEE_MINIMUM_WIND_SPEED",
+                SnowLee.MINIMUM_WIND_SPEED, 0.0);
+
+        // snow_lee_build.fsh:
         checkLeeShaderConstants(helper, "snow_lee_build.fsh", leeBuildFsh);
         checkShaderConstant(helper, "snow_lee_build.fsh", leeBuildFsh, "SNOW_LEE_SAMPLE_OFFSET",
                 SnowLee.SAMPLE_OFFSET, 0.0);
+        checkShaderConstant(helper, "snow_lee_build.fsh", leeBuildFsh, "SNOW_SMOOTH_SCALE",
+                SnowLee.SMOOTH_SCALE, 0.0);
+        checkShaderConstant(helper, "snow_lee_build.fsh", leeBuildFsh, "SNOW_SMOOTH_SIZE",
+                SnowLee.SMOOTH_SIZE, 0.0);
+        checkShaderConstant(helper, "snow_lee_build.fsh", leeBuildFsh, "SNOW_SMOOTH_GRADIENT_STEP",
+                SnowLee.SMOOTH_GRADIENT_STEP, 0.0);
+
+        // snow_smooth_build.fsh:
+        checkShaderConstant(helper, "snow_smooth_build.fsh", smoothBuildFsh, "SNOW_SMOOTH_SCALE",
+                SnowLee.SMOOTH_SCALE, 0.0);
+        checkShaderConstant(helper, "snow_smooth_build.fsh", smoothBuildFsh, "SNOW_SMOOTH_SIZE",
+                SnowLee.SMOOTH_SIZE, 0.0);
+        checkShaderConstant(helper, "snow_smooth_build.fsh", smoothBuildFsh, "SNOW_SMOOTH_SIGMA_TEXELS",
+                SnowLee.SMOOTH_SIGMA_TEXELS, 0.0);
+        checkShaderConstant(helper, "snow_smooth_build.fsh", smoothBuildFsh, "SNOW_SMOOTH_KERNEL_RADIUS",
+                SnowLee.SMOOTH_KERNEL_RADIUS, 0.0);
+        checkShaderConstant(helper, "snow_smooth_build.fsh", smoothBuildFsh, "SNOW_SMOOTH_MINIMUM_WEIGHT",
+                SnowLee.SMOOTH_MINIMUM_WEIGHT, 0.0);
+        checkShaderConstant(helper, "snow_smooth_build.fsh", smoothBuildFsh, "SNOW_LEE_FAR_HEIGHTS_MASK",
+                FarHeights.SIZE - 1, 0.0);
+        checkShaderConstant(helper, "snow_smooth_build.fsh", smoothBuildFsh, "SNOW_LEE_UNKNOWN_HEIGHT",
+                FarHeights.UNKNOWN, 0.0);
+        checkShaderConstant(helper, "snow_smooth_build.fsh", smoothBuildFsh, "SNOW_LEE_NO_HEIGHT",
+                SnowLee.NO_HEIGHT, 0.0);
+
+        // fog_cavity_build.fsh:
+        checkShaderConstant(helper, "fog_cavity_build.fsh", cavityBuildFsh, "FOG_CAVITY_MAP_SIZE",
+                FogCavity.MAP_SIZE, 0.0);
+        checkShaderConstant(helper, "fog_cavity_build.fsh", cavityBuildFsh, "FOG_CAVITY_FAR_HEIGHTS_SIZE",
+                FarHeights.SIZE, 0.0);
+        checkShaderConstant(helper, "fog_cavity_build.fsh", cavityBuildFsh, "FOG_CAVITY_FAR_HEIGHTS_MASK",
+                FarHeights.SIZE - 1, 0.0);
+        checkShaderConstant(helper, "fog_cavity_build.fsh", cavityBuildFsh, "FOG_CAVITY_UNKNOWN_HEIGHT",
+                FarHeights.UNKNOWN, 0.0);
+        checkShaderConstant(helper, "fog_cavity_build.fsh", cavityBuildFsh, "FOG_CAVITY_NO_HEIGHT",
+                FogCavity.NO_HEIGHT, 0.0);
+        checkShaderConstant(helper, "fog_cavity_build.fsh", cavityBuildFsh, "FOG_CAVITY_NO_HEIGHT_THRESHOLD",
+                FogCavity.NO_HEIGHT_THRESHOLD, 0.0);
+        checkShaderConstant(helper, "fog_cavity_build.fsh", cavityBuildFsh, "FOG_CAVITY_ENCLOSURE_SLOPE",
+                FogCavity.ENCLOSURE_SLOPE, 0.0);
+        checkShaderConstant(helper, "fog_cavity_build.fsh", cavityBuildFsh, "FOG_CAVITY_DIAGONAL_STEP",
+                FogCavity.DIAGONAL_STEP, 1.0e-6);
+        checkShaderConstant(helper, "fog_cavity_build.fsh", cavityBuildFsh, "FOG_CAVITY_CARDINAL_FINAL_PASS",
+                FogCavity.DIAGONAL_FIRST_PASS - 1, 0.0);
+        checkShaderConstant(helper, "fog_cavity_build.fsh", cavityBuildFsh, "FOG_CAVITY_DIAGONAL_FIRST_PASS",
+                FogCavity.DIAGONAL_FIRST_PASS, 0.0);
+        checkShaderConstant(helper, "fog_cavity_build.fsh", cavityBuildFsh, "FOG_CAVITY_DIAGONAL_FINAL_PASS",
+                FogCavity.TOTAL_PASSES - 1, 0.0);
+
+        // snow_walk.glsl cavity constants:
+        checkShaderConstant(helper, "snow_walk.glsl", snowWalkGlsl, "FOG_CAVITY_MAP_SIZE", FogCavity.MAP_SIZE, 0.0);
+        checkShaderConstant(helper, "snow_walk.glsl", snowWalkGlsl, "FOG_CAVITY_NO_HEIGHT_THRESHOLD",
+                FogCavity.NO_HEIGHT_THRESHOLD, 0.0);
 
         helper.succeed();
+    }
+
+    private static double[] simulateHillSubBoxes(SnowLee.HeightLookup heights, float[] smooth, float[] leeMap,
+            float[] slopeMap, double cameraX, double cameraY, double windSpeed, double fallSpeed, double leeFall) {
+        int flakeCount = 16384;
+        int steps = 300;
+        double dt = 1.0 / 30.0;
+        double boxSide = 40.0;
+        double halfSide = 0.5 * boxSide;
+        double[] posX = new double[flakeCount];
+        double[] posY = new double[flakeCount];
+        double[] posZ = new double[flakeCount];
+        double[] ownFall = new double[flakeCount];
+        for (int flake = 0; flake < flakeCount; flake++) {
+            posX[flake] = (SnowFlakes.unit(flake, SnowFlakes.SALT_POSITION_X) - 0.5) * boxSide;
+            posY[flake] = (SnowFlakes.unit(flake, SnowFlakes.SALT_POSITION_Y) - 0.5) * boxSide;
+            posZ[flake] = (SnowFlakes.unit(flake, SnowFlakes.SALT_POSITION_Z) - 0.5) * boxSide;
+            ownFall[flake] = fallSpeed * SnowFlakes.fallShare(flake);
+        }
+        double centerLee = SnowLee.sampleBilinear(leeMap, TEST_MAP, cameraX, 0.0, 1.0, 0.0);
+        double centerSlope = SnowLee.sampleBilinear(slopeMap, TEST_MAP, cameraX, 0.0, 1.0, 0.0);
+        double centerSmooth = SnowLee.sampleSmoothBilinear(smooth, TEST_SMOOTH, cameraX + TEST_HALF, TEST_HALF);
+        double centerColumn = heights.heightAt((int) Math.floor(cameraX), 0);
+        double[] reentry = new double[3];
+        for (int frame = 1; frame <= steps; frame++) {
+            for (int flake = 0; flake < flakeCount; flake++) {
+                double worldX = cameraX + posX[flake];
+                double worldY = cameraY + posY[flake];
+                double worldZ = posZ[flake];
+                double leeHeight = SnowLee.sampleBilinear(leeMap, TEST_MAP, worldX, worldZ, 1.0, 0.0);
+                double terrainSlope = SnowLee.sampleBilinear(slopeMap, TEST_MAP, worldX, worldZ, 1.0, 0.0);
+                double smoothHeight = SnowLee.sampleSmoothBilinear(smooth, TEST_SMOOTH, worldX + TEST_HALF,
+                        worldZ + TEST_HALF);
+                double columnHeight = heights.heightAt((int) Math.floor(worldX), (int) Math.floor(worldZ));
+                double vy = SnowLee.verticalVelocity(worldY, leeHeight, columnHeight, smoothHeight, terrainSlope,
+                        ownFall[flake], windSpeed, leeFall);
+                double nextX = posX[flake] + windSpeed * dt;
+                double nextY = posY[flake] + vy * dt;
+                double nextZ = posZ[flake];
+                if (Math.abs(nextX) >= halfSide || Math.abs(nextY) >= halfSide || Math.abs(nextZ) >= halfSide) {
+                    double topVy = SnowLee.verticalVelocity(cameraY + halfSide, centerLee, centerColumn, centerSmooth,
+                            centerSlope, ownFall[flake], windSpeed, leeFall);
+                    double bottomVy = SnowLee.verticalVelocity(cameraY - halfSide, centerLee, centerColumn,
+                            centerSmooth, centerSlope, ownFall[flake], windSpeed, leeFall);
+                    SnowLee.reenterBoxOffset(flake, frame, windSpeed * dt, topVy * dt, bottomVy * dt, 0.0, boxSide,
+                            reentry);
+                    posX[flake] = reentry[0];
+                    posY[flake] = reentry[1];
+                    posZ[flake] = reentry[2];
+                } else {
+                    posX[flake] = nextX;
+                    posY[flake] = nextY;
+                    posZ[flake] = nextZ;
+                }
+            }
+        }
+        // Count flakes in 4x4 sub-boxes over [-16, +16] in x and [-16, +16] in y around the camera (each 8 x 8 x 40):
+        int bins = 4;
+        int[][] counts = new int[bins][bins];
+        for (int flake = 0; flake < flakeCount; flake++) {
+            double ox = posX[flake];
+            double oy = posY[flake];
+            if (ox < -16.0 || ox >= 16.0 || oy < -16.0 || oy >= 16.0) {
+                continue;
+            }
+            int bx = (int) Math.floor((ox + 16.0) / 8.0);
+            int by = (int) Math.floor((oy + 16.0) / 8.0);
+            counts[bx][by]++;
+        }
+        double expectedPerBin = flakeCount * (8.0 * 8.0 * boxSide) / (boxSide * boxSide * boxSide);
+        double minRatio = Double.POSITIVE_INFINITY;
+        double maxRatio = 0.0;
+        for (int bx = 0; bx < bins; bx++) {
+            for (int by = 0; by < bins; by++) {
+                double ratio = counts[bx][by] / expectedPerBin;
+                minRatio = Math.min(minRatio, ratio);
+                maxRatio = Math.max(maxRatio, ratio);
+            }
+        }
+        return new double[]{minRatio, maxRatio};
+    }
+
+    private static void runSmoothAndScan(SnowLee.HeightLookup heights, int mapSize, int[] strides, double dirX,
+            double dirZ, double slope, boolean applyAcrossMin, float[] smooth, float[] smoothScratchA,
+            float[] smoothScratchB, float[] leeOut, float[] slopeOut, float[] rawA, float[] rawB, float[] relA,
+            float[] relB) {
+        int half = mapSize / 2;
+        int smoothSize = mapSize / SnowLee.SMOOTH_SCALE;
+        SnowLee.buildSmoothHeights(mapSize, heights, -half, -half, smooth, smoothScratchA, smoothScratchB);
+        SnowLee.scan(mapSize, strides, heights, smooth, smoothSize, -half, -half, 0, 0, -half, -half, mapSize, dirX,
+                dirZ, slope, applyAcrossMin, leeOut, slopeOut, rawA, rawB, relA, relB);
+    }
+
+    private static void assertScanMatchesBruteForceSampled(GameTestHelper helper, String label,
+            SnowLee.HeightLookup heights, float[] smooth, double dirX, double dirZ, double slope,
+            boolean applyAcrossMin, float[] leeOut) {
+        for (int iy = 0; iy < TEST_MAP; iy += 16) {
+            for (int ix = 0; ix < TEST_MAP; ix += 8) {
+                float actual = leeOut[iy * TEST_MAP + ix];
+                float expected = SnowLee.bruteForceLeeTexel(TEST_MAP, TEST_REACH, heights, smooth, TEST_SMOOTH,
+                        -TEST_HALF, -TEST_HALF, 0, 0, -TEST_HALF, -TEST_HALF, TEST_MAP, dirX, dirZ, slope,
+                        applyAcrossMin, ix, iy);
+                if (Math.abs(actual - expected) > SCAN_TOLERANCE) {
+                    helper.fail(label + " scan differs from brute force at texel (" + ix + ", " + iy + "): got "
+                            + actual + " instead of " + expected);
+                    return;
+                }
+            }
+        }
     }
 
     private static void checkLeeShaderConstants(GameTestHelper helper, String fileName,
@@ -481,26 +825,6 @@ public final class SnowLeeGameTests {
         helper.assertTrue(actual != null, fileName + " is missing const " + name);
         helper.assertTrue(Math.abs(actual - expected) <= tolerance, fileName + " defines " + name + " = " + actual
                 + " instead of Java value " + expected);
-    }
-
-    private static void assertScanMatchesBruteForce(GameTestHelper helper, String label, int mapSize, int reach,
-            int[] strides, SnowLee.HeightLookup heights, int anchorX, int anchorZ, int windowMinX, int windowMinZ,
-            int windowSize, double dirX, double dirZ, double slope, boolean applyAcrossMin, float[] output,
-            float[] scratch) {
-        SnowLee.scan(mapSize, strides, heights, anchorX, anchorZ, windowMinX, windowMinZ, windowSize, dirX, dirZ,
-                slope, applyAcrossMin, output, scratch);
-        for (int iy = 0; iy < mapSize; iy++) {
-            for (int ix = 0; ix < mapSize; ix++) {
-                float actual = output[iy * mapSize + ix];
-                float expected = SnowLee.bruteForceTexel(mapSize, reach, heights, anchorX, anchorZ, windowMinX,
-                        windowMinZ, windowSize, dirX, dirZ, slope, applyAcrossMin, ix, iy);
-                if (Math.abs(actual - expected) > SCAN_TOLERANCE) {
-                    helper.fail(label + " scan differs from brute force at texel (" + ix + ", " + iy + "): got "
-                            + actual + " instead of " + expected);
-                    return;
-                }
-            }
-        }
     }
 
     private static void checkFloatNear(GameTestHelper helper, String what, float actual, float expected,

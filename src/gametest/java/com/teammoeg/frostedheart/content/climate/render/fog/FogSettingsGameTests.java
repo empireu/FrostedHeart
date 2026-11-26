@@ -68,6 +68,7 @@ public final class FogSettingsGameTests {
         checkNumberSetting(helper, SkySetting.FOG_STRUCTURE_EROSION, "fogStructureErosion", 0.5, 0.0, 0.9);
         checkNumberSetting(helper, SkySetting.FOG_STRUCTURE_RANGE, "fogStructureRange", 96.0, 32.0, 160.0);
         checkNumberSetting(helper, SkySetting.FOG_WIND_SCALE, "fogWindScale", 12.0, 0.0, 40.0);
+        checkNumberSetting(helper, SkySetting.FOG_CAVITY_SHARE, "fogCavityShare", 0.5, 0.0, 1.0);
 
         double snowVisibility = SkySetting.FOG_SNOW_VISIBILITY.defaultValue();
         double blizzardVisibility = SkySetting.FOG_BLIZZARD_VISIBILITY.defaultValue();
@@ -85,7 +86,7 @@ public final class FogSettingsGameTests {
                 SkySetting.FOG_FROXEL_SLICES, SkySetting.FOG_FROXEL_RANGE, SkySetting.FOG_SNOW_STRUCTURE_SHARE,
                 SkySetting.FOG_BLIZZARD_STRUCTURE_SHARE, SkySetting.FOG_STRUCTURE_COVERAGE,
                 SkySetting.FOG_STRUCTURE_SIZE, SkySetting.FOG_STRUCTURE_STRETCH, SkySetting.FOG_STRUCTURE_EROSION,
-                SkySetting.FOG_STRUCTURE_RANGE, SkySetting.FOG_WIND_SCALE};
+                SkySetting.FOG_STRUCTURE_RANGE, SkySetting.FOG_WIND_SCALE, SkySetting.FOG_CAVITY_SHARE};
         SkySetting[] settings = SkySetting.values();
         int lastIndex = settings.length - 1;
         helper.assertTrue(lastIndex + 1 >= weatherSettings.length, "SkySetting has " + settings.length

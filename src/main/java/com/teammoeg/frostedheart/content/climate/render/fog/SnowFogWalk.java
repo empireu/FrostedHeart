@@ -132,6 +132,11 @@ public final class SnowFogWalk {
     private double halfWidth = DEFAULT_RADIUS - REGION_MARGIN;
     private double fieldFade = 1.0;
     private FogStructure structure;
+    private float[] cavityHeights;
+    private int cavityMinX;
+    private int cavityMinZ;
+    private double cavityFloor = 1.0;
+    private double cavityDecayLength = MINIMUM_DECAY_LENGTH;
     private int lastNearSteps;
     private boolean lastNearCapped;
     private int lastFarSteps;
@@ -522,6 +527,60 @@ public final class SnowFogWalk {
     }
 
     /**
+     * Keeps the cavity enclosure map that the fog walk reads, which it does not copy, together with its world origin,
+     * effective floor share and vertical decay length. Leaves cellShare and heightShare unchanged.
+     */
+    public void setCavity(float[] cavityHeights, int minX, int minZ, double effectiveFloor, double decayLength) {
+        if (cavityHeights.length != FogCavity.MAP_SIZE * FogCavity.MAP_SIZE) {
+            throw new IllegalArgumentException("The cavity map has " + cavityHeights.length + " entries instead of "
+                    + (FogCavity.MAP_SIZE * FogCavity.MAP_SIZE));
+        }
+        this.cavityHeights = cavityHeights;
+        this.cavityMinX = minX;
+        this.cavityMinZ = minZ;
+        if (!(effectiveFloor >= 0.0)) {
+            this.cavityFloor = 0.0;
+        } else if (effectiveFloor > 1.0) {
+            this.cavityFloor = 1.0;
+        } else {
+            this.cavityFloor = effectiveFloor;
+        }
+        if (!(decayLength >= MINIMUM_DECAY_LENGTH)) {
+            this.cavityDecayLength = MINIMUM_DECAY_LENGTH;
+        } else if (decayLength > MAXIMUM_DECAY_LENGTH) {
+            this.cavityDecayLength = MAXIMUM_DECAY_LENGTH;
+        } else {
+            this.cavityDecayLength = decayLength;
+        }
+    }
+
+    /**
+     * Turns cavity thinning off for subsequent walks without allocating.
+     */
+    public void clearCavity() {
+        this.cavityHeights = null;
+        this.cavityFloor = 1.0;
+    }
+
+    /**
+     * The fog density multiplier in [cavityFloor, 1.0] at world position (worldX, worldY, worldZ), matching
+     * snowWalkCavityFactor in snow_walk.glsl. Allocates nothing.
+     */
+    public double cavityFactor(int worldX, double worldY, int worldZ) {
+        float[] currentCavity = cavityHeights;
+        if (currentCavity == null || !(cavityFloor < 1.0)) {
+            return 1.0;
+        }
+        int localX = worldX - cavityMinX;
+        int localZ = worldZ - cavityMinZ;
+        if (localX < 0 || localX >= FogCavity.MAP_SIZE || localZ < 0 || localZ >= FogCavity.MAP_SIZE) {
+            return 1.0;
+        }
+        return FogCavity.cavityFactor(worldY, currentCavity[localZ * FogCavity.MAP_SIZE + localX],
+                cavityDecayLength, cavityFloor);
+    }
+
+    /**
      * The cells that the near part of the last walk visited, which is 0 when the walk began past the region.
      * @return the cells walked, from 0 up, at most PIECE_MAXIMUM_STEPS for a piece and WHOLE_MAXIMUM_STEPS for the
      *         whole ray, whose region crosses at most three cells per block of the radius
@@ -646,6 +705,7 @@ public final class SnowFogWalk {
         }
         FogStructure currentStructure = structure;
         boolean structureOn = currentStructure != null && currentStructure.isOn();
+        boolean cavityOn = cavityHeights != null && cavityFloor < 1.0;
         double depth = 0.0;
         double enter = startDistance;
         double enterDepth = tauAt(enter, unitY);
@@ -657,9 +717,14 @@ public final class SnowFogWalk {
             double exitDepth = tauAt(exit, unitY);
             double share = cellShare(cellX, cellY, cellZ);
             double partDepth = Math.max(0.0, exitDepth - enterDepth);
-            if (structureOn && share > 0.0) {
-                double middle = (enter + exit) * 0.5;
-                partDepth *= currentStructure.densityAt(middle * unitX, middle * unitY, middle * unitZ);
+            if (share > 0.0) {
+                if (cavityOn) {
+                    partDepth *= cavityFactor(eyeBlockX + cellX, eyeBlockY + cellY + 0.5, eyeBlockZ + cellZ);
+                }
+                if (structureOn) {
+                    double middle = (enter + exit) * 0.5;
+                    partDepth *= currentStructure.densityAt(middle * unitX, middle * unitY, middle * unitZ);
+                }
             }
             depth += share * partDepth;
             enter = exit;
@@ -744,6 +809,7 @@ public final class SnowFogWalk {
         }
         FogStructure currentStructure = structure;
         boolean structureOn = currentStructure != null && currentStructure.isOn();
+        boolean cavityOn = cavityHeights != null && cavityFloor < 1.0;
         double depth = 0.0;
         double enter = startDistance;
         double enterDepth = tauAt(enter, unitY);
@@ -759,6 +825,10 @@ public final class SnowFogWalk {
             double share = heightShare(columnOffsetX, columnOffsetY, columnOffsetZ);
             if (share > 0.0) {
                 double partDepth = Math.max(0.0, exitDepth - enterDepth);
+                if (cavityOn) {
+                    partDepth *= cavityFactor(eyeBlockX + columnOffsetX, eyeBlockY + columnOffsetY,
+                            eyeBlockZ + columnOffsetZ);
+                }
                 if (structureOn) {
                     double middle = (enter + exit) * 0.5;
                     partDepth *= currentStructure.densityAt(middle * unitX, middle * unitY, middle * unitZ);

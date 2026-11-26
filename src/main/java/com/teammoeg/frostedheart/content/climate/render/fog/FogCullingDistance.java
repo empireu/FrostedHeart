@@ -25,8 +25,9 @@ package com.teammoeg.frostedheart.content.climate.render.fog;
  * Vanilla's terrain fog is linear in the cylinder distance max(horizontal distance, |vertical offset|) from the eye, so
  * a fog end of D also culls the terrain beyond D. The distance here is the shortest one at which every block position
  * at least that far away already has an optical depth of OPAQUE_OPTICAL_DEPTH, where the height fog alone hides it.
- * The air between the fog's structures is thinner than the height fog out to their range, and the distance then takes
- * that clear stretch of every segment into account, so that the culling does not hide what shows through the gaps.
+ * The air between the fog's structures, inside deep cavities and inside the near shelter region can be thinner than the
+ * mean height fog out to their respective ranges, and the distance takes that lower-bound stretch of every segment into
+ * account so that culling does not cut off what thinner fog or covered openings show.
  * Every method is a pure function of its arguments, allocates nothing, and is safe to call from any thread.
  */
 public final class FogCullingDistance {
@@ -55,68 +56,61 @@ public final class FogCullingDistance {
     /**
      * The shortest distance from the eye at which every block position at or beyond it is hidden by at least
      * OPAQUE_OPTICAL_DEPTH of the height fog.
-     * The positions range over every horizontal distance and over every height from minimumHeight to maximumHeight.
-     * The result is never shorter than the true distance, because the search keeps the upper end of its bracket.
-     * It costs about 1900 evaluations of HeightFog.opticalDepth and allocates nothing.
-     * @param eyeExtinction the extinction per block at the eye's height, positive
-     * @param eyeHeight the eye's height in blocks, which may lie outside the build heights
-     * @param heightScale the height scale of the fog in blocks, positive
-     * @param minimumHeight the lowest build height of the level in blocks
-     * @param maximumHeight the highest build height of the level in blocks
-     * @param maximumDistance the longest distance in blocks the search may return
-     * @return the distance in blocks, in the range (0, maximumDistance], or Double.POSITIVE_INFINITY when no distance
-     *         up to maximumDistance is opaque enough, when eyeExtinction is not positive, or when maximumDistance is
-     *         not positive
      */
     public static double opaqueDistance(double eyeExtinction, double eyeHeight, double heightScale,
             double minimumHeight, double maximumHeight, double maximumDistance) {
         return opaqueDistance(eyeExtinction, eyeHeight, heightScale, minimumHeight, maximumHeight, maximumDistance,
-                1.0, 0.0);
+                1.0, 0.0, 1.0, 0.0, 0.0);
     }
 
     /**
      * The shortest distance from the eye at which every block position at or beyond it is hidden by at least
      * OPAQUE_OPTICAL_DEPTH of the fog, whose air between the structures is thin out to a range.
-     * The positions range over every horizontal distance and over every height from minimumHeight to maximumHeight.
-     * Every optical depth that the search evaluates is the lower bound along its segment: the fog of the first
-     * clearRange blocks is thinned by 1 - clearAirDensity, and beyond it the fog is the mean fog.
-     * The result is never shorter than the true distance, because the search keeps the upper end of its bracket.
-     * It costs about 1900 evaluations of HeightFog.opticalDepth and allocates nothing.
-     * @param eyeExtinction the extinction per block at the eye's height, positive
-     * @param eyeHeight the eye's height in blocks, which may lie outside the build heights
-     * @param heightScale the height scale of the fog in blocks, positive
-     * @param minimumHeight the lowest build height of the level in blocks
-     * @param maximumHeight the highest build height of the level in blocks
-     * @param maximumDistance the longest distance in blocks the search may return
-     * @param clearAirDensity the density of the clear air between the structures, clamped to 0 to 1, where NaN counts
-     *        as 1
-     * @param clearRange the distance in blocks out to which the clear air reaches, where NaN or not positive means no
-     *        clear stretch
-     * @return the distance in blocks, in the range (0, maximumDistance], or Double.POSITIVE_INFINITY when no distance
-     *         up to maximumDistance is opaque enough, when eyeExtinction is not positive, or when maximumDistance is
-     *         not positive
      */
     public static double opaqueDistance(double eyeExtinction, double eyeHeight, double heightScale,
             double minimumHeight, double maximumHeight, double maximumDistance, double clearAirDensity,
             double clearRange) {
+        return opaqueDistance(eyeExtinction, eyeHeight, heightScale, minimumHeight, maximumHeight, maximumDistance,
+                clearAirDensity, clearRange, 1.0, 0.0, 0.0);
+    }
+
+    /**
+     * The shortest distance from the eye at which every block position at or beyond it is hidden by at least
+     * OPAQUE_OPTICAL_DEPTH of the fog, accounting for clear air between structures out to clearRange, cavity thinning
+     * down to cavityDensity out to cavityRange, and sheltered air inside the near field out to shelterRange.
+     * @param clearAirDensity minimum density between fog structures in [0, 1], where NaN counts as 1
+     * @param clearRange distance in blocks out to which fog structures reach
+     * @param cavityDensity minimum density share inside deep cavities in [0, 1], where NaN counts as 1
+     * @param cavityRange distance in blocks out to which the froxel fog applies cavity thinning
+     * @param shelterRange distance in blocks out to which the near shelter region can hold sheltered air
+     */
+    public static double opaqueDistance(double eyeExtinction, double eyeHeight, double heightScale,
+            double minimumHeight, double maximumHeight, double maximumDistance, double clearAirDensity,
+            double clearRange, double cavityDensity, double cavityRange, double shelterRange) {
         if (!(eyeExtinction > 0.0) || !(maximumDistance > 0.0)) {
             return Double.POSITIVE_INFINITY;
         }
         double countedClearAirDensity = Double.isNaN(clearAirDensity) || clearAirDensity > 1.0 ? 1.0
                 : Math.max(0.0, clearAirDensity);
         double countedClearRange = clearRange > 0.0 ? clearRange : 0.0;
+        double countedCavityDensity = Double.isNaN(cavityDensity) || cavityDensity > 1.0 ? 1.0
+                : Math.max(0.0, cavityDensity);
+        double countedCavityRange = cavityRange > 0.0 ? cavityRange : 0.0;
+        double countedShelterRange = shelterRange > 0.0 ? shelterRange : 0.0;
         double leastVerticalOffset = minimumHeight - eyeHeight;
         double greatestVerticalOffset = maximumHeight - eyeHeight;
         double distance = maximumDistance;
         if (!(leastOpticalDepthBeyond(eyeExtinction, heightScale, leastVerticalOffset, greatestVerticalOffset,
-                distance, countedClearAirDensity, countedClearRange) >= OPAQUE_OPTICAL_DEPTH)) {
+                distance, countedClearAirDensity, countedClearRange, countedCavityDensity, countedCavityRange,
+                countedShelterRange) >= OPAQUE_OPTICAL_DEPTH)) {
             return Double.POSITIVE_INFINITY;
         }
         double nearestHiddenDistance = 0.0;
         for (int iteration = 0; iteration < BISECTION_ITERATIONS; iteration++) {
             double middleDistance = 0.5 * (nearestHiddenDistance + distance);
             if (leastOpticalDepthBeyond(eyeExtinction, heightScale, leastVerticalOffset, greatestVerticalOffset,
-                    middleDistance, countedClearAirDensity, countedClearRange) >= OPAQUE_OPTICAL_DEPTH) {
+                    middleDistance, countedClearAirDensity, countedClearRange, countedCavityDensity,
+                    countedCavityRange, countedShelterRange) >= OPAQUE_OPTICAL_DEPTH) {
                 distance = middleDistance;
             } else {
                 nearestHiddenDistance = middleDistance;
@@ -125,45 +119,36 @@ public final class FogCullingDistance {
         return distance;
     }
 
-    /**
-     * The least optical depth of any position at least distance blocks away from the eye, in optical depths.
-     * The minimum over the wall at the horizontal distance of distance is taken from its bottom end, its 33 sampled
-     * heights and a golden section search around the lowest of them. The minimum over the caps straight up and straight
-     * down is taken from their nearest heights. Every depth is the lower bound along its segment for air that is thin
-     * out to the clear range, as segmentOpticalDepth gives it.
-     */
     private static double leastOpticalDepthBeyond(double eyeExtinction, double heightScale,
             double leastVerticalOffset, double greatestVerticalOffset, double distance, double clearAirDensity,
-            double clearRange) {
+            double clearRange, double cavityDensity, double cavityRange, double shelterRange) {
         double leastDepth = Double.POSITIVE_INFINITY;
         double downwardEnd = Math.min(0.0, greatestVerticalOffset);
         if (leastVerticalOffset <= downwardEnd) {
             leastDepth = lengthOpticalDepth(eyeExtinction, heightScale, distance, downwardEnd, clearAirDensity,
-                    clearRange);
+                    clearRange, cavityDensity, cavityRange, shelterRange);
         }
         double upwardStart = Math.max(0.0, leastVerticalOffset);
         if (upwardStart <= greatestVerticalOffset) {
             leastDepth = Math.min(leastDepth, wallLeastOpticalDepth(eyeExtinction, heightScale, distance, upwardStart,
-                    greatestVerticalOffset, clearAirDensity, clearRange));
+                    greatestVerticalOffset, clearAirDensity, clearRange, cavityDensity, cavityRange, shelterRange));
         }
         double upwardCap = Math.max(distance, leastVerticalOffset);
         if (upwardCap <= greatestVerticalOffset) {
             leastDepth = Math.min(leastDepth, segmentOpticalDepth(eyeExtinction, heightScale, upwardCap, upwardCap,
-                    clearAirDensity, clearRange));
+                    clearAirDensity, clearRange, cavityDensity, cavityRange, shelterRange));
         }
         double downwardCap = Math.min(-distance, greatestVerticalOffset);
         if (downwardCap >= leastVerticalOffset) {
             leastDepth = Math.min(leastDepth, segmentOpticalDepth(eyeExtinction, heightScale, -downwardCap,
-                    downwardCap, clearAirDensity, clearRange));
+                    downwardCap, clearAirDensity, clearRange, cavityDensity, cavityRange, shelterRange));
         }
         return leastDepth;
     }
 
-    /**
-     * The least optical depth along the wall of the cylinder at the given horizontal distance, over the given heights.
-     */
     private static double wallLeastOpticalDepth(double eyeExtinction, double heightScale, double horizontalDistance,
-            double upwardStart, double upwardEnd, double clearAirDensity, double clearRange) {
+            double upwardStart, double upwardEnd, double clearAirDensity, double clearRange, double cavityDensity,
+            double cavityRange, double shelterRange) {
         double sampleStep = (upwardEnd - upwardStart) / (WALL_SAMPLE_COUNT - 1);
         double leastDepth = Double.POSITIVE_INFINITY;
         int leastIndex = 0;
@@ -171,7 +156,7 @@ public final class FogCullingDistance {
             boolean isLastSample = sampleIndex == WALL_SAMPLE_COUNT - 1;
             double verticalOffset = isLastSample ? upwardEnd : upwardStart + sampleStep * sampleIndex;
             double depth = lengthOpticalDepth(eyeExtinction, heightScale, horizontalDistance, verticalOffset,
-                    clearAirDensity, clearRange);
+                    clearAirDensity, clearRange, cavityDensity, cavityRange, shelterRange);
             if (depth < leastDepth) {
                 leastDepth = depth;
                 leastIndex = sampleIndex;
@@ -186,24 +171,20 @@ public final class FogCullingDistance {
             neighborEnd = Math.min(upwardEnd, upwardStart + sampleStep * (leastIndex + 1));
         }
         return Math.min(leastDepth, goldenSectionLeastDepth(eyeExtinction, heightScale, horizontalDistance,
-                neighborStart, neighborEnd, clearAirDensity, clearRange));
+                neighborStart, neighborEnd, clearAirDensity, clearRange, cavityDensity, cavityRange, shelterRange));
     }
 
-    /**
-     * The least optical depth along the wall of the cylinder between the given heights, found in
-     * GOLDEN_SECTION_ITERATIONS steps of a golden section search.
-     */
     private static double goldenSectionLeastDepth(double eyeExtinction, double heightScale,
             double horizontalDistance, double lowerOffset, double upperOffset, double clearAirDensity,
-            double clearRange) {
+            double clearRange, double cavityDensity, double cavityRange, double shelterRange) {
         double lower = lowerOffset;
         double upper = upperOffset;
         double leftProbe = upper - GOLDEN_SECTION_RATIO * (upper - lower);
         double rightProbe = lower + GOLDEN_SECTION_RATIO * (upper - lower);
         double leftDepth = lengthOpticalDepth(eyeExtinction, heightScale, horizontalDistance, leftProbe,
-                clearAirDensity, clearRange);
+                clearAirDensity, clearRange, cavityDensity, cavityRange, shelterRange);
         double rightDepth = lengthOpticalDepth(eyeExtinction, heightScale, horizontalDistance, rightProbe,
-                clearAirDensity, clearRange);
+                clearAirDensity, clearRange, cavityDensity, cavityRange, shelterRange);
         for (int iteration = 0; iteration < GOLDEN_SECTION_ITERATIONS; iteration++) {
             if (leftDepth < rightDepth) {
                 upper = rightProbe;
@@ -211,55 +192,85 @@ public final class FogCullingDistance {
                 rightDepth = leftDepth;
                 leftProbe = upper - GOLDEN_SECTION_RATIO * (upper - lower);
                 leftDepth = lengthOpticalDepth(eyeExtinction, heightScale, horizontalDistance, leftProbe,
-                        clearAirDensity, clearRange);
+                        clearAirDensity, clearRange, cavityDensity, cavityRange, shelterRange);
             } else {
                 lower = leftProbe;
                 leftProbe = rightProbe;
                 leftDepth = rightDepth;
                 rightProbe = lower + GOLDEN_SECTION_RATIO * (upper - lower);
                 rightDepth = lengthOpticalDepth(eyeExtinction, heightScale, horizontalDistance, rightProbe,
-                        clearAirDensity, clearRange);
+                        clearAirDensity, clearRange, cavityDensity, cavityRange, shelterRange);
             }
         }
         return Math.min(leftDepth, rightDepth);
     }
 
-    /**
-     * The optical depth of a segment that reaches the given height at the given horizontal distance from the eye.
-     */
     private static double lengthOpticalDepth(double eyeExtinction, double heightScale, double horizontalDistance,
-            double verticalOffset, double clearAirDensity, double clearRange) {
+            double verticalOffset, double clearAirDensity, double clearRange, double cavityDensity,
+            double cavityRange, double shelterRange) {
         double length = Math.sqrt(horizontalDistance * horizontalDistance + verticalOffset * verticalOffset);
-        return segmentOpticalDepth(eyeExtinction, heightScale, length, verticalOffset, clearAirDensity, clearRange);
+        return segmentOpticalDepth(eyeExtinction, heightScale, length, verticalOffset, clearAirDensity, clearRange,
+                cavityDensity, cavityRange, shelterRange);
     }
 
     /**
-     * The optical depth of a segment from the eye, which is the height fog's own depth minus the part of it that the
-     * clear air between the structures takes away, out to the clear range. With a clear air density of 1 or no clear
-     * stretch it is exactly the height fog's depth, so that the bound without structures is the one it always was.
+     * Lower-bound optical depth of a segment from the eye through the piecewise-constant minimum density profile:
+     * 0 on [0, shelterRange], clearAirDensity * cavityDensity while inside both clearRange and cavityRange, each
+     * factor alone past the shorter range, and 1 past both.
      */
     private static double segmentOpticalDepth(double eyeExtinction, double heightScale, double length,
-            double verticalOffset, double clearAirDensity, double clearRange) {
+            double verticalOffset, double clearAirDensity, double clearRange, double cavityDensity,
+            double cavityRange, double shelterRange) {
         double fullDepth = HeightFog.opticalDepth(eyeExtinction, length, verticalOffset, heightScale);
-        if (!(clearAirDensity < 1.0) || !(clearRange > 0.0) || !(length > 0.0)) {
+        if (!(length > 0.0)) {
             return fullDepth;
         }
-        double clearShare = Math.min(1.0, clearRange / length);
-        double innerDepth = HeightFog.opticalDepth(eyeExtinction, clearShare * length, clearShare * verticalOffset,
-                heightScale);
-        return Math.max(0.0, fullDepth - (1.0 - clearAirDensity) * innerDepth);
+        boolean hasClear = clearAirDensity < 1.0 && clearRange > 0.0;
+        boolean hasCavity = cavityDensity < 1.0 && cavityRange > 0.0;
+        boolean hasShelter = shelterRange > 0.0;
+        if (!hasClear && !hasCavity && !hasShelter) {
+            return fullDepth;
+        }
+        if (!hasCavity && !hasShelter) {
+            double clearShare = Math.min(1.0, clearRange / length);
+            double innerDepth = HeightFog.opticalDepth(eyeExtinction, clearShare * length,
+                    clearShare * verticalOffset, heightScale);
+            return Math.max(0.0, fullDepth - (1.0 - clearAirDensity) * innerDepth);
+        }
+        double effectiveClearRange = hasClear ? clearRange : 0.0;
+        double effectiveCavityRange = hasCavity ? cavityRange : 0.0;
+        double effectiveClearDensity = hasClear ? clearAirDensity : 1.0;
+        double effectiveCavityDensity = hasCavity ? cavityDensity : 1.0;
+        double b1 = Math.min(length, hasShelter ? shelterRange : 0.0);
+        double c1 = Math.min(length, Math.max(b1, effectiveClearRange));
+        double c2 = Math.min(length, Math.max(b1, effectiveCavityRange));
+        double mid1 = Math.min(c1, c2);
+        double mid2 = Math.max(c1, c2);
+
+        double tauB1 = b1 > 0.0
+                ? HeightFog.opticalDepth(eyeExtinction, b1, (b1 / length) * verticalOffset, heightScale) : 0.0;
+        double tauMid1 = mid1 > b1
+                ? HeightFog.opticalDepth(eyeExtinction, mid1, (mid1 / length) * verticalOffset, heightScale) : tauB1;
+        double tauMid2 = mid2 > mid1
+                ? HeightFog.opticalDepth(eyeExtinction, mid2, (mid2 / length) * verticalOffset, heightScale) : tauMid1;
+
+        double depth = 0.0;
+        if (mid1 > b1) {
+            depth += effectiveClearDensity * effectiveCavityDensity * Math.max(0.0, tauMid1 - tauB1);
+        }
+        if (mid2 > mid1) {
+            double midFactor = c1 > c2 ? effectiveClearDensity : effectiveCavityDensity;
+            depth += midFactor * Math.max(0.0, tauMid2 - tauMid1);
+        }
+        if (length > mid2) {
+            depth += Math.max(0.0, fullDepth - tauMid2);
+        }
+        return Math.max(0.0, depth);
     }
 
     /**
      * The fog end in blocks that vanilla takes for the given culling distance, rounded up to a multiple of END_STEP and
      * held while the distance stays close.
-     * The end rises at once when the distance passes it and falls only once the distance is HYSTERESIS blocks below it,
-     * so it does not flicker between two values. A held end is kept as it is, so it is not always a multiple of
-     * END_STEP.
-     * @param distance the culling distance in blocks that the height fog needs, from FogCullingDistance.opaqueDistance
-     * @param previousEnd the fog end in blocks of the previous frame, or positive infinity when there is none
-     * @return the fog end in blocks, which is never below distance, or Double.POSITIVE_INFINITY when distance is
-     *         infinite or NaN
      */
     public static double fogEnd(double distance, double previousEnd) {
         if (Double.isInfinite(distance) || Double.isNaN(distance)) {
