@@ -61,7 +61,8 @@ public final class SnowFlakesGameTests {
         double covered = asked / (BOX_SIDE * BOX_SIDE * BOX_SIDE) * SnowFlakes.meanArea(size);
         helper.assertTrue(Math.abs(covered - share * extinction) < 1.0e-12, "the flakes cover " + covered
                 + " per block instead of " + share * extinction);
-        double expectedArea = 0.25 * Math.PI * size * size * (1.4 * 1.4 * 1.4 - 0.6 * 0.6 * 0.6) / (3.0 * 0.8);
+        // The size share 0.5 + 2 u^3 of an even unit u has the mean square 0.25 + 2 * 0.5 * 2 / 4 + 4 / 7:
+        double expectedArea = 0.25 * Math.PI * size * size * (0.25 + 0.5 + 4.0 / 7.0);
         checkNear(helper, "mean area", SnowFlakes.meanArea(size), expectedArea);
         checkNear(helper, "drawn count below the capacity", SnowFlakes.drawnCount(extinction, share, size, BOX_SIDE),
                 asked);
@@ -102,6 +103,10 @@ public final class SnowFlakesGameTests {
         int flakes = SnowFlakes.CAPACITY;
         double unitSum = 0.0;
         double fallSum = 0.0;
+        double sizeSum = 0.0;
+        double squaredSizeSum = 0.0;
+        int largeClumps = 0;
+        int[] shapeCounts = new int[SnowFlakes.SHAPE_COUNT];
         int turningLeft = 0;
         for (int flake = 0; flake < flakes; flake++) {
             double unit = SnowFlakes.unit(flake, SnowFlakes.SALT_POSITION_X);
@@ -118,16 +123,57 @@ public final class SnowFlakesGameTests {
             }
             unitSum += unit;
             fallSum += fall;
+            sizeSum += size;
+            squaredSizeSum += size * size;
+            if (size > 2.0) {
+                largeClumps++;
+            }
+            shapeCounts[SnowFlakes.shapeIndex(flake)]++;
             if (SnowFlakes.flutterRate(flake) < 0.0) {
                 turningLeft++;
             }
         }
         double meanUnit = unitSum / flakes;
         double meanFall = fallSum / flakes;
+        double meanSize = sizeSum / flakes;
+        double meanSquaredSize = squaredSizeSum / flakes;
+        double largeShare = (double) largeClumps / flakes;
         double leftShare = (double) turningLeft / flakes;
         helper.assertTrue(Math.abs(meanUnit - 0.5) < 0.005, "the mean unit is " + meanUnit + " instead of 0.5");
         helper.assertTrue(Math.abs(meanFall - 1.0) < 0.005, "the mean fall share is " + meanFall + " instead of 1");
+        helper.assertTrue(Math.abs(meanSize - 1.0) < 0.005, "the mean size share is " + meanSize + " instead of 1");
+        helper.assertTrue(Math.abs(meanSquaredSize / SnowFlakes.MEAN_SQUARED_SIZE_SHARE - 1.0) < 0.01, "the mean "
+                + "square of the size share is " + meanSquaredSize + " instead of "
+                + SnowFlakes.MEAN_SQUARED_SIZE_SHARE);
+        // A share above 2 needs u^3 above 0.75, which about 9% of the flakes reach:
+        helper.assertTrue(largeShare > 0.08 && largeShare < 0.10, largeShare + " of the flakes are large clumps "
+                + "instead of about 0.09");
+        for (int shape = 0; shape < SnowFlakes.SHAPE_COUNT; shape++) {
+            double shapeShare = (double) shapeCounts[shape] / flakes;
+            helper.assertTrue(Math.abs(shapeShare * SnowFlakes.SHAPE_COUNT - 1.0) < 0.05, "shape " + shape + " is "
+                    + "taken by " + shapeShare + " of the flakes instead of " + 1.0 / SnowFlakes.SHAPE_COUNT);
+        }
         helper.assertTrue(Math.abs(leftShare - 0.5) < 0.01, leftShare + " of the flakes turn one way instead of 0.5");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 20)
+    public static void shapeTilesKeepTheDotsAreaAndShapeStreaksStayShort(GameTestHelper helper) {
+        double[] coverages = {0.05, 0.1, 0.27, 1.0};
+        for (double coverage : coverages) {
+            double halfSide = SnowFlakes.shapeTileScale(coverage);
+            // A shape of this coverage on a tile of side 2 * halfSide blocks as much light as a disc of radius 1:
+            checkNear(helper, "area blocked at the coverage " + coverage, coverage * 4.0 * halfSide * halfSide,
+                    Math.PI);
+        }
+        checkNear(helper, "tile of an empty shape", SnowFlakes.shapeTileScale(0.0), 0.0);
+        checkNear(helper, "tile of a NaN coverage", SnowFlakes.shapeTileScale(Double.NaN), 0.0);
+        checkNear(helper, "streak of a dot", SnowFlakes.cappedStreakLength(30.0, 4.0, 0.0), 30.0);
+        checkNear(helper, "streak of a full shape", SnowFlakes.cappedStreakLength(30.0, 4.0, 1.0),
+                SnowFlakes.LONGEST_SHAPE_STREAK * 4.0);
+        checkNear(helper, "streak of a half shape", SnowFlakes.cappedStreakLength(30.0, 4.0, 0.5),
+                0.5 * (30.0 + SnowFlakes.LONGEST_SHAPE_STREAK * 4.0));
+        checkNear(helper, "short streak of a full shape", SnowFlakes.cappedStreakLength(2.0, 4.0, 1.0), 2.0);
         helper.succeed();
     }
 

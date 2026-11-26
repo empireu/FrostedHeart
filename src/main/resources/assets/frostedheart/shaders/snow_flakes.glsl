@@ -31,8 +31,9 @@ const float SNOW_SPLAT_FACE_STRIDE = 16.0;
 // The spreads of a flake's own values around the settings, as SnowFlakes:
 const float SNOW_SLOWEST_FALL_SHARE = 0.6666667;
 const float SNOW_FASTEST_FALL_SHARE = 1.3333333;
-const float SNOW_SMALLEST_SIZE_SHARE = 0.6;
-const float SNOW_LARGEST_SIZE_SHARE = 1.4;
+const float SNOW_SMALLEST_SIZE_SHARE = 0.5;
+const float SNOW_LARGEST_SIZE_SHARE = 2.5;
+const float SNOW_SIZE_SKEW = 3.0;
 const float SNOW_SHORTEST_FLUTTER_PERIOD = 1.2;
 const float SNOW_LONGEST_FLUTTER_PERIOD = 3.0;
 const float SNOW_SMALLEST_FLUTTER_RADIUS_SHARE = 0.5;
@@ -41,6 +42,8 @@ const float SNOW_DIMMEST_BRIGHTNESS_SHARE = 0.85;
 const float SNOW_BRIGHTEST_BRIGHTNESS_SHARE = 1.15;
 // The width of the share over which a flake fades out under cover, as SnowFlakes.SHELTER_SOFTNESS:
 const float SNOW_SHELTER_SOFTNESS = 0.25;
+// The shapes that flakes take, as SnowFlakes.SHAPE_COUNT:
+const int SNOW_SHAPE_COUNT = 32;
 
 // The 32-bit mix of a value, as SnowFlakes.hash:
 uint snowHash(uint value) {
@@ -67,9 +70,15 @@ float snowFlakeFallShare(uint flake) {
     return mix(SNOW_SLOWEST_FALL_SHARE, SNOW_FASTEST_FALL_SHARE, snowFlakeUnit(flake, SNOW_SALT_FALL));
 }
 
-// The flake's width as a share of the mean width:
+// The flake's width as a share of the mean width, mostly small with a few large clumps:
 float snowFlakeSizeShare(uint flake) {
-    return mix(SNOW_SMALLEST_SIZE_SHARE, SNOW_LARGEST_SIZE_SHARE, snowFlakeUnit(flake, SNOW_SALT_SIZE));
+    return mix(SNOW_SMALLEST_SIZE_SHARE, SNOW_LARGEST_SIZE_SHARE,
+            pow(snowFlakeUnit(flake, SNOW_SALT_SIZE), SNOW_SIZE_SKEW));
+}
+
+// The shape the flake takes, as SnowFlakes.shapeIndex:
+int snowFlakeShapeIndex(uint flake) {
+    return int(snowHash(flake * 16u + SNOW_SALT_SHAPE) % uint(SNOW_SHAPE_COUNT));
 }
 
 // The radians per second at which the flake circles while it falls, with a sign for the way it turns:

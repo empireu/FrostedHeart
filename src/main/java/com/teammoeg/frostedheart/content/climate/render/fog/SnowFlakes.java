@@ -28,6 +28,8 @@ package com.teammoeg.frostedheart.content.climate.render.fog;
  * A flake's own values come from hashes of its index, which is its texel in the state texture, row by row.
  * How many flakes draw follows the fog: the flakes cover a set share of the fog's extinction at the eye, so they thin
  * and thicken with the snowfall, the storm and the height, as the fog does.
+ * A flake draws as one of the shapes of FlakeShapeGenerator once it is a few pixels wide, on a tile sized so the shape
+ * blocks as much light as a disc of the flake's width, and as a round dot below that.
  * A flake collides with the shapes of SnowShapeVolume. It is tested every SUBSTEP_BLOCKS of its move, and where it hits
  * a shape it stops and leaves a splat on the face it entered. A stopped flake moves on unseen until it leaves the box
  * seen from the camera and comes in at the opposite face as a new flake, which keeps the flakes evenly spread.
@@ -85,8 +87,13 @@ public final class SnowFlakes {
     public static final int STARTS_INSIDE = -2;
     public static final double SLOWEST_FALL_SHARE = 2.0 / 3.0;
     public static final double FASTEST_FALL_SHARE = 4.0 / 3.0;
-    public static final double SMALLEST_SIZE_SHARE = 0.6;
-    public static final double LARGEST_SIZE_SHARE = 1.4;
+    public static final double SMALLEST_SIZE_SHARE = 0.5;
+    public static final double LARGEST_SIZE_SHARE = 2.5;
+    /**
+     * The power of the unit that spreads the size share from the smallest to the largest, so most flakes are small and
+     * a few are large clumps, with a mean share of 1.
+     */
+    public static final double SIZE_SKEW = 3.0;
     public static final double SHORTEST_FLUTTER_PERIOD = 1.2;
     public static final double LONGEST_FLUTTER_PERIOD = 3.0;
     public static final double SMALLEST_FLUTTER_RADIUS_SHARE = 0.5;
@@ -98,11 +105,27 @@ public final class SnowFlakes {
      */
     public static final double SHELTER_SOFTNESS = 0.25;
     /**
-     * The mean of the square of a flake's size share, for a size share spread evenly between its smallest and largest.
+     * The mean of the square of a flake's size share, for a size share of SMALLEST_SIZE_SHARE plus the spread times an
+     * even unit raised to SIZE_SKEW.
      */
-    public static final double MEAN_SQUARED_SIZE_SHARE = (LARGEST_SIZE_SHARE * LARGEST_SIZE_SHARE * LARGEST_SIZE_SHARE
-            - SMALLEST_SIZE_SHARE * SMALLEST_SIZE_SHARE * SMALLEST_SIZE_SHARE)
-            / (3.0 * (LARGEST_SIZE_SHARE - SMALLEST_SIZE_SHARE));
+    public static final double MEAN_SQUARED_SIZE_SHARE = SMALLEST_SIZE_SHARE * SMALLEST_SIZE_SHARE
+            + 2.0 * SMALLEST_SIZE_SHARE * (LARGEST_SIZE_SHARE - SMALLEST_SIZE_SHARE) / (SIZE_SKEW + 1.0)
+            + (LARGEST_SIZE_SHARE - SMALLEST_SIZE_SHARE) * (LARGEST_SIZE_SHARE - SMALLEST_SIZE_SHARE)
+            / (2.0 * SIZE_SKEW + 1.0);
+    /**
+     * The shapes that flakes take, as FlakeShapeGenerator makes them, and the side of each shape's tile in texels.
+     */
+    public static final int SHAPE_COUNT = FlakeShapeGenerator.DEFAULT_COUNT;
+    public static final int SHAPE_SIZE = FlakeShapeGenerator.DEFAULT_SIZE;
+    /**
+     * How far a flake's quad reaches from its middle as a share of its tile's half side, which holds every pixel of a
+     * shape, since a shape's bounding box can reach a little past the half side at its corners.
+     */
+    public static final double SHAPE_REACH = 1.1;
+    /**
+     * The longest streak of a flake that shows its full shape, in flake radii, so the shape stays readable in wind.
+     */
+    public static final double LONGEST_SHAPE_STREAK = 1.0;
     private static final double UNIT_SCALE = 1.0 / 16777216.0;
 
     private SnowFlakes() {
@@ -179,7 +202,36 @@ public final class SnowFlakes {
      * The flake's width as a share of the mean width.
      */
     public static double sizeShare(int flake) {
-        return mix(SMALLEST_SIZE_SHARE, LARGEST_SIZE_SHARE, unit(flake, SALT_SIZE));
+        return mix(SMALLEST_SIZE_SHARE, LARGEST_SIZE_SHARE, Math.pow(unit(flake, SALT_SIZE), SIZE_SKEW));
+    }
+
+    /**
+     * The shape the flake takes, from 0 to SHAPE_COUNT - 1.
+     */
+    public static int shapeIndex(int flake) {
+        return Integer.remainderUnsigned(hash(flake * 16 + SALT_SHAPE), SHAPE_COUNT);
+    }
+
+    /**
+     * The half side in flake radii of the tile a shape is drawn on, at which the shape blocks as much light as an
+     * opaque disc of the flake's radius, or 0 for a shape that covers nothing.
+     * @param coverage the share of its tile that the shape covers
+     */
+    public static double shapeTileScale(double coverage) {
+        if (!(coverage > 0.0) || !Double.isFinite(coverage)) {
+            return 0.0;
+        }
+        return Math.sqrt(Math.PI / (4.0 * coverage));
+    }
+
+    /**
+     * The length of a flake's streak, which is at most LONGEST_SHAPE_STREAK of its radius when its full shape shows
+     * and not capped while it draws as a round dot.
+     * @param shapeWeight how much of the flake's shape shows instead of a round dot, from 0 to 1
+     */
+    public static double cappedStreakLength(double streakLength, double radius, double shapeWeight) {
+        double longest = streakLength + (LONGEST_SHAPE_STREAK * radius - streakLength) * clamp(shapeWeight);
+        return Math.min(streakLength, longest);
     }
 
     /**

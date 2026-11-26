@@ -4,8 +4,10 @@
 // flake of the periodic box that is nearest the camera, which fades out toward the box's faces. A flake is a soft round
 // sprite stretched along the path it travels while the shutter is open, and its opacity is spread over the streak so a
 // fast flake does not turn into a solid stick. A flake smaller than a pixel keeps its energy at a wider, fainter
-// footprint. The snow share of the fog fades flakes out under cover, each at its own threshold, and the fog between the
-// eye and the flake blends its color toward the fog color, as the fog composite fogs the scene.
+// footprint. A flake a few pixels wide turns into its shape from flakeShapes, on a tile sized so the shape blocks as
+// much light as the dot, averaged over a streak capped at SNOW_LONGEST_SHAPE_STREAK of its radius. The snow share of
+// the fog fades flakes out under cover, each at its own threshold, and the fog between the eye and the flake blends its
+// color toward the fog color, as the fog composite fogs the scene.
 // A stopped flake is not drawn. With splatPass set, each instance is instead the splat a flake left where it hit a
 // block, a quad on the block's face with the flake's own shape, that fades over the second half of splatSeconds.
 
@@ -50,6 +52,9 @@ uniform vec3 fogEyeFraction;
 uniform sampler2D shareVolume;
 uniform int hasShareVolume;
 uniform ivec3 shareLayout;
+// The half side in flake radii of each shape's tile, as SnowFlakes.shapeTileScale, all 0 while the shapes are not
+// ready:
+uniform float shapeTileScales[SNOW_SHAPE_COUNT];
 
 // Pixels from the middle of the streak along it and across it:
 out vec2 spritePosition;
@@ -61,8 +66,10 @@ flat out vec2 spriteAlong;
 // The cosine and sine of the flake's turn on screen, its squash by its tilt, and how much of its shape shows instead of
 // a round dot:
 flat out vec4 spriteShape;
-// The hash that lays out the lobes of the flake's clump:
-flat out uint spriteSeed;
+// The layer of the flake's shape, the half side of its tile in drawn radii, and the mip level to read it at:
+flat out vec3 spriteTile;
+// The share of the round dot's opacity left after spreading it over the streak:
+flat out float spriteStreakShare;
 
 // The smallest clip w of a flake that is drawn, which is the near plane:
 const float SNOW_NEAREST_W = 0.05;
@@ -82,6 +89,12 @@ const float SNOW_SHAPE_START_PIXELS = 2.0;
 const float SNOW_SHAPE_FULL_PIXELS = 5.0;
 // The squash of a flake seen edge on:
 const float SNOW_FLATTEST = 0.45;
+// The side of a shape's tile in texels, as SnowFlakes.SHAPE_SIZE, how far the quad of a flake that shows its shape
+// reaches as a share of the tile's half side, as SnowFlakes.SHAPE_REACH, and the longest streak of a flake that shows
+// its full shape in flake radii, as SnowFlakes.LONGEST_SHAPE_STREAK:
+const float SNOW_SHAPE_SIZE = 64.0;
+const float SNOW_SHAPE_REACH = 1.1;
+const float SNOW_LONGEST_SHAPE_STREAK = 1.0;
 // How much wider a splat is than its flake, how far it sits off the face against depth fighting, and how far from the
 // face its shelter is read, in blocks:
 const float SNOW_SPLAT_SPREAD = 1.3;
@@ -100,7 +113,25 @@ void hideFlake() {
     spriteColor = vec4(0.0);
     spriteAlong = vec2(1.0, 0.0);
     spriteShape = vec4(1.0, 0.0, 1.0, 0.0);
-    spriteSeed = 0u;
+    spriteTile = vec3(0.0, 1.0, 0.0);
+    spriteStreakShare = 1.0;
+}
+
+// The half side in flake radii of the tile of the flake's shape, or 0 while it has none:
+float snowTileScale(uint flake) {
+    return shapeTileScales[snowFlakeShapeIndex(flake)];
+}
+
+// How much of the flake's shape shows instead of the round dot, by its true radius in pixels:
+float snowShapeWeight(float tileScale, float trueRadiusPixels) {
+    return tileScale > 0.0 ? smoothstep(SNOW_SHAPE_START_PIXELS, SNOW_SHAPE_FULL_PIXELS, trueRadiusPixels) : 0.0;
+}
+
+// The tile of the flake's shape for spriteTile, with the mip level at which a texel spans about a pixel along the
+// squashed axis:
+vec3 snowSpriteTile(uint flake, float tileScale, float drawnRadiusPixels, float squash) {
+    float texelsPerPixel = SNOW_SHAPE_SIZE / max(2.0 * tileScale * drawnRadiusPixels * squash, 1.0e-3);
+    return vec3(float(snowFlakeShapeIndex(flake)), max(tileScale, 1.0e-3), log2(max(texelsPerPixel, 1.0)));
 }
 
 // The share of a cell given as an offset from the fog's eye block, as snowWalkCellShare reads the share volume. A cell
@@ -214,14 +245,18 @@ void drawSplat(int index) {
     float trueRadius = 0.5 * flakeSize * snowFlakeSizeShare(flake) * SNOW_SPLAT_SPREAD;
     float drawnRadius = max(trueRadius, SNOW_LEAST_RADIUS_PIXELS * clipCenter.w / pixelsPerBlock);
     float energy = (trueRadius / drawnRadius) * (trueRadius / drawnRadius);
+    float trueRadiusPixels = trueRadius * pixelsPerBlock / clipCenter.w;
+    float tileScale = snowTileScale(flake);
+    float shapeWeight = snowShapeWeight(tileScale, trueRadiusPixels);
+    float reach = shapeWeight > 0.0 ? max(SNOW_SPRITE_REACH, SNOW_SHAPE_REACH * tileScale) : SNOW_SPRITE_REACH;
     vec3 tangent = abs(normal.x) > 0.5 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
     vec3 bitangent = cross(normal, tangent);
     vec2 corner = SNOW_CORNERS[gl_VertexID];
     gl_Position = viewProjection * vec4(center + (tangent * corner.x + bitangent * corner.y)
-            * (SNOW_SPRITE_REACH * drawnRadius), 1.0);
+            * (reach * drawnRadius), 1.0);
     vec2 middlePixel = (clipCenter.xy / clipCenter.w * 0.5 + 0.5) * screenSize;
-    // The sprite's coordinates are in drawn radii, so the fragment stage draws the same soft clump as for a flake:
-    spritePosition = corner * SNOW_SPRITE_REACH;
+    // The sprite's coordinates are in drawn radii, so the fragment stage draws the same dot or shape as for a flake:
+    spritePosition = corner * reach;
     spriteHalfLength = 0.0;
     spriteRadius = 1.0;
     // A splat is lit as snow lying on the face, as the fog color J is a white top face at full sky light:
@@ -229,9 +264,9 @@ void drawSplat(int index) {
             weight * energy);
     spriteAlong = vec2(1.0, 0.0);
     float turn = SNOW_TWO_PI * snowFlakeUnit(flake, SNOW_SALT_TURN);
-    spriteShape = vec4(cos(turn), sin(turn), 1.0, smoothstep(SNOW_SHAPE_START_PIXELS, SNOW_SHAPE_FULL_PIXELS,
-            trueRadius * pixelsPerBlock / clipCenter.w));
-    spriteSeed = snowHash(flake * 16u + SNOW_SALT_SHAPE);
+    spriteShape = vec4(cos(turn), sin(turn), 1.0, shapeWeight);
+    spriteTile = snowSpriteTile(flake, tileScale, max(trueRadiusPixels, SNOW_LEAST_RADIUS_PIXELS), 1.0);
+    spriteStreakShare = 1.0;
 }
 
 void main() {
@@ -327,27 +362,32 @@ void main() {
     float trueRadius = 0.5 * flakeSize * snowFlakeSizeShare(flake) * pixelsPerBlock / clipCenter.w;
     float drawnRadius = max(trueRadius, SNOW_LEAST_RADIUS_PIXELS);
     float energy = (trueRadius / drawnRadius) * (trueRadius / drawnRadius);
+    float tileScale = snowTileScale(flake);
+    float shapeWeight = snowShapeWeight(tileScale, trueRadius);
+    streakLength = min(streakLength, mix(streakLength, SNOW_LONGEST_SHAPE_STREAK * trueRadius, shapeWeight));
     float streakShare = SNOW_PI * drawnRadius / (2.0 * streakLength + SNOW_PI * drawnRadius);
 
     vec3 color = snowLitColor(vec3(flakeBrightness * snowFlakeBrightnessShare(flake)), distance, fromFogEye.y,
             middlePixel);
 
     vec2 corner = SNOW_CORNERS[gl_VertexID];
-    float reach = SNOW_SPRITE_REACH * drawnRadius;
+    float reach = (shapeWeight > 0.0 ? max(SNOW_SPRITE_REACH, SNOW_SHAPE_REACH * tileScale) : SNOW_SPRITE_REACH)
+            * drawnRadius;
     vec2 local = vec2(corner.x * (0.5 * streakLength + reach), corner.y * reach);
     vec2 pixel = middlePixel + along * local.x + across * local.y;
     gl_Position = vec4((pixel / screenSize * 2.0 - 1.0) * clipCenter.w, clipCenter.z, clipCenter.w);
     spritePosition = local;
     spriteHalfLength = 0.5 * streakLength;
     spriteRadius = drawnRadius;
-    spriteColor = vec4(color, weight * energy * streakShare);
+    spriteColor = vec4(color, weight * energy);
     spriteAlong = along;
     // The flake turns and tips once per flutter circle, so both stay smooth where the circle's angle wraps:
     float turn = phase + SNOW_TWO_PI * snowFlakeUnit(flake, SNOW_SALT_TURN);
     float tilt = 2.0 * phase + SNOW_TWO_PI * snowFlakeUnit(flake, SNOW_SALT_TILT);
-    spriteShape = vec4(cos(turn), sin(turn), mix(SNOW_FLATTEST, 1.0, 0.5 + 0.5 * cos(tilt)),
-            smoothstep(SNOW_SHAPE_START_PIXELS, SNOW_SHAPE_FULL_PIXELS, trueRadius));
-    spriteSeed = snowHash(flake * 16u + SNOW_SALT_SHAPE);
+    float squash = mix(SNOW_FLATTEST, 1.0, 0.5 + 0.5 * cos(tilt));
+    spriteShape = vec4(cos(turn), sin(turn), squash, shapeWeight);
+    spriteTile = snowSpriteTile(flake, tileScale, drawnRadius, squash);
+    spriteStreakShare = streakShare;
 }
 #endif
 
@@ -358,59 +398,49 @@ flat in float spriteRadius;
 flat in vec4 spriteColor;
 flat in vec2 spriteAlong;
 flat in vec4 spriteShape;
-flat in uint spriteSeed;
+flat in vec3 spriteTile;
+flat in float spriteStreakShare;
+uniform sampler2DArray flakeShapes;
 out vec4 fragColor;
 
 // The soft edge of the sprite in drawn radii, which spreads about the area of a disc of the drawn radius:
 const float SNOW_PROFILE_INNER = 0.5;
 const float SNOW_PROFILE_OUTER = 1.5;
 const float SNOW_LEAST_ALPHA = 1.0 / 512.0;
-// A clump is a core lobe and SNOW_LOBES lobes around it, in flake radii before SNOW_CLUMP_SCALE widens it to about the
-// area of the round dot. Each lobe's edge softens from SNOW_LOBE_EDGE of its radius out to its radius:
-const int SNOW_LOBES = 5;
-const float SNOW_CLUMP_SCALE = 1.25;
-const float SNOW_CORE_LOBE_RADIUS = 0.5;
-const float SNOW_NEAREST_LOBE = 0.3;
-const float SNOW_FARTHEST_LOBE = 0.55;
-const float SNOW_SMALLEST_LOBE = 0.3;
-const float SNOW_LARGEST_LOBE = 0.5;
-const float SNOW_LOBE_EDGE = 0.7;
+// The reads of the shape spread along a streak, and the half streak in pixels below which one read does:
+const int SNOW_STREAK_TAPS = 4;
+const float SNOW_SINGLE_TAP_HALF_LENGTH = 0.25;
 
-// A number from 0 to just below 1 for one value of one lobe of the flake:
-float snowLobeUnit(uint value) {
-    return float(snowHash(spriteSeed + value * 0x9e3779b9u) >> 8) * (1.0 / 16777216.0);
-}
-
-float snowLobe(vec2 point, vec2 center, float radius) {
-    return 1.0 - smoothstep(SNOW_LOBE_EDGE * radius, radius, length(point - center));
-}
-
-// The opacity of the flake's clump at a point given in flake radii in the flake's own frame:
-float snowClump(vec2 point) {
-    float profile = snowLobe(point, vec2(0.0), SNOW_CORE_LOBE_RADIUS);
-    for (int lobe = 0; lobe < SNOW_LOBES; lobe++) {
-        uint first = uint(lobe) * 3u;
-        float angle = SNOW_TWO_PI * (float(lobe) + 0.7 * snowLobeUnit(first)) / float(SNOW_LOBES);
-        float reach = mix(SNOW_NEAREST_LOBE, SNOW_FARTHEST_LOBE, snowLobeUnit(first + 1u));
-        float radius = mix(SNOW_SMALLEST_LOBE, SNOW_LARGEST_LOBE, snowLobeUnit(first + 2u));
-        profile = max(profile, snowLobe(point, reach * vec2(cos(angle), sin(angle)), radius));
-    }
-    return profile;
+// The opacity of the flake's shape at a point given in pixels from its middle, along and across the streak. The shape
+// turns with the screen, not with the streak, so it does not spin when the view turns:
+float snowShapeAt(vec2 point) {
+    vec2 screenPoint = spriteAlong * point.x + vec2(-spriteAlong.y, spriteAlong.x) * point.y;
+    vec2 turned = vec2(spriteShape.x * screenPoint.x + spriteShape.y * screenPoint.y,
+            spriteShape.x * screenPoint.y - spriteShape.y * screenPoint.x) / spriteRadius;
+    turned.y /= spriteShape.z;
+    vec2 uv = turned / (2.0 * spriteTile.y) + 0.5;
+    return textureLod(flakeShapes, vec3(uv, spriteTile.x), spriteTile.z).r;
 }
 
 void main() {
-    // The offset from the nearest point of the streak, so a moving flake's shape is smeared along its path:
+    // The offset from the nearest point of the streak, so a moving dot is smeared along its path:
     vec2 offset = vec2(spritePosition.x - clamp(spritePosition.x, -spriteHalfLength, spriteHalfLength),
             spritePosition.y);
-    float profile = 1.0 - smoothstep(SNOW_PROFILE_INNER * spriteRadius, SNOW_PROFILE_OUTER * spriteRadius,
-            length(offset));
+    float profile = spriteStreakShare * (1.0 - smoothstep(SNOW_PROFILE_INNER * spriteRadius,
+            SNOW_PROFILE_OUTER * spriteRadius, length(offset)));
     if (spriteShape.w > 0.0) {
-        // The shape turns with the screen, not with the streak, so it does not spin when the view turns:
-        vec2 screenOffset = spriteAlong * offset.x + vec2(-spriteAlong.y, spriteAlong.x) * offset.y;
-        vec2 turned = vec2(spriteShape.x * screenOffset.x + spriteShape.y * screenOffset.y,
-                spriteShape.x * screenOffset.y - spriteShape.y * screenOffset.x) / (spriteRadius * SNOW_CLUMP_SCALE);
-        turned.y /= spriteShape.z;
-        profile = mix(profile, snowClump(turned), spriteShape.w);
+        // A moving shape is the mean of its copies spread evenly along the streak:
+        float shape = 0.0;
+        if (spriteHalfLength > SNOW_SINGLE_TAP_HALF_LENGTH) {
+            for (int tap = 0; tap < SNOW_STREAK_TAPS; tap++) {
+                float along = spriteHalfLength * ((2.0 * float(tap) + 1.0) / float(SNOW_STREAK_TAPS) - 1.0);
+                shape += snowShapeAt(spritePosition - vec2(along, 0.0));
+            }
+            shape /= float(SNOW_STREAK_TAPS);
+        } else {
+            shape = snowShapeAt(spritePosition);
+        }
+        profile = mix(profile, shape, spriteShape.w);
     }
     float alpha = spriteColor.a * profile;
     if (!(alpha > SNOW_LEAST_ALPHA)) {

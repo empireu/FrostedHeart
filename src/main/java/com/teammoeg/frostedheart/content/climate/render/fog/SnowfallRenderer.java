@@ -88,7 +88,11 @@ public final class SnowfallRenderer {
     static final int NO_LEAVES_HEIGHT_UNIT = 7;
     static final int SMOOTH_HEIGHT_UNIT = 8;
     static final int CAVITY_MAP_UNIT = 9;
-    private static final int TEXTURE_UNITS = 10;
+    /**
+     * The unit of the flake shapes, a 2D array texture.
+     */
+    private static final int FLAKE_SHAPES_UNIT = 10;
+    private static final int TEXTURE_UNITS = 11;
     private static final int CHUNK_WIDTH = 16;
     /**
      * Distance in blocks along any axis beyond which the fixed splat origin resets with a state refill to keep float
@@ -240,7 +244,10 @@ public final class SnowfallRenderer {
         int previousExcessTexture = GL11.glGetInteger(GL30.GL_TEXTURE_BINDING_2D_ARRAY);
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SHAPE_VOLUME_UNIT);
         int previousShapeVolumeTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + FLAKE_SHAPES_UNIT);
+        int previousFlakeShapesTexture = GL11.glGetInteger(GL30.GL_TEXTURE_BINDING_2D_ARRAY);
         try {
+            FlakeShapeTexture.prepare();
             RenderSystem.disableScissor();
             RenderSystem.disableCull();
             FarHeights farHeights = ClientSnowField.farHeights();
@@ -305,6 +312,8 @@ public final class SnowfallRenderer {
             GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, previousExcessTexture);
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SHAPE_VOLUME_UNIT);
             GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousShapeVolumeTexture);
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + FLAKE_SHAPES_UNIT);
+            GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, previousFlakeShapesTexture);
             for (int unit = 0; unit < TEXTURE_UNITS; unit++) {
                 RenderSystem.activeTexture(GL13.GL_TEXTURE0 + unit);
                 RenderSystem.bindTexture(previousTextures[unit]);
@@ -400,6 +409,8 @@ public final class SnowfallRenderer {
         bindTexture(SPLAT_UNIT, splatTextures[currentState]);
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
         GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, WeatherFogRenderer.excessTexture());
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + FLAKE_SHAPES_UNIT);
+        GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, FlakeShapeTexture.texture());
         int shareVolume = WeatherFogRenderer.shareVolumeTexture();
         bindTexture(SHARE_VOLUME_UNIT, shareVolume);
         bindTexture(LEE_MAP_UNIT, leeActive ? SnowLeeMap.texture() : 0);
@@ -512,9 +523,10 @@ public final class SnowfallRenderer {
                 ? String.format(Locale.ROOT, "%d bytes allocated in the last frame", lastFrameAllocatedBytes)
                 : "allocations not counted by this JVM";
         return String.format(Locale.ROOT, "Snowfall: %d flakes drawn in the last frame, %.0f asked by snowFlakeShare "
-                        + "of %d at most%s; update %s; draw %s; %s; %s; %s", lastInstances, lastAskedCount,
+                        + "of %d at most%s; update %s; draw %s; %s; %s; %s; %s", lastInstances, lastAskedCount,
                 SnowFlakes.CAPACITY, lastAskedCount > SnowFlakes.CAPACITY ? " (capped)" : "", updateTimer.describe(),
-                drawTimer.describe(), allocated, describeCollision(), SnowLeeMap.describe());
+                drawTimer.describe(), allocated, FlakeShapeTexture.describe(), describeCollision(),
+                SnowLeeMap.describe());
     }
 
     /**
@@ -774,6 +786,7 @@ public final class SnowfallRenderer {
         private int leeFallSpeedUniform;
         private int leeBandUniform;
         private int farHeightsMinUniform;
+        private int shapeTileScalesUniform;
 
         private void use() {
             Shader newVertex = FHShaders.getSnowFlakesVertex();
@@ -803,6 +816,7 @@ public final class SnowfallRenderer {
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "noLeavesHeights"), NO_LEAVES_HEIGHT_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "smoothHeights"), SMOOTH_HEIGHT_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "cavityMap"), CAVITY_MAP_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "flakeShapes"), FLAKE_SHAPES_UNIT);
                 GL20.glUniform3i(GL20.glGetUniformLocation(programId, "shareLayout"), FogShareVolume.SIDE,
                         FogShareVolume.ORIGIN, FogShareVolume.TILES_ACROSS);
                 GL20.glUniform1f(GL20.glGetUniformLocation(programId, "boxFadeWidth"), BOX_FADE_WIDTH);
@@ -846,6 +860,7 @@ public final class SnowfallRenderer {
                 leeFallSpeedUniform = GL20.glGetUniformLocation(programId, "leeFallSpeed");
                 leeBandUniform = GL20.glGetUniformLocation(programId, "leeBand");
                 farHeightsMinUniform = GL20.glGetUniformLocation(programId, "farHeightsMin");
+                shapeTileScalesUniform = GL20.glGetUniformLocation(programId, "shapeTileScales");
             }
             program.use();
         }
@@ -904,6 +919,7 @@ public final class SnowfallRenderer {
             GL20.glUniform1i(sliceCountUniform, WeatherFogRenderer.froxelSliceCount());
             GL20.glUniform1f(rangeDistanceUniform, (float) WeatherFogRenderer.froxelRangeDistance());
             GL20.glUniform1i(divisorUniform, WeatherFogRenderer.froxelDivisor());
+            GL20.glUniform1fv(shapeTileScalesUniform, FlakeShapeTexture.tileScales());
             GL20.glUniform1i(hasLeeMapUniform, leeActive ? 1 : 0);
             GL20.glUniform1i(hasCavityMapUniform, cavityActive ? 1 : 0);
             GL20.glUniform1f(cavityBrakeLengthUniform, (float) SkySetting.SNOW_CAVITY_BRAKE_LENGTH.get());

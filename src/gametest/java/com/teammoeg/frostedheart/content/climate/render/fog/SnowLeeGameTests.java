@@ -1038,6 +1038,8 @@ public final class SnowLeeGameTests {
                 SnowFlakes.SMALLEST_SIZE_SHARE, 0.0);
         checkShaderConstant(helper, "snow_flakes.glsl", flakesGlsl, "SNOW_LARGEST_SIZE_SHARE",
                 SnowFlakes.LARGEST_SIZE_SHARE, 0.0);
+        checkShaderConstant(helper, "snow_flakes.glsl", flakesGlsl, "SNOW_SIZE_SKEW", SnowFlakes.SIZE_SKEW, 0.0);
+        checkShaderConstant(helper, "snow_flakes.glsl", flakesGlsl, "SNOW_SHAPE_COUNT", SnowFlakes.SHAPE_COUNT, 0.0);
         checkShaderConstant(helper, "snow_flakes.glsl", flakesGlsl, "SNOW_SHORTEST_FLUTTER_PERIOD",
                 SnowFlakes.SHORTEST_FLUTTER_PERIOD, 0.0);
         checkShaderConstant(helper, "snow_flakes.glsl", flakesGlsl, "SNOW_LONGEST_FLUTTER_PERIOD",
@@ -1089,6 +1091,11 @@ public final class SnowLeeGameTests {
         // snow_flakes_draw.glsl:
         checkShaderConstant(helper, "snow_flakes_draw.glsl", drawGlsl, "SNOW_COUNT_FADE",
                 SnowFlakes.COUNT_FADE_FLAKES, 0.0);
+        checkShaderConstant(helper, "snow_flakes_draw.glsl", drawGlsl, "SNOW_SHAPE_SIZE", SnowFlakes.SHAPE_SIZE, 0.0);
+        checkShaderConstant(helper, "snow_flakes_draw.glsl", drawGlsl, "SNOW_SHAPE_REACH", SnowFlakes.SHAPE_REACH,
+                1.0e-6);
+        checkShaderConstant(helper, "snow_flakes_draw.glsl", drawGlsl, "SNOW_LONGEST_SHAPE_STREAK",
+                SnowFlakes.LONGEST_SHAPE_STREAK, 0.0);
 
         // snow_lee.glsl:
         checkLeeShaderConstants(helper, "snow_lee.glsl", leeGlsl);
