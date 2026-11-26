@@ -159,6 +159,23 @@ public final class SnowFlakes {
     }
 
     /**
+     * The horizontal speed in blocks per second at which snowflakes drift, which follows the flake wind speed in light
+     * wind and approaches maxDrift times the fall speed in strong wind, so the flakes never fall flatter than that.
+     * A maxDrift of 0 makes them fall straight.
+     * @param maxDrift the most blocks a flake drifts sideways for each block it falls
+     */
+    public static double driftSpeed(double windSpeed, double fallSpeed, double maxDrift) {
+        double limit = maxDrift * fallSpeed;
+        if (!(windSpeed > 0.0) || !Double.isFinite(windSpeed) || !(limit > 0.0)) {
+            return 0.0;
+        }
+        if (Double.isInfinite(limit)) {
+            return windSpeed;
+        }
+        return limit * Math.tanh(windSpeed / limit);
+    }
+
+    /**
      * The flake's width as a share of the mean width.
      */
     public static double sizeShare(int flake) {

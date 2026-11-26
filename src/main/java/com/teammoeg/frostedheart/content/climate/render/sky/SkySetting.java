@@ -141,6 +141,9 @@ public enum SkySetting {
             Rebuilds.NOTHING, 1.8, 0.05, 5.0),
     SNOW_WIND_SHARE("snowWindShare", "Share of the wind speed that snowflakes and the lee map follow, while the fog "
             + "keeps the full wind.", Rebuilds.NOTHING, 0.5, 0.0, 1.0),
+    SNOW_MAX_DRIFT("snowMaxDrift", "Most blocks that snowflakes drift sideways for each block they fall. They follow "
+            + "snowWindShare of the wind in light wind and approach this in strong wind. 0 makes them fall straight.",
+            Rebuilds.NOTHING, 1.5, 0.0, 10.0),
     SNOW_FLUTTER("snowFlutter", "Mean radius in blocks of the circles that snowflakes trace while they fall. 0 makes "
             + "them fall straight.", Rebuilds.NOTHING, 0.15, 0.0, 1.0),
     SNOW_STREAK_SECONDS("snowStreakSeconds", "Seconds of motion that a snowflake is smeared over, like a camera's "

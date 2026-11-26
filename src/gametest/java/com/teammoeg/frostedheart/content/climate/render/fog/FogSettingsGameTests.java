@@ -39,6 +39,7 @@ public final class FogSettingsGameTests {
         checkNumberSetting(helper, SkySetting.SNOW_FALL_SPEED, "snowFallSpeed", 0.6, 0.05, 5.0);
         checkNumberSetting(helper, SkySetting.SNOW_BLIZZARD_FALL_SPEED, "snowBlizzardFallSpeed", 1.8, 0.05, 5.0);
         checkNumberSetting(helper, SkySetting.SNOW_WIND_SHARE, "snowWindShare", 0.5, 0.0, 1.0);
+        checkNumberSetting(helper, SkySetting.SNOW_MAX_DRIFT, "snowMaxDrift", 1.5, 0.0, 10.0);
         checkNumberSetting(helper, SkySetting.SNOW_FLUTTER, "snowFlutter", 0.15, 0.0, 1.0);
         checkNumberSetting(helper, SkySetting.SNOW_STREAK_SECONDS, "snowStreakSeconds", 0.02, 0.0, 0.2);
         checkNumberSetting(helper, SkySetting.SNOW_FLAKE_BRIGHTNESS, "snowFlakeBrightness", 1.0, 0.0, 4.0);
@@ -82,9 +83,10 @@ public final class FogSettingsGameTests {
 
         SkySetting[] weatherSettings = {SkySetting.SNOW_ENABLED, SkySetting.SNOW_FLAKE_SHARE,
                 SkySetting.SNOW_FLAKE_SIZE, SkySetting.SNOW_FALL_SPEED, SkySetting.SNOW_BLIZZARD_FALL_SPEED,
-                SkySetting.SNOW_WIND_SHARE, SkySetting.SNOW_FLUTTER, SkySetting.SNOW_STREAK_SECONDS,
-                SkySetting.SNOW_FLAKE_BRIGHTNESS, SkySetting.SNOW_NEAR_RADIUS, SkySetting.SNOW_COLLISION,
-                SkySetting.SNOW_SPLAT_SECONDS, SkySetting.SNOW_LEE, SkySetting.SNOW_LEE_FILL, SkySetting.SNOW_LEE_BAND,
+                SkySetting.SNOW_WIND_SHARE, SkySetting.SNOW_MAX_DRIFT, SkySetting.SNOW_FLUTTER,
+                SkySetting.SNOW_STREAK_SECONDS, SkySetting.SNOW_FLAKE_BRIGHTNESS, SkySetting.SNOW_NEAR_RADIUS,
+                SkySetting.SNOW_COLLISION, SkySetting.SNOW_SPLAT_SECONDS, SkySetting.SNOW_LEE, SkySetting.SNOW_LEE_FILL,
+                SkySetting.SNOW_LEE_BAND,
                 SkySetting.SNOW_CAVITY_BRAKE_LENGTH, SkySetting.SNOW_CAVITY_SWIRL, SkySetting.SNOW_CAVITY_DOWNDRAFT,
                 SkySetting.FOG_ENABLED, SkySetting.FOG_SNOW_VISIBILITY, SkySetting.FOG_BLIZZARD_VISIBILITY,
                 SkySetting.FOG_HEIGHT_SCALE, SkySetting.FOG_LEAF_POROSITY, SkySetting.FOG_FIELD_BUDGET_MICROS,

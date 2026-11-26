@@ -25,8 +25,8 @@ import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
 
 /**
- * Checks the Java twin of the snowflakes: the periodic box, the count drawn from the fog's extinction, the fades, and
- * the spreads of each flake's own values.
+ * Checks the Java twin of the snowflakes: the periodic box, the count drawn from the fog's extinction, the fades, the
+ * spreads of each flake's own values, and the drift cap.
  */
 @GameTestHolder("frostedheart_weather")
 @PrefixGameTestTemplate(false)
@@ -128,6 +128,46 @@ public final class SnowFlakesGameTests {
         helper.assertTrue(Math.abs(meanUnit - 0.5) < 0.005, "the mean unit is " + meanUnit + " instead of 0.5");
         helper.assertTrue(Math.abs(meanFall - 1.0) < 0.005, "the mean fall share is " + meanFall + " instead of 1");
         helper.assertTrue(Math.abs(leftShare - 0.5) < 0.01, leftShare + " of the flakes turn one way instead of 0.5");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 20)
+    public static void driftCapKeepsFlakesSteepAndLeavesLightWind(GameTestHelper helper) {
+        double maxDrift = 1.5;
+        double[] fallSpeeds = {0.6, 1.2, 1.8};
+        for (double fallSpeed : fallSpeeds) {
+            double limit = maxDrift * fallSpeed;
+            double previous = 0.0;
+            for (int step = 1; step <= 400; step++) {
+                double windSpeed = 0.01 * step * limit;
+                double drift = SnowFlakes.driftSpeed(windSpeed, fallSpeed, maxDrift);
+                if (!(drift > previous) || !(drift < limit) || !(drift <= windSpeed)) {
+                    helper.fail("a flake falling at " + fallSpeed + " in a wind of " + windSpeed + " drifts at " + drift
+                            + ", after " + previous + " in a lighter wind, against the limit " + limit);
+                    return;
+                }
+                previous = drift;
+            }
+            double light = SnowFlakes.driftSpeed(0.1 * limit, fallSpeed, maxDrift);
+            helper.assertTrue(light >= 0.99 * 0.1 * limit, "a light wind of " + 0.1 * limit + " drifts flakes at only "
+                    + light);
+            double strong = SnowFlakes.driftSpeed(3.0 * limit, fallSpeed, maxDrift);
+            helper.assertTrue(strong >= 0.99 * limit, "a strong wind of " + 3.0 * limit + " drifts flakes at only "
+                    + strong + " below the limit " + limit);
+        }
+        // Plain snow in a wind of 5 and a full blizzard in a wind of 12, with snowWindShare 0.5:
+        double snowDrift = SnowFlakes.driftSpeed(SnowFlakes.windSpeed(5.0, 0.5), 0.6, maxDrift);
+        helper.assertTrue(snowDrift > 0.88 && snowDrift < 0.9, "plain snow drifts at " + snowDrift
+                + " instead of about 0.89");
+        double blizzardDrift = SnowFlakes.driftSpeed(SnowFlakes.windSpeed(12.0, 0.5), 1.8, maxDrift);
+        helper.assertTrue(blizzardDrift > 2.6 && blizzardDrift < 2.7, "a blizzard drifts at " + blizzardDrift
+                + " instead of about 2.64");
+        checkNear(helper, "drift without a cap", SnowFlakes.driftSpeed(2.5, 0.6, Double.POSITIVE_INFINITY), 2.5);
+        checkNear(helper, "drift with a huge cap", SnowFlakes.driftSpeed(2.5, 0.6, 1.0e9), 2.5);
+        checkNear(helper, "drift with the cap 0", SnowFlakes.driftSpeed(2.5, 0.6, 0.0), 0.0);
+        checkNear(helper, "drift in calm air", SnowFlakes.driftSpeed(0.0, 0.6, maxDrift), 0.0);
+        checkNear(helper, "drift in a NaN wind", SnowFlakes.driftSpeed(Double.NaN, 0.6, maxDrift), 0.0);
+        checkNear(helper, "drift at a NaN fall speed", SnowFlakes.driftSpeed(2.5, Double.NaN, maxDrift), 0.0);
         helper.succeed();
     }
 

@@ -248,7 +248,9 @@ public final class SnowfallRenderer {
             WeatherWind wind = WeatherFogRenderer.wind();
             double flakeFallSpeed = SnowFlakes.fallSpeed(SkySetting.SNOW_FALL_SPEED.get(),
                     SkySetting.SNOW_BLIZZARD_FALL_SPEED.get(), conditions.stormIntensity());
-            double flakeWindSpeed = SnowFlakes.windSpeed(wind.speed(), SkySetting.SNOW_WIND_SHARE.get());
+            double flakeWindSpeed = SnowFlakes.driftSpeed(
+                    SnowFlakes.windSpeed(wind.speed(), SkySetting.SNOW_WIND_SHARE.get()), flakeFallSpeed,
+                    SkySetting.SNOW_MAX_DRIFT.get());
             double windDirection = wind.direction();
             boolean wantsNoLeaves = SkySetting.SNOW_LEE.isOn() || FogCavityMap.isActive();
             int noLeavesTexture = wantsNoLeaves ? ClientSnowField.prepareNoLeavesHeights() : 0;
