@@ -51,6 +51,14 @@ vec2 lampCascadeShares(int cascade, vec3 coordinate) {
     return textureLod(lampCascade4, coordinate, 0.0).rg;
 }
 
+// One cascade's filtered shares at an offset from the eye, clamped to half a cell inside its window.
+vec2 lampCascadeSharesAt(int cascade, vec3 offsetFromEye) {
+    vec3 size = lampCascadeSize[cascade];
+    vec3 inWindow = clamp(lampEyeInCascade[cascade] + offsetFromEye * lampCellsPerBlock[cascade], vec3(0.5),
+            size - 0.5);
+    return lampCascadeShares(cascade, (lampSlotOrigin[cascade] + inWindow) / size);
+}
+
 // The blended shares at an offset from the eye, each cascade filtered within its window and blended into the next
 // over its band, with dark open air past the last.
 vec2 lampSharesAt(vec3 offsetFromEye) {
@@ -66,10 +74,7 @@ vec2 lampSharesAt(vec3 offsetFromEye) {
             continue;
         }
         float weight = clamp((distance - LAMP_BAND_START) / (LAMP_BAND_END - LAMP_BAND_START), 0.0, 1.0);
-        vec3 size = lampCascadeSize[cascade];
-        vec3 inWindow = clamp(lampEyeInCascade[cascade] + offsetFromEye * lampCellsPerBlock[cascade], vec3(0.5),
-                size - 0.5);
-        shares += remaining * (1.0 - weight) * lampCascadeShares(cascade, (lampSlotOrigin[cascade] + inWindow) / size);
+        shares += remaining * (1.0 - weight) * lampCascadeSharesAt(cascade, offsetFromEye);
         remaining *= weight;
     }
     shares.y += remaining;

@@ -43,8 +43,8 @@ import java.util.regex.Pattern;
 /**
  * Checks the LampLightField against sums over a fake world's light: the cells of every cascade, the sky light that
  * sections without data take from above, closed and windowed rooms, unloaded chunks, clearing, moved and budgeted
- * fields against fresh ones, the filter and the blend of the cascades, the shader's constants, and that a warm field
- * allocates nothing.
+ * fields against fresh ones, the filter and the blend of the cascades, the lit boxes, the fog march's twin
+ * LampFogMarch, the shaders' constants, and that a warm field allocates nothing.
  */
 @GameTestHolder("frostedheart_weather")
 @PrefixGameTestTemplate(false)
@@ -66,6 +66,15 @@ public final class LampLightGameTests {
     private static final float LEVEL_TOLERANCE = 2.0e-3F;
     private static final int SHADER_PATTERN_REACH = 250;
     private static final int SHADER_SAMPLES = 20000;
+    /**
+     * The half side in blocks of the even field's lit square, its eye, and the lamp color of level 15 in the march's
+     * checks.
+     */
+    private static final int EVEN_REACH = 280;
+    private static final double EVEN_EYE_X = BASE_X + 0.3;
+    private static final double EVEN_EYE_Y = GROUND_Y + 8.4;
+    private static final double EVEN_EYE_Z = BASE_Z - 0.2;
+    private static final float[] EVEN_LIFT = {0.6F, 0.45F, 0.3F};
     private static final Pattern GLSL_CONST_PATTERN = Pattern.compile(
             "^\\s*const\\s+(?:int|uint|float)\\s+([A-Z0-9_]+)\\s*=\\s*([^;]+);");
 
@@ -349,12 +358,226 @@ public final class LampLightGameTests {
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void lampShaderConstantsMatchTheField(GameTestHelper helper) {
         Map<String, Double> constants = parseShaderConstants(helper, "lamp_light.glsl");
-        checkConstant(helper, constants, "LAMP_CASCADE_COUNT", LampLightField.CASCADE_COUNT);
-        checkConstant(helper, constants, "LAMP_BRIGHTEST", LampLightField.BRIGHTEST);
-        checkConstant(helper, constants, "LAMP_NO_AIR", LampLightField.NO_AIR);
-        checkConstant(helper, constants, "LAMP_BAND_START", LampLightField.BAND_START);
-        checkConstant(helper, constants, "LAMP_BAND_END", LampLightField.BAND_END);
+        checkConstant(helper, "lamp_light.glsl", constants, "LAMP_CASCADE_COUNT", LampLightField.CASCADE_COUNT);
+        checkConstant(helper, "lamp_light.glsl", constants, "LAMP_BRIGHTEST", LampLightField.BRIGHTEST);
+        checkConstant(helper, "lamp_light.glsl", constants, "LAMP_NO_AIR", LampLightField.NO_AIR);
+        checkConstant(helper, "lamp_light.glsl", constants, "LAMP_BAND_START", LampLightField.BAND_START);
+        checkConstant(helper, "lamp_light.glsl", constants, "LAMP_BAND_END", LampLightField.BAND_END);
+        Map<String, Double> march = parseShaderConstants(helper, "weather_fog_lamp.fsh");
+        checkConstant(helper, "weather_fog_lamp.fsh", march, "LAMP_LEAST_TRANSMITTANCE",
+                LampFogMarch.LEAST_TRANSMITTANCE);
+        checkConstant(helper, "weather_fog_lamp.fsh", march, "LAMP_MAXIMUM_STEPS", LampFogMarch.MAXIMUM_STEPS);
+        checkConstant(helper, "weather_fog_lamp.fsh", march, "LAMP_SKY_DISTANCE", LampFogMarch.SKY_DISTANCE);
+        checkConstant(helper, "weather_fog_lamp.fsh", march, "LAMP_NO_CROSSING", LampFogMarch.NO_CROSSING);
+        checkConstant(helper, "weather_fog_lamp.fsh", march, "LAMP_LIFT_LEVELS", LampFogMarch.LIFT_LEVELS);
+        checkConstant(helper, "weather_fog_lamp.fsh", march, "LAMP_LEAST_SCALED_DEPTH",
+                LampFogMarch.LEAST_SCALED_DEPTH);
+        Map<String, Double> composite = parseShaderConstants(helper, "weather_fog_composite.fsh");
+        checkConstant(helper, "weather_fog_composite.fsh", composite, "LAMP_SKY_DISTANCE",
+                LampFogMarch.SKY_DISTANCE);
         helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 600)
+    public static void litBoxesHoldEveryLitCell(GameTestHelper helper) {
+        FakeSource source = scene();
+        LampLightField field = filledField(source, EYE_X, EYE_Y, EYE_Z);
+        helper.assertTrue(field.cascade(0).litBox(new int[6]), "the scene lights no cell of cascade 0");
+        checkLitBoxes(helper, field, "after a fill");
+        field.follow(EYE_X + 37.4, EYE_Y + 5.3, EYE_Z - 21.8);
+        drain(field, source);
+        checkLitBoxes(helper, field, "after a move");
+        source.clearBlockLight();
+        markTorch(field, BASE_X + 3, GROUND_Y + 1, BASE_Z + 2, TORCH_LEVEL);
+        drain(field, source);
+        checkLitBoxes(helper, field, "after the near torch was broken");
+        LampLightField dark = filledField(new FakeSource(), EYE_X, EYE_Y, EYE_Z);
+        float[] lows = new float[3 * LampLightField.CASCADE_COUNT];
+        float[] highs = new float[3 * LampLightField.CASCADE_COUNT];
+        helper.assertTrue(!dark.shaderLitBoxes(lows, highs), "a field without light gives the shader a lit box");
+        helper.assertTrue(lows[0] > highs[0], "a cascade without light gives the shader the box from " + lows[0]
+                + " to " + highs[0]);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 600)
+    public static void lampMarchOfAnEvenFieldAddsTheLampColorTimesTheFogsOpacity(GameTestHelper helper) {
+        LampLightField field = evenField();
+        LampFogMarch march = new LampFogMarch();
+        helper.assertTrue(march.prepare(field, EVEN_EYE_X, EVEN_EYE_Y, EVEN_EYE_Z), "the even field holds no light");
+        float[] lifts = testLifts();
+        float[] light = new float[3];
+        for (int ray = 0; ray < 16; ray++) {
+            double angle = ray * 2.0 * Math.PI / 16.0 + 0.1;
+            double directionY = (ray % 3 - 1) * 0.01;
+            double horizontal = Math.sqrt(1.0 - directionY * directionY);
+            double endDistance = 20.0 + ray * 13.5;
+            march.march(horizontal * Math.cos(angle), directionY, horizontal * Math.sin(angle), endDistance, 1.0F,
+                    lifts, distance -> 0.01 * distance, light);
+            double opacity = 1.0 - Math.exp(-0.01 * endDistance);
+            for (int channel = 0; channel < 3; channel++) {
+                double expected = EVEN_LIFT[channel] * opacity;
+                helper.assertTrue(Math.abs(light[channel] - expected) <= 1.0e-4 * expected + 1.0e-6, "ray " + ray
+                        + " to " + endDistance + " blocks adds " + light[channel] + " in channel " + channel
+                        + " instead of the lamp color times the fog's opacity, " + expected);
+            }
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 600)
+    public static void lampMarchOfAFallingDepthGivesTheFogsOpacityAtTheRaysEnd(GameTestHelper helper) {
+        LampLightField field = evenField();
+        LampFogMarch march = new LampFogMarch();
+        march.prepare(field, EVEN_EYE_X, EVEN_EYE_Y, EVEN_EYE_Z);
+        float[] lifts = testLifts();
+        float[] light = new float[3];
+        march.march(Math.cos(0.7), 0.0, Math.sin(0.7), 200.0, 1.0F, lifts,
+                distance -> distance <= 40.0 ? 0.075 * distance : 1.0, light);
+        double endOpacity = EVEN_LIFT[0] * (1.0 - Math.exp(-1.0));
+        helper.assertTrue(Math.abs(light[0] - endOpacity) <= 1.0e-4 * endOpacity, "a depth that falls from 3 to 1 at "
+                + "40 blocks gives " + light[0] + " instead of the lamp color times the opacity at the ray's end, "
+                + endOpacity);
+        march.march(Math.cos(0.7), 0.0, Math.sin(0.7), 200.0, 1.0F, lifts,
+                distance -> distance <= 40.0 ? 0.05 * distance
+                        : distance <= 80.0 ? 1.0 : 1.0 + 0.02 * (distance - 80.0), light);
+        double risenOpacity = EVEN_LIFT[0] * (1.0 - Math.exp(-3.4));
+        helper.assertTrue(Math.abs(light[0] - risenOpacity) <= 1.0e-4 * risenOpacity, "a depth that falls from 2 to "
+                + "1 at 40 blocks and rises to 3.4 gives " + light[0] + " instead of the lamp color times the opacity "
+                + "at the ray's end, " + risenOpacity);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 600)
+    public static void lampMarchKeepingToTheLitBoxesMatchesTheWholeMarch(GameTestHelper helper) {
+        FakeSource source = scene();
+        LampLightField field = filledField(source, EYE_X, EYE_Y, EYE_Z);
+        LampFogMarch clipped = new LampFogMarch();
+        LampFogMarch whole = new LampFogMarch();
+        helper.assertTrue(clipped.prepare(field, EYE_X, EYE_Y, EYE_Z), "the scene holds no light");
+        whole.prepare(field, EYE_X, EYE_Y, EYE_Z);
+        whole.setClipped(false);
+        float[] lifts = testLifts();
+        float[] clippedLight = new float[3];
+        float[] wholeLight = new float[3];
+        double[][] targets = {{BASE_X + 3, GROUND_Y + 1, BASE_Z + 2}, {BASE_X - 22, GROUND_Y + 2, BASE_Z + 13},
+                {BASE_X + 200, GROUND_Y + 1, BASE_Z + 150}, {BASE_X - 400, GROUND_Y + 2, BASE_Z - 300},
+                {BASE_X + 56, GROUND_Y + 4, BASE_Z + 56}};
+        Random random = new Random(29L);
+        int lit = 0;
+        int clippedSteps = 0;
+        int wholeSteps = 0;
+        int rays = 400;
+        for (int ray = 0; ray < rays; ray++) {
+            double directionX;
+            double directionY;
+            double directionZ;
+            double endDistance;
+            if (ray % 2 == 0) {
+                double[] target = targets[(ray / 2) % targets.length];
+                directionX = target[0] + random.nextGaussian() * 4.0 - EYE_X;
+                directionY = target[1] + random.nextGaussian() * 2.0 - EYE_Y;
+                directionZ = target[2] + random.nextGaussian() * 4.0 - EYE_Z;
+                double length = Math.sqrt(directionX * directionX + directionY * directionY
+                        + directionZ * directionZ);
+                endDistance = length * (0.5 + random.nextDouble());
+            } else {
+                directionX = random.nextGaussian();
+                directionY = -0.35 + 0.45 * random.nextDouble();
+                directionZ = random.nextGaussian();
+                endDistance = 10.0 + 590.0 * random.nextDouble();
+            }
+            double length = Math.sqrt(directionX * directionX + directionY * directionY + directionZ * directionZ);
+            double unitX = directionX / length;
+            double unitY = directionY / length;
+            double unitZ = directionZ / length;
+            clipped.march(unitX, unitY, unitZ, endDistance, 1.0F, lifts, distance -> 0.004 * distance, clippedLight);
+            whole.march(unitX, unitY, unitZ, endDistance, 1.0F, lifts, distance -> 0.004 * distance, wholeLight);
+            helper.assertTrue(whole.lastSteps() < LampFogMarch.MAXIMUM_STEPS, "ray " + ray + " ran out of steps "
+                    + "walking every piece");
+            clippedSteps += clipped.lastSteps();
+            wholeSteps += whole.lastSteps();
+            float brightest = Math.max(wholeLight[0], Math.max(wholeLight[1], wholeLight[2]));
+            if (brightest > 1.0e-3F) {
+                lit++;
+            }
+            for (int channel = 0; channel < 3; channel++) {
+                helper.assertTrue(Math.abs(clippedLight[channel] - wholeLight[channel]) <= 1.0e-4 * brightest + 1.0e-6,
+                        "ray " + ray + " toward " + unitX + " " + unitY + " " + unitZ + " to " + endDistance
+                                + " blocks adds " + clippedLight[channel] + " in channel " + channel + " within the "
+                                + "lit boxes and " + wholeLight[channel] + " walking every piece");
+            }
+        }
+        helper.assertTrue(lit > rays / 5, "only " + lit + " rays are lit, so the check shows little");
+        helper.assertTrue(clippedSteps < wholeSteps, "keeping to the lit boxes took " + clippedSteps + " pieces, not "
+                + "fewer than the " + wholeSteps + " of walking every piece");
+        helper.succeed();
+    }
+
+    /**
+     * Compares each cascade's lit box with a scan of every cell of its window.
+     */
+    private static void checkLitBoxes(GameTestHelper helper, LampLightField field, String when) {
+        int[] box = new int[6];
+        for (int index = 0; index < field.activeCount(); index++) {
+            LampLightCascade cascade = field.cascade(index);
+            int[] expected = {Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, -1, -1, -1};
+            for (int z = 0; z < cascade.sizeZ(); z++) {
+                for (int y = 0; y < cascade.sizeY(); y++) {
+                    for (int x = 0; x < cascade.sizeX(); x++) {
+                        if (LampLightCascade.isLit(cascade.lightAt(cascade.originX() + x, cascade.originY() + y,
+                                cascade.originZ() + z))) {
+                            expected[0] = Math.min(expected[0], x);
+                            expected[1] = Math.min(expected[1], y);
+                            expected[2] = Math.min(expected[2], z);
+                            expected[3] = Math.max(expected[3], x + 1);
+                            expected[4] = Math.max(expected[4], y + 1);
+                            expected[5] = Math.max(expected[5], z + 1);
+                        }
+                    }
+                }
+            }
+            boolean anyLit = expected[3] > 0;
+            boolean reported = cascade.litBox(box);
+            helper.assertTrue(reported == anyLit, "cascade " + index + " " + when + " reports a lit box " + reported
+                    + " while its cells hold light " + anyLit);
+            if (anyLit) {
+                for (int entry = 0; entry < 6; entry++) {
+                    helper.assertTrue(box[entry] == expected[entry], "cascade " + index + " " + when + " has the lit "
+                            + "box entry " + entry + " at " + box[entry] + " instead of " + expected[entry]);
+                }
+            }
+        }
+    }
+
+    /**
+     * A field whose outdoor air holds light 15 in the section layer from GROUND_Y over a square around the eye, so
+     * every cascade reads level 1 at the height of the eye.
+     */
+    private static LampLightField evenField() {
+        FakeSource source = new FakeSource();
+        int sectionY = Math.floorDiv(GROUND_Y, 16);
+        for (int sectionX = Math.floorDiv(BASE_X - EVEN_REACH, 16); sectionX <= Math.floorDiv(BASE_X + EVEN_REACH, 16);
+                sectionX++) {
+            for (int sectionZ = Math.floorDiv(BASE_Z - EVEN_REACH, 16);
+                    sectionZ <= Math.floorDiv(BASE_Z + EVEN_REACH, 16); sectionZ++) {
+                source.fillBlockLight(SectionPos.asLong(sectionX, sectionY, sectionZ), LampLightField.BRIGHTEST_LEVEL);
+            }
+        }
+        return filledField(source, EVEN_EYE_X, EVEN_EYE_Y, EVEN_EYE_Z);
+    }
+
+    /**
+     * Lamp colors that grow evenly from 0 at level 0 to EVEN_LIFT at level 15.
+     */
+    private static float[] testLifts() {
+        float[] lifts = new float[3 * LampFogMarch.LIFT_LEVELS];
+        for (int level = 0; level < LampFogMarch.LIFT_LEVELS; level++) {
+            for (int channel = 0; channel < 3; channel++) {
+                lifts[3 * level + channel] = EVEN_LIFT[channel] * level / (LampFogMarch.LIFT_LEVELS - 1.0F);
+            }
+        }
+        return lifts;
     }
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 400)
@@ -375,7 +598,7 @@ public final class LampLightGameTests {
         walk(field, source, shares, uniforms, 0.5);
         long allocated = threads.getCurrentThreadAllocatedBytes() - before;
         helper.assertTrue(allocated == 0L, "a warm field allocated " + allocated + " bytes in following, marking, "
-                + "reading, sampling and writing the shader's uniforms");
+                + "reading, sampling and writing the shader's uniforms and lit boxes");
         helper.succeed();
     }
 
@@ -393,6 +616,7 @@ public final class LampLightGameTests {
             field.process(source, 40, Long.MAX_VALUE);
             field.sharesAt(eyeX, EYE_Y, eyeZ, step * 7.0 - 120.0, -3.0, step * 2.0, shares);
             field.shaderUniforms(eyeX, EYE_Y, eyeZ, uniforms, uniforms, uniforms, uniforms, uniforms);
+            field.shaderLitBoxes(uniforms, uniforms);
         }
         drain(field, source);
     }
@@ -771,11 +995,11 @@ public final class LampLightGameTests {
         return constants;
     }
 
-    private static void checkConstant(GameTestHelper helper, Map<String, Double> constants, String name,
-            double expected) {
+    private static void checkConstant(GameTestHelper helper, String shaderFile, Map<String, Double> constants,
+            String name, double expected) {
         Double actual = constants.get(name);
-        helper.assertTrue(actual != null, "lamp_light.glsl is missing const " + name);
-        helper.assertTrue(Math.abs(actual - expected) <= Math.abs(expected) * 1.0e-6, "lamp_light.glsl defines "
+        helper.assertTrue(actual != null, shaderFile + " is missing const " + name);
+        helper.assertTrue(Math.abs(actual - expected) <= Math.abs(expected) * 1.0e-6, shaderFile + " defines "
                 + name + " = " + actual + " instead of Java value " + expected);
     }
 
@@ -805,6 +1029,18 @@ public final class LampLightGameTests {
 
         private void clearBlockLight() {
             blockLayers.clear();
+        }
+
+        private void fillBlockLight(long sectionKey, int level) {
+            DataLayer layer = new DataLayer();
+            for (int y = 0; y < 16; y++) {
+                for (int z = 0; z < 16; z++) {
+                    for (int x = 0; x < 16; x++) {
+                        layer.set(x, y, z, level);
+                    }
+                }
+            }
+            blockLayers.put(sectionKey, layer);
         }
 
         private int blockLightAt(int x, int y, int z) {

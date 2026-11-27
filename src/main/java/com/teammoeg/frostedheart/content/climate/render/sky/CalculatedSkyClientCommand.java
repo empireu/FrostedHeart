@@ -28,6 +28,7 @@ import com.mojang.brigadier.context.CommandContext;
 import com.teammoeg.frostedheart.FHMain;
 import com.teammoeg.frostedheart.content.climate.render.fog.ClientLampLight;
 import com.teammoeg.frostedheart.content.climate.render.fog.ClientSnowField;
+import com.teammoeg.frostedheart.content.climate.render.fog.LampFogPass;
 import com.teammoeg.frostedheart.content.climate.render.fog.LampLightDebugView;
 import com.teammoeg.frostedheart.content.climate.render.fog.LampLightField;
 import com.teammoeg.frostedheart.content.climate.render.fog.LampLightTextures;
@@ -88,6 +89,7 @@ public final class CalculatedSkyClientCommand {
                 .then(literal("snow").executes(CalculatedSkyClientCommand::snow))
                 .then(literal("lamps").executes(CalculatedSkyClientCommand::lamps)
                         .then(literal("verify").executes(CalculatedSkyClientCommand::verifyLampTextures))
+                        .then(literal("selftest").executes(CalculatedSkyClientCommand::selfTestLampMarch))
                         .then(literal("debug").then(literal("off").executes(context -> showLampCascade(context,
                                         LampLightDebugView.OFF)))
                                 .then(Commands.argument("cascade",
@@ -217,6 +219,13 @@ public final class CalculatedSkyClientCommand {
 
     private static int verifyLampTextures(CommandContext<CommandSourceStack> context) {
         for (String line : ClientLampLight.verifyTextures()) {
+            send(context, line);
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int selfTestLampMarch(CommandContext<CommandSourceStack> context) {
+        for (String line : LampFogPass.selfTest()) {
             send(context, line);
         }
         return Command.SINGLE_SUCCESS;

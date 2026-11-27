@@ -81,6 +81,11 @@ public final class LampLightField {
     private static final long URGENT_BIT = 1L << 40;
     private static final int INITIAL_COLUMNS = 8192;
     private static final float HALF_SUBNORMAL_UNIT = 0x1.0p-24F;
+    /**
+     * The side of a lit box that reaches without end, in cells, and the low of an empty box.
+     */
+    public static final float UNBOUNDED_BOX = 1.0e9F;
+    public static final float EMPTY_BOX_LOW = 1.0e9F;
     private static final float[] BRIGHTNESS = new float[BRIGHTEST_LEVEL + 1];
 
     static {
@@ -102,6 +107,7 @@ public final class LampLightField {
      */
     private final int[] boxes = new int[CASCADE_COUNT * 6];
     private final float[] sharesScratch = new float[2];
+    private final int[] litBoxScratch = new int[6];
     private int activeCount = CASCADE_COUNT;
     private boolean hasLevel;
     private int minSection;
@@ -787,6 +793,41 @@ public final class LampLightField {
             count++;
         }
         return count;
+    }
+
+    /**
+     * Writes for the fog march the box of each cascade's lit cells, for the cascades shaderUniforms counts, 3 floats
+     * per cascade in x, y, z order, in cells from the lowest cell of the window. Each box is grown by half a cell,
+     * which bounds where the filtered light share is above 0, and reaches without end past a side of the window that
+     * holds a lit cell, since the shader clamps reads to the window. A cascade without a lit cell gets an empty box,
+     * its low above its high.
+     * @return whether any of those cascades holds a lit cell
+     */
+    public boolean shaderLitBoxes(float[] lows, float[] highs) {
+        boolean anyLit = false;
+        for (int index = 0; index < activeCount; index++) {
+            LampLightCascade cascade = cascades[index];
+            if (!cascade.isPlaced()) {
+                break;
+            }
+            int base = 3 * index;
+            if (!cascade.litBox(litBoxScratch)) {
+                for (int axis = 0; axis < 3; axis++) {
+                    lows[base + axis] = EMPTY_BOX_LOW;
+                    highs[base + axis] = -EMPTY_BOX_LOW;
+                }
+                continue;
+            }
+            anyLit = true;
+            for (int axis = 0; axis < 3; axis++) {
+                int size = axis == 0 ? cascade.sizeX() : axis == 1 ? cascade.sizeY() : cascade.sizeZ();
+                int low = litBoxScratch[axis];
+                int high = litBoxScratch[axis + 3];
+                lows[base + axis] = low == 0 ? -UNBOUNDED_BOX : low - 0.5F;
+                highs[base + axis] = high == size ? UNBOUNDED_BOX : high + 0.5F;
+            }
+        }
+        return anyLit;
     }
 
     /**

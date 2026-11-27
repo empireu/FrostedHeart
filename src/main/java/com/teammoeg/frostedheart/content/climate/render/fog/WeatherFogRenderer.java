@@ -212,14 +212,16 @@ public final class WeatherFogRenderer {
     private static final SnowFogWalk selfTestWalk = new SnowFogWalk();
     private static final FogCavity.NearCavityQuery nearCavityQuery = new FogCavity.NearCavityQuery();
     /**
-     * Whether the settings of the draw were read once, and the froxel divisor, the slice count, the range and the debug
-     * mode of the frame before, which start a new measurement of the passes when they change.
+     * Whether the settings of the draw were read once, and the froxel divisor, the slice count, the range, the debug
+     * mode and the lamp glow's divisor of the frame before, which start a new measurement of the passes when they
+     * change.
      */
     private static boolean passTimerSettingsKnown;
     private static int passTimerFroxelDivisor;
     private static int passTimerSliceCount;
     private static double passTimerRangeDistance;
     private static int passTimerDebugMode;
+    private static int passTimerLampDivisor;
 
     @Nullable
     private static ClientLevel keptFrameLevel;
@@ -815,11 +817,14 @@ public final class WeatherFogRenderer {
         int froxelDivisor = FogFroxelGrid.divisorOf(SkySetting.FOG_FROXEL_DIVISOR.get());
         int sliceCount = FogFroxelGrid.sliceCountOf(SkySetting.FOG_FROXEL_SLICES.get());
         double rangeDistance = FogFroxelGrid.rangeOf(SkySetting.FOG_FROXEL_RANGE.get());
+        int lampDivisor = LampFogPass.divisorOf(SkySetting.FOG_LAMP_DIVISOR.get());
         if (passTimerSettingsKnown && (froxelDivisor != passTimerFroxelDivisor || sliceCount != passTimerSliceCount
-                || Double.compare(rangeDistance, passTimerRangeDistance) != 0 || debugMode != passTimerDebugMode)) {
+                || Double.compare(rangeDistance, passTimerRangeDistance) != 0 || debugMode != passTimerDebugMode
+                || lampDivisor != passTimerLampDivisor)) {
             passTimer.reset();
         }
         passTimerSettingsKnown = true;
+        passTimerLampDivisor = lampDivisor;
         passTimerFroxelDivisor = froxelDivisor;
         passTimerSliceCount = sliceCount;
         passTimerRangeDistance = rangeDistance;
@@ -1020,6 +1025,7 @@ public final class WeatherFogRenderer {
             }
             FogLight.whiteFaceColor(lightPixels.getPixelRGBA(0, LIGHTMAP_SKY_FOURTEEN),
                     lightPixels.getPixelRGBA(0, LIGHTMAP_SKY_FIFTEEN), snowColor);
+            LampFogPass.readLifts(lightPixels);
             return true;
         } catch (RuntimeException exception) {
             lightmapUnreadable = true;
@@ -1060,13 +1066,14 @@ public final class WeatherFogRenderer {
     }
 
     /**
-     * Draws the fog over the frame in five stages between the timer's boundaries: the setup that binds the depth and the
+     * Draws the fog over the frame in six stages between the timer's boundaries: the setup that binds the depth and the
      * fields, the share of every cell of the region cube into its volume, the piece of each froxel of the column grid
-     * into its atlas, the excess of the walked depth over the analytic fog at every slice boundary into its array, and
-     * the fog over the frame, which reads the excesses of the columns around each pixel. The depth of the main target is
-     * read through a color only framebuffer, so that its depth texture is not attached to what it draws to. Every piece
-     * of state the pass changes is set back after it, and the framebuffer holds no texture of the main target once it is
-     * released.
+     * into its atlas, the excess of the walked depth over the analytic fog at every slice boundary into its array, the
+     * lamp glow of LampFogPass, and the fog over the frame, which reads the excesses of the columns around each pixel
+     * and adds the lamp glow. The fog blends premultiplied and its debug views by their opacity. The depth of the main
+     * target is read through a color only framebuffer, so that its depth texture is not attached to what it draws to.
+     * Every piece of state the pass changes is set back after it, and the framebuffer holds no texture of the main
+     * target once it is released.
      */
     private static void draw(RenderTarget mainTarget) {
         if (froxelTargetFailed) {
@@ -1124,16 +1131,33 @@ public final class WeatherFogRenderer {
                 return;
             }
             passTimer.mark(4);
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
+            GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, excessTexture);
+            boolean lampFogDrawn = debugMode == 0 && LampFogPass.draw(mainTarget, inverseViewProjection,
+                    eyeBlockX + eyeFractionX, eyeBlockY + eyeFractionY, eyeBlockZ + eyeFractionZ, eyeExtinction,
+                    frameHeightScale, frameColumnCount, frameRowCount, frameSliceCount, frameRangeDistance,
+                    frameFroxelDivisor, snowColorFromLightmap);
+            if (lampFogDrawn) {
+                RenderSystem.activeTexture(GL13.GL_TEXTURE0 + LampFogPass.TARGET_UNIT);
+                RenderSystem.bindTexture(LampFogPass.targetTexture());
+            }
+            passTimer.mark(5);
             bindColorFramebuffer(mainTarget);
             RenderSystem.viewport(viewportX, viewportY, viewportWidth, viewportHeight);
             RenderSystem.enableBlend();
             RenderSystem.blendEquation(GL14.GL_FUNC_ADD);
-            RenderSystem.blendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ZERO, GL11.GL_ONE);
-            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
-            GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, excessTexture);
+            // The fog writes its color premultiplied by its opacity, with the lamp glow added. The debug views write
+            // their color and an opacity:
+            if (debugMode == 0) {
+                RenderSystem.blendFuncSeparate(GL11.GL_ONE, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ZERO, GL11.GL_ONE);
+            } else {
+                RenderSystem.blendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ZERO,
+                        GL11.GL_ONE);
+            }
             compositePass.use();
             compositePass.setFrameUniforms(mainTarget);
             compositePass.setShareVolumeInUse(shareVolumeBound);
+            compositePass.setLampFog(lampFogDrawn ? LampFogPass.divisor() : 0);
             SkyGlPass.drawFullScreenQuad();
             passTimer.end();
         } finally {
@@ -3004,7 +3028,7 @@ public final class WeatherFogRenderer {
 
     /**
      * The program of the composite, weather_fog.glsl and snow_walk.glsl followed by weather_fog_composite.fsh, and the
-     * uniforms that only it has: the snow fog color, the debug view, the froxel grid and the self test.
+     * uniforms that only it has: the snow fog color, the debug view, the froxel grid, the self test and the lamp glow.
      */
     private static final class CompositeProgram extends FogProgramBase {
         private int snowColorUniform;
@@ -3016,10 +3040,18 @@ public final class WeatherFogRenderer {
         private int divisorUniform;
         private int selfTestUniform;
         private int selfTestOffsetsUniform;
+        private int lampFogDivisorUniform;
 
         @Override
         protected Shader loadFragment() {
             return FHShaders.getWeatherFogComposite();
+        }
+
+        /**
+         * Sets the frame pixels per side of a texel of the lamp glow that the composite adds, or 0 to add none.
+         */
+        private void setLampFog(int divisor) {
+            GL20.glUniform1i(lampFogDivisorUniform, divisor);
         }
 
         @Override
@@ -3030,6 +3062,8 @@ public final class WeatherFogRenderer {
             GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "shareTable"), SHARE_TABLE_UNIT);
             GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "fogStructure"), STRUCTURE_UNIT);
             GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "excesses"), EXCESS_UNIT);
+            GL20.glUniform1i(GL20.glGetUniformLocation(linked.programId, "lampFog"), LampFogPass.TARGET_UNIT);
+            lampFogDivisorUniform = GL20.glGetUniformLocation(linked.programId, "lampFogDivisor");
             snowColorUniform = GL20.glGetUniformLocation(linked.programId, "snowColor");
             debugModeUniform = GL20.glGetUniformLocation(linked.programId, "debugMode");
             columnCountUniform = GL20.glGetUniformLocation(linked.programId, "columnCount");
@@ -3048,6 +3082,7 @@ public final class WeatherFogRenderer {
             setGridUniforms(columnCountUniform, rowCountUniform, sliceCountUniform, rangeDistanceUniform,
                     divisorUniform);
             GL20.glUniform1i(selfTestUniform, 0);
+            GL20.glUniform1i(lampFogDivisorUniform, 0);
         }
 
         /**

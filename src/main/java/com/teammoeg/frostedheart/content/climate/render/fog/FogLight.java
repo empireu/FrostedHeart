@@ -68,6 +68,28 @@ public final class FogLight {
     }
 
     /**
+     * Writes the lamp color that each block light level adds to the fog, 3 entries per level from 0 up: the white face
+     * color at that level less the white face color at level 0, each channel at least 0, times a strength. Level 0
+     * adds nothing. Allocates nothing.
+     * @param skyFourteenAbgr the lightmap pixels at sky light 14 for block light 0 up, packed ABGR
+     * @param skyFifteenAbgr the lightmap pixels at sky light 15 for block light 0 up, packed ABGR
+     * @param lifts receives 3 entries for each level of the pixels given
+     */
+    public static void lampLifts(int[] skyFourteenAbgr, int[] skyFifteenAbgr, float strength, float[] lifts) {
+        int levels = Math.min(skyFourteenAbgr.length, Math.min(skyFifteenAbgr.length, lifts.length / 3));
+        for (int level = 0; level < levels; level++) {
+            lifts[3 * level] = strength * Math.max(0.0F, channelMean(skyFourteenAbgr[level], skyFifteenAbgr[level],
+                    RED_SHIFT) - channelMean(skyFourteenAbgr[0], skyFifteenAbgr[0], RED_SHIFT));
+            lifts[3 * level + 1] = strength * Math.max(0.0F, channelMean(skyFourteenAbgr[level],
+                    skyFifteenAbgr[level], GREEN_SHIFT) - channelMean(skyFourteenAbgr[0], skyFifteenAbgr[0],
+                    GREEN_SHIFT));
+            lifts[3 * level + 2] = strength * Math.max(0.0F, channelMean(skyFourteenAbgr[level],
+                    skyFifteenAbgr[level], BLUE_SHIFT) - channelMean(skyFourteenAbgr[0], skyFifteenAbgr[0],
+                    BLUE_SHIFT));
+        }
+    }
+
+    /**
      * The mean of one channel of two lightmap pixels, as (first + second) / 2 / 255. Allocates nothing.
      * @param firstAbgr the first lightmap pixel, packed ABGR
      * @param secondAbgr the second lightmap pixel, packed ABGR

@@ -46,7 +46,7 @@ public final class FogPassTimer {
     /**
      * The number of passes that the boundaries split the draw into.
      */
-    public static final int PASS_COUNT = 5;
+    public static final int PASS_COUNT = 6;
     /**
      * The number of query sets in flight, of which the oldest is collected every frame.
      */
@@ -56,8 +56,8 @@ public final class FogPassTimer {
     /**
      * The name of each pass, and of the total, which is the sum of all passes and comes last.
      */
-    private static final String[] SEGMENT_NAMES = {"setup", "share volume", "inject", "integrate", "composite",
-            "total"};
+    private static final String[] SEGMENT_NAMES = {"setup", "share volume", "inject", "integrate", "lamp glow",
+            "composite", "total"};
 
     private final int[][] boundaryQueries = new int[QUERY_SETS][BOUNDARY_COUNT];
     private final boolean[] pending = new boolean[QUERY_SETS];

@@ -50,6 +50,12 @@ public final class LampLightCascade {
     private final int bricksY;
     private final int bricksZ;
     private final ShortBuffer values;
+    /**
+     * The number of slots with a light share above 0 in each slot layer across x, y and z.
+     */
+    private final int[] litCellsX;
+    private final int[] litCellsY;
+    private final int[] litCellsZ;
     private final long[] dirtyBricks;
     private int dirtyCount;
     private boolean placed;
@@ -75,6 +81,9 @@ public final class LampLightCascade {
         bricksZ = sizeZ / brickWidth;
         values = ByteBuffer.allocateDirect(sizeX * sizeY * sizeZ * CHANNELS * Short.BYTES)
                 .order(ByteOrder.nativeOrder()).asShortBuffer();
+        litCellsX = new int[sizeX];
+        litCellsY = new int[sizeY];
+        litCellsZ = new int[sizeZ];
         dirtyBricks = new long[(brickCount() + Long.SIZE - 1) / Long.SIZE];
         clear();
     }
@@ -185,6 +194,10 @@ public final class LampLightCascade {
         for (int start = 0; start < total; start += fillPattern.length) {
             values.put(start, fillPattern, 0, Math.min(fillPattern.length, total - start));
         }
+        boolean lit = isLit(light);
+        Arrays.fill(litCellsX, lit ? sizeY * sizeZ : 0);
+        Arrays.fill(litCellsY, lit ? sizeX * sizeZ : 0);
+        Arrays.fill(litCellsZ, lit ? sizeX * sizeY : 0);
         markAllDirty();
     }
 
@@ -224,9 +237,61 @@ public final class LampLightCascade {
     }
 
     void put(int cellX, int cellY, int cellZ, short light, short air) {
-        int slot = valueIndex(slotX(cellX), slotY(cellY), slotZ(cellZ));
+        int slotX = slotX(cellX);
+        int slotY = slotY(cellY);
+        int slotZ = slotZ(cellZ);
+        int slot = valueIndex(slotX, slotY, slotZ);
+        boolean wasLit = isLit(values.get(slot));
+        boolean lit = isLit(light);
+        if (lit != wasLit) {
+            int change = lit ? 1 : -1;
+            litCellsX[slotX] += change;
+            litCellsY[slotY] += change;
+            litCellsZ[slotZ] += change;
+        }
         values.put(slot, light);
         values.put(slot + 1, air);
+    }
+
+    /**
+     * Whether a light share as a half float is above 0, subnormals included.
+     */
+    public static boolean isLit(short light) {
+        return (light & 0x7fff) != 0;
+    }
+
+    /**
+     * Finds the box of the window's cells whose light share is above 0, in cells from the window's lowest cell.
+     * @param box receives the lowest cell on x, y and z and then the cell past the highest on each
+     * @return whether the window is placed and any of its cells holds light
+     */
+    public boolean litBox(int[] box) {
+        return placed && litRange(litCellsX, originX, sizeX, box, 0) && litRange(litCellsY, originY, sizeY, box, 1)
+                && litRange(litCellsZ, originZ, sizeZ, box, 2);
+    }
+
+    private static boolean litRange(int[] litCells, int origin, int size, int[] box, int axis) {
+        int originSlot = Math.floorMod(origin, size);
+        int low = -1;
+        int high = -1;
+        for (int offset = 0; offset < size; offset++) {
+            int slot = originSlot + offset;
+            if (slot >= size) {
+                slot -= size;
+            }
+            if (litCells[slot] > 0) {
+                if (low < 0) {
+                    low = offset;
+                }
+                high = offset;
+            }
+        }
+        if (low < 0) {
+            return false;
+        }
+        box[axis] = low;
+        box[axis + 3] = high + 1;
+        return true;
     }
 
     /**

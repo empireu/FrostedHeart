@@ -79,6 +79,8 @@ public class FHShaders extends Shaders {
     private static boolean weatherFogIntegrateUnloadOnReload;
     private static Shader WEATHER_FOG_COMPOSITE;
     private static boolean weatherFogCompositeUnloadOnReload;
+    private static Shader WEATHER_FOG_LAMP;
+    private static boolean weatherFogLampUnloadOnReload;
     private static Shader SNOW_FLAKE_UPDATE;
     private static boolean snowFlakeUpdateUnloadOnReload;
     private static Shader SNOW_FLAKES_VERTEX;
@@ -342,6 +344,37 @@ public class FHShaders extends Shaders {
         if (WEATHER_FOG_COMPOSITE != null) {
             WEATHER_FOG_COMPOSITE.deleteShader();
             WEATHER_FOG_COMPOSITE = null;
+        }
+    }
+
+    /**
+     * The fragment stage of the lamp march of the froxel fog, weather_fog.glsl followed by weather_fog_excess.glsl,
+     * lamp_light.glsl and weather_fog_lamp.fsh in one source, compiled with LAMP_LIGHT_FIELD on first use.
+     */
+    public static Shader getWeatherFogLamp() {
+        if (!weatherFogLampUnloadOnReload) {
+            addReloadListener(FHShaders::unloadWeatherFogLamp);
+            weatherFogLampUnloadOnReload = true;
+        }
+        if (WEATHER_FOG_LAMP == null) {
+            String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/weather_fog_excess.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/lamp_light.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/weather_fog_lamp.fsh"));
+            WEATHER_FOG_LAMP = Shader.loadShader(Shader.ShaderType.FRAGMENT,
+                    "#version 150\n#define LAMP_LIGHT_FIELD\n" + source);
+        }
+        return WEATHER_FOG_LAMP;
+    }
+
+    /**
+     * Deletes the lamp march of the froxel fog after a resource reload, so the next use compiles it from the new
+     * resources.
+     */
+    private static void unloadWeatherFogLamp() {
+        if (WEATHER_FOG_LAMP != null) {
+            WEATHER_FOG_LAMP.deleteShader();
+            WEATHER_FOG_LAMP = null;
         }
     }
 

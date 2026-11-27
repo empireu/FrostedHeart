@@ -97,11 +97,18 @@ public final class LampLightBinding {
      * the program in use for the camera with the field faded in by fade. Leaves the last unit active.
      */
     public void bind(@Nullable LampLightField field, Vec3 camera, float fade) {
+        bind(field, camera.x, camera.y, camera.z, fade);
+    }
+
+    /**
+     * Binds as bind does, for an eye given by its coordinates.
+     */
+    public void bind(@Nullable LampLightField field, double eyeX, double eyeY, double eyeZ, float fade) {
         int count = 0;
         if (field != null) {
             LampLightTextures.upload(field);
-            count = field.shaderUniforms(camera.x, camera.y, camera.z, sizes, slotOrigins, eyesInCascade,
-                    cellsPerBlock, inverseReaches);
+            count = field.shaderUniforms(eyeX, eyeY, eyeZ, sizes, slotOrigins, eyesInCascade, cellsPerBlock,
+                    inverseReaches);
         }
         for (int index = 0; index < CASCADES; index++) {
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + firstUnit + index);

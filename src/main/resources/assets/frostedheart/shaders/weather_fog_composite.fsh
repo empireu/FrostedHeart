@@ -2,12 +2,12 @@
 // Draws the fog of snow and blizzards over the frame at full resolution: a pixel reads the depth of the main target,
 // takes the analytic height fog along its own ray, adds the excess that weather_fog_integrate.fsh stored at the
 // boundaries around its distance, which is the walk of the froxels of its column, and writes the fog color with the
-// opacity of that optical depth. Open air stays exact at full resolution, and a shelter's edge blends bilinearly across
-// the columns of the froxel grid.
+// opacity of that optical depth, premultiplied, with the lamp glow of weather_fog_lamp.fsh added. Open air stays exact
+// at full resolution, and a shelter's edge blends bilinearly across the columns of the froxel grid.
 // A pixel of the sky has no scene point: it takes the excess of the last boundary and the tail of the height fog beyond
 // the range.
 // The debug views show the share of the field, the piece that holds the pixel's distance, the transmittance, or the
-// ratio of the fog structures, instead of the fog.
+// ratio of the fog structures, instead of the fog, as a color and an opacity that blend without premultiplying.
 // The depth of the main target and its size in texels:
 uniform sampler2D sceneDepth;
 uniform vec2 screenSize;
@@ -24,6 +24,10 @@ uniform int partMask;
 // target:
 uniform int selfTest;
 uniform vec3 selfTestOffsets[64];
+// The lamp glow that weather_fog_lamp.fsh marched at a share of the resolution, each texel holding its light and the
+// distance its ray ended at, and the frame pixels per side of a texel, 0 while there is no glow:
+uniform sampler2D lampFog;
+uniform int lampFogDivisor;
 out vec4 fragColor;
 
 // The opacity below which the fog leaves a pixel as it is:
@@ -46,6 +50,38 @@ const float DEBUG_STRUCTURE_CELL = float(DEBUG_STRUCTURE_CELL_BLOCKS);
 const int DEBUG_STRUCTURE_MAXIMUM_STEPS = 64;
 // The smallest analytic depth that the ratio of the structure view divides by:
 const float DEBUG_STRUCTURE_MINIMUM_ANALYTIC_DEPTH = 1.0e-6;
+// The distance a ray of the sky ends at in the lamp glow, as LampFogMarch.SKY_DISTANCE, the share of a pixel's
+// distance by which a texel's distance may differ before its weight halves, and the least bilinear weight of a texel,
+// so that the texel closest in distance wins where all four differ:
+const float LAMP_SKY_DISTANCE = 60000.0;
+const float LAMP_UPSAMPLE_DEPTH_SHARE = 0.1;
+const float LAMP_UPSAMPLE_LEAST_WEIGHT = 1.0e-3;
+
+// The lamp glow at a frame pixel whose ray ends at a distance, from the four texels of the glow around it, each
+// weighted by its bilinear share and by how close its distance is to the pixel's, so that a glow does not bleed across
+// the edge of a nearer surface:
+vec3 lampGlowAt(vec2 pixel, float distance) {
+    if (lampFogDivisor <= 0) {
+        return vec3(0.0);
+    }
+    ivec2 size = textureSize(lampFog, 0);
+    vec2 position = (pixel - (float(lampFogDivisor / 2) + 0.5)) / float(lampFogDivisor);
+    vec2 low = floor(position);
+    vec2 fraction = position - low;
+    vec3 light = vec3(0.0);
+    float total = 0.0;
+    for (int corner = 0; corner < 4; corner++) {
+        ivec2 cornerStep = ivec2(corner & 1, corner >> 1);
+        vec4 texelValue = texelFetch(lampFog, clamp(ivec2(low) + cornerStep, ivec2(0), size - 1), 0);
+        float bilinear = (cornerStep.x == 1 ? fraction.x : 1.0 - fraction.x)
+                * (cornerStep.y == 1 ? fraction.y : 1.0 - fraction.y);
+        float difference = abs(texelValue.a - distance) / (LAMP_UPSAMPLE_DEPTH_SHARE * max(distance, 1.0));
+        float weight = max(bilinear, LAMP_UPSAMPLE_LEAST_WEIGHT) / (1.0 + difference * difference);
+        light += weight * texelValue.rgb;
+        total += weight;
+    }
+    return light / total;
+}
 
 // The distance in blocks of a slice boundary from the eye, as FogFroxelGrid.boundaryDistance: the boundaries are
 // geometric, so that the slices are thin near the eye and thick far from it.
@@ -242,6 +278,7 @@ void main() {
     }
     vec2 uv = gl_FragCoord.xy / (float(divisor) * vec2(columnCount, rowCount));
     float tau;
+    float rayEnd = LAMP_SKY_DISTANCE;
     if (depth >= 1.0) {
         if (debugMode == DEBUG_MODE_FIELD) {
             discard;
@@ -278,6 +315,7 @@ void main() {
         }
         tau = clamp(fogOpticalDepth(eyeExtinction, distance, offset.y, heightScale)
                 + froxelExcessAtDistance(distance, uv), 0.0, FOG_MAXIMUM_OPTICAL_DEPTH);
+        rayEnd = min(distance, LAMP_SKY_DISTANCE);
     }
     if (debugMode == DEBUG_MODE_TRANSMITTANCE) {
         fragColor = vec4(vec3(exp(-tau)), 1.0);
@@ -287,5 +325,6 @@ void main() {
     if (opacity < LEAST_OPACITY) {
         discard;
     }
-    fragColor = vec4(snowColor, opacity);
+    // The fog blends premultiplied, so the lamp glow adds to the fog color over what the fog lets through:
+    fragColor = vec4(snowColor * opacity + lampGlowAt(gl_FragCoord.xy, rayEnd), opacity);
 }

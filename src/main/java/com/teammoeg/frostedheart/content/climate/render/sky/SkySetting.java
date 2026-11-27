@@ -231,7 +231,13 @@ public enum SkySetting {
             + "structures of the fog drift along with it.", Rebuilds.NOTHING, 12.0, 0.0, 40.0),
     FOG_CAVITY_SHARE("fogCavityShare", "Lowest fog density share deep inside a narrow open-sky ravine or walled "
             + "cavity in windy weather, while falling snow still enters it. 1 turns cavity thinning off.",
-            Rebuilds.NOTHING, 0.0, 0.0, 1.0);
+            Rebuilds.NOTHING, 0.0, 0.0, 1.0),
+    FOG_LAMP_LIGHT("fogLampLight", "Strength of the glow that lamps give the weather fog around them. 1 lights the "
+            + "fog as vanilla lights a white block at the same block light, and 0 turns the glow off.",
+            Rebuilds.NOTHING, 1.0, 0.0, 4.0),
+    FOG_LAMP_DIVISOR("fogLampDivisor", "Pixels per side of the pixels that the lamp glow of the weather fog is "
+            + "marched in. Larger costs less GPU time and softens the glow's edges at walls and trees.",
+            Rebuilds.NOTHING, 4.0, 1.0, 8.0);
 
     /**
      * What a build does again when a setting changes. The views are built again with either part.
