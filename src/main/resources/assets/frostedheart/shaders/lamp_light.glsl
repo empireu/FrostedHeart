@@ -25,6 +25,8 @@ uniform sampler3D lampCascade2;
 uniform sampler3D lampCascade3;
 uniform sampler3D lampCascade4;
 uniform int lampCascadeCount;
+// How far the field has faded in after its last whole fill, from 0 to 1:
+uniform float lampFieldFade;
 // Per cascade: its size in cells, the slot of its lowest cell, the eye in cells from its lowest cell, its cells per
 // block, and the inverse of its half side in blocks, 0 vertically where it holds the level's whole height.
 uniform vec3 lampCascadeSize[LAMP_CASCADE_COUNT];
@@ -76,5 +78,10 @@ vec2 lampSharesAt(vec3 offsetFromEye) {
 
 float lampLevelAt(vec3 offsetFromEye) {
     return lampLevelOfShares(lampSharesAt(offsetFromEye));
+}
+
+// The level at an offset from the eye as it shows while the field fades in:
+float lampShownLevelAt(vec3 offsetFromEye) {
+    return lampCascadeCount > 0 ? lampFieldFade * lampLevelAt(offsetFromEye) : 0.0;
 }
 #endif

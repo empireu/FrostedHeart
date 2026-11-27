@@ -751,6 +751,45 @@ public final class LampLightField {
     }
 
     /**
+     * Writes the per-cascade uniforms of lamp_light.glsl for an eye, 3 floats per cascade in x, y, z order: the size
+     * in cells, the slot of the lowest cell, the eye in cells from the lowest cell, the cells per block, and the
+     * inverse of the half side in blocks, 0 vertically where the window is fixed vertically.
+     * @return the number of cascades the shader reads, the used ones up to the first not placed
+     */
+    public int shaderUniforms(double eyeX, double eyeY, double eyeZ, float[] sizes, float[] slotOrigins,
+            float[] eyesInCascade, float[] cellsPerBlock, float[] inverseReaches) {
+        int count = 0;
+        for (int index = 0; index < activeCount; index++) {
+            LampLightCascade cascade = cascades[index];
+            if (!cascade.isPlaced()) {
+                break;
+            }
+            int base = 3 * index;
+            int width = cascade.cellWidth();
+            int height = cascade.cellHeight();
+            sizes[base] = cascade.sizeX();
+            sizes[base + 1] = cascade.sizeY();
+            sizes[base + 2] = cascade.sizeZ();
+            slotOrigins[base] = cascade.slotX(cascade.originX());
+            slotOrigins[base + 1] = cascade.slotY(cascade.originY());
+            slotOrigins[base + 2] = cascade.slotZ(cascade.originZ());
+            eyesInCascade[base] = (float) (eyeX / width - cascade.originX());
+            eyesInCascade[base + 1] = (float) (eyeY / height - cascade.originY());
+            eyesInCascade[base + 2] = (float) (eyeZ / width - cascade.originZ());
+            cellsPerBlock[base] = 1.0F / width;
+            cellsPerBlock[base + 1] = 1.0F / height;
+            cellsPerBlock[base + 2] = 1.0F / width;
+            float inverseAcross = (float) (1.0 / (0.5 * cascade.sizeX() * width));
+            inverseReaches[base] = inverseAcross;
+            inverseReaches[base + 1] = cascade.isFixedVertically() ? 0.0F
+                    : (float) (1.0 / (0.5 * cascade.sizeY() * height));
+            inverseReaches[base + 2] = inverseAcross;
+            count++;
+        }
+        return count;
+    }
+
+    /**
      * The largest of an offset's distances from the eye along the axes, each as a share of the window's half side.
      * A window fixed vertically does not count the vertical distance.
      */

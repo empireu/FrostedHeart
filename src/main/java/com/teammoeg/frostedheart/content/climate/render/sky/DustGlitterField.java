@@ -552,6 +552,18 @@ public final class DustGlitterField {
         return Math.max(0.0, lobe + (lowestRow - lobeAtEdge) * rowFade);
     }
 
+    /**
+     * The color of block light at a share of the brightest level, as diamond_dust.glsl computes it for lamp glints. It
+     * is the block part of LightTexture without flicker, each channel clamped to 1.
+     */
+    public static void blockLightColor(float lightShare, float[] color) {
+        float share = Math.max(0.0F, Math.min(1.0F, lightShare));
+        float brightness = 1.5F * share / (4.0F - 3.0F * share);
+        color[0] = Math.min(1.0F, brightness);
+        color[1] = Math.min(1.0F, brightness * ((brightness * 0.6F + 0.4F) * 0.6F + 0.4F));
+        color[2] = Math.min(1.0F, brightness * (brightness * brightness * 0.6F + 0.4F));
+    }
+
     private static float smoothstep(float edge0, float edge1, float value) {
         float position = Math.max(0.0F, Math.min(1.0F, (value - edge0) / (edge1 - edge0)));
         return position * position * (3.0F - 2.0F * position);

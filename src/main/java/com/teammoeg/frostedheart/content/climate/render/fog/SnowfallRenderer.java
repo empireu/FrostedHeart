@@ -32,6 +32,7 @@ import com.teammoeg.frostedheart.content.climate.render.sky.LightPillarSources;
 import com.teammoeg.frostedheart.content.climate.render.sky.SkyDrawTimer;
 import com.teammoeg.frostedheart.content.climate.render.sky.SkyGlPass;
 import com.teammoeg.frostedheart.content.climate.render.sky.SkySetting;
+import com.teammoeg.frostedheart.mixin.client.LightTextureAccessor_WeatherFog;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.util.Mth;
@@ -64,7 +65,8 @@ import java.util.Locale;
  * frame one full screen pass over the state moves every flake by the wind and its own fall speed into the other pair,
  * stopping it where it hits a shape of SnowShapeVolume and leaving a splat there. Two instanced draws of quads without
  * vertex data then draw the splats and the moving flakes, with the fog's transmittance to each and the snow share of its
- * place. The draws test against the depth of the main target, blend over it and write no depth.
+ * place, lit by the lamps through ClientLampLight's field and vanilla's lightmap while the fog color comes from the
+ * lightmap. The draws test against the depth of the main target, blend over it and write no depth.
  * A paused game does not move the flakes. Everything the passes change is set back after them.
  * Render thread only.
  */
@@ -84,6 +86,10 @@ public final class SnowfallRenderer {
      */
     private static final int SHAPE_VOLUME_UNIT = 4;
     private static final int SHAPE_ROWS_UNIT = 5;
+    /**
+     * The unit of vanilla's lightmap in the draw, which only the update uses for the shape rows.
+     */
+    private static final int LIGHTMAP_UNIT = SHAPE_ROWS_UNIT;
     static final int LEE_MAP_UNIT = 6;
     static final int NO_LEAVES_HEIGHT_UNIT = 7;
     static final int SMOOTH_HEIGHT_UNIT = 8;
@@ -93,6 +99,10 @@ public final class SnowfallRenderer {
      */
     private static final int FLAKE_SHAPES_UNIT = 10;
     private static final int TEXTURE_UNITS = 11;
+    /**
+     * The first of the units of the lamp light field's cascades in the draw, after the units above.
+     */
+    private static final int FIRST_LAMP_UNIT = TEXTURE_UNITS;
     private static final int CHUNK_WIDTH = 16;
     /**
      * Distance in blocks along any axis beyond which the fixed splat origin resets with a state refill to keep float
@@ -246,6 +256,7 @@ public final class SnowfallRenderer {
         int previousShapeVolumeTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + FLAKE_SHAPES_UNIT);
         int previousFlakeShapesTexture = GL11.glGetInteger(GL30.GL_TEXTURE_BINDING_2D_ARRAY);
+        drawProgram.lamps.save();
         try {
             FlakeShapeTexture.prepare();
             RenderSystem.disableScissor();
@@ -272,10 +283,12 @@ public final class SnowfallRenderer {
             } finally {
                 updateTimer.end();
             }
+            LampLightField lampField = WeatherFogRenderer.isSnowColorFromLightmap() ? ClientLampLight.field(level)
+                    : null;
             drawTimer.begin();
             try {
                 draw(camera, boxSide, flakeSize, drawnCount, instances, pixelsPerBlock, farHeights, noLeavesTexture,
-                        leeActive, cavityActive, windDirection, flakeWindSpeed, flakeFallSpeed);
+                        leeActive, cavityActive, windDirection, flakeWindSpeed, flakeFallSpeed, lampField);
             } finally {
                 drawTimer.end();
             }
@@ -314,6 +327,7 @@ public final class SnowfallRenderer {
             GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousShapeVolumeTexture);
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + FLAKE_SHAPES_UNIT);
             GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, previousFlakeShapesTexture);
+            drawProgram.lamps.restore();
             for (int unit = 0; unit < TEXTURE_UNITS; unit++) {
                 RenderSystem.activeTexture(GL13.GL_TEXTURE0 + unit);
                 RenderSystem.bindTexture(previousTextures[unit]);
@@ -395,7 +409,8 @@ public final class SnowfallRenderer {
      */
     private static void draw(Vec3 camera, double boxSide, double flakeSize, double drawnCount, int instances,
             float pixelsPerBlock, @Nullable FarHeights farHeights, int noLeavesTexture, boolean leeActive,
-            boolean cavityActive, double windDirection, double flakeWindSpeed, double flakeFallSpeed) {
+            boolean cavityActive, double windDirection, double flakeWindSpeed, double flakeFallSpeed,
+            @Nullable LampLightField lampField) {
         RenderTarget mainTarget = Minecraft.getInstance().getMainRenderTarget();
         GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, mainTarget.frameBufferId);
         RenderSystem.viewport(0, 0, mainTarget.width, mainTarget.height);
@@ -417,10 +432,12 @@ public final class SnowfallRenderer {
         bindTexture(NO_LEAVES_HEIGHT_UNIT, (leeActive || cavityActive) ? noLeavesTexture : 0);
         bindTexture(SMOOTH_HEIGHT_UNIT, leeActive ? SnowLeeMap.smoothTexture() : 0);
         bindTexture(CAVITY_MAP_UNIT, cavityActive ? FogCavityMap.texture() : 0);
+        bindLightmap(lampField != null);
         drawProgram.use();
         double splatSeconds = SkySetting.SNOW_SPLAT_SECONDS.get();
         drawProgram.setUniforms(mainTarget, camera, boxSide, flakeSize, drawnCount, pixelsPerBlock, shareVolume != 0,
                 splatSeconds, farHeights, leeActive, cavityActive, windDirection, flakeWindSpeed, flakeFallSpeed);
+        drawProgram.lamps.bind(lampField, camera, ClientLampLight.fade());
         if (vertexArray == 0) {
             vertexArray = GL30.glGenVertexArrays();
         }
@@ -436,6 +453,22 @@ public final class SnowfallRenderer {
     private static void bindTexture(int unit, int texture) {
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + unit);
         RenderSystem.bindTexture(texture);
+    }
+
+    /**
+     * Binds vanilla's lightmap for the lamp light, filtered linearly as LightTexture.turnOnLightLayer filters it for
+     * terrain, since each upload of the lightmap sets it back to nearest. Without lamp light no texture is bound.
+     */
+    private static void bindLightmap(boolean lampLight) {
+        if (!lampLight) {
+            bindTexture(LIGHTMAP_UNIT, 0);
+            return;
+        }
+        LightTextureAccessor_WeatherFog accessor =
+                (LightTextureAccessor_WeatherFog) Minecraft.getInstance().gameRenderer.lightTexture();
+        bindTexture(LIGHTMAP_UNIT, accessor.frostedheart$getLightTexture().getId());
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_LINEAR);
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_LINEAR);
     }
 
     /**
@@ -740,6 +773,7 @@ public final class SnowfallRenderer {
      * frame. It is made again when a resource reload replaced its stages.
      */
     private static final class DrawProgram {
+        private final LampLightBinding lamps = new LampLightBinding(FIRST_LAMP_UNIT);
         @Nullable
         private ShaderProgram program;
         @Nullable
@@ -817,6 +851,8 @@ public final class SnowfallRenderer {
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "smoothHeights"), SMOOTH_HEIGHT_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "cavityMap"), CAVITY_MAP_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "flakeShapes"), FLAKE_SHAPES_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "lampLightmap"), LIGHTMAP_UNIT);
+                lamps.locate(programId);
                 GL20.glUniform3i(GL20.glGetUniformLocation(programId, "shareLayout"), FogShareVolume.SIDE,
                         FogShareVolume.ORIGIN, FogShareVolume.TILES_ACROSS);
                 GL20.glUniform1f(GL20.glGetUniformLocation(programId, "boxFadeWidth"), BOX_FADE_WIDTH);

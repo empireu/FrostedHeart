@@ -47,9 +47,10 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Keeps the LampLightField of the client level while the weather fog or the glints of diamond dust lit by lamps can be
- * drawn. The field is made on first use and kept for the session, about 6.5 MiB. Each frame moves it to the eye, uses
- * the cascades that the view distance needs, and reads queued sections from the client's light engine until
+ * Keeps the LampLightField of the client level while the weather fog, and with it the snowfall, or the glints of
+ * diamond dust lit by lamps can be drawn. Those draws bind it through LampLightBinding and fade it in by fade after a
+ * whole fill. The field is made on first use and kept for the session, about 6.5 MiB. Each frame moves it to the eye,
+ * uses the cascades that the view distance needs, and reads queued sections from the client's light engine until
  * SkySetting.LAMP_FIELD_BUDGET_MICROS is spent. A new level or view distance fills it again.
  * LightPillarWorldChanges passes the sections whose block or sky light the client computed or received and the chunks
  * that unload. An error turns the field off, and it comes back once it stops being wanted and is wanted again.
@@ -195,6 +196,15 @@ public final class ClientLampLight {
     @Nullable
     public static LampLightField field(@Nullable ClientLevel level) {
         return level != null && level == trackedLevel && !failed ? field : null;
+    }
+
+    /**
+     * Whether the tracked field waits for queued sections or has not faded in yet, so lamps do not light the weather
+     * fully yet, for the screenshot harness.
+     */
+    public static boolean isReading() {
+        LampLightField current = field(Minecraft.getInstance().level);
+        return current != null && (!current.isDrained() || fade() < 1.0F);
     }
 
     /**

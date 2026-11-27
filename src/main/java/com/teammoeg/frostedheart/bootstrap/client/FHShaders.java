@@ -181,7 +181,8 @@ public class FHShaders extends Shaders {
     }
 
     /**
-     * The vertex stage of diamond_dust.glsl. Both stages come from that one file, compiled with a define for each.
+     * The vertex stage of diamond_dust.glsl. Both stages are lamp_light.glsl followed by diamond_dust.glsl, compiled
+     * with a define for each, and the vertex stage also with LAMP_LIGHT_FIELD.
      */
     public static Shader getDiamondDustVertex() {
         loadDiamondDust();
@@ -199,8 +200,10 @@ public class FHShaders extends Shaders {
             diamondDustUnloadOnReload = true;
         }
         if (DIAMOND_DUST_VERTEX == null) {
-            String source = readShaderSource(FHMain.rl("shaders/diamond_dust.glsl"));
-            Shader vertex = Shader.loadShader(Shader.ShaderType.VERTEX, "#version 150\n#define VERTEX_SHADER\n" + source);
+            String source = readShaderSource(FHMain.rl("shaders/lamp_light.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/diamond_dust.glsl"));
+            Shader vertex = Shader.loadShader(Shader.ShaderType.VERTEX,
+                    "#version 150\n#define VERTEX_SHADER\n#define LAMP_LIGHT_FIELD\n" + source);
             Shader fragment;
             try {
                 fragment = Shader.loadShader(Shader.ShaderType.FRAGMENT,
@@ -451,7 +454,8 @@ public class FHShaders extends Shaders {
 
     /**
      * The vertex stage of the snowflake draw. Both stages are weather_fog.glsl, weather_fog_excess.glsl,
-     * snow_flakes.glsl and snow_lee.glsl followed by snow_flakes_draw.glsl, compiled with a define for each.
+     * snow_flakes.glsl, snow_lee.glsl and lamp_light.glsl followed by snow_flakes_draw.glsl, compiled with a define for
+     * each, and the vertex stage also with LAMP_LIGHT_FIELD.
      */
     public static Shader getSnowFlakesVertex() {
         loadSnowFlakes();
@@ -473,8 +477,10 @@ public class FHShaders extends Shaders {
                     + readShaderSource(FHMain.rl("shaders/weather_fog_excess.glsl")) + "\n"
                     + readShaderSource(FHMain.rl("shaders/snow_flakes.glsl")) + "\n"
                     + readShaderSource(FHMain.rl("shaders/snow_lee.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/lamp_light.glsl")) + "\n"
                     + readShaderSource(FHMain.rl("shaders/snow_flakes_draw.glsl"));
-            Shader vertex = Shader.loadShader(Shader.ShaderType.VERTEX, "#version 150\n#define VERTEX_SHADER\n" + source);
+            Shader vertex = Shader.loadShader(Shader.ShaderType.VERTEX,
+                    "#version 150\n#define VERTEX_SHADER\n#define LAMP_LIGHT_FIELD\n" + source);
             Shader fragment;
             try {
                 fragment = Shader.loadShader(Shader.ShaderType.FRAGMENT,

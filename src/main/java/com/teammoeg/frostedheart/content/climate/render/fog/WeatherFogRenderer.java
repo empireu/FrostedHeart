@@ -1632,6 +1632,13 @@ public final class WeatherFogRenderer {
     }
 
     /**
+     * Whether the snow fog color of the frame came from the lightmap rather than the config colors.
+     */
+    static boolean isSnowColorFromLightmap() {
+        return snowColorFromLightmap;
+    }
+
+    /**
      * A component of the fog's eye as an offset from the camera, which view bobbing moves.
      */
     static float eyeOffset(int component) {

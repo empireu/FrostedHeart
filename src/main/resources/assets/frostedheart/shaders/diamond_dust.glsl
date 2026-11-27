@@ -1,9 +1,9 @@
-// FHShaders prepends the version line and defines VERTEX_SHADER or FRAGMENT_SHADER.
+// FHShaders prepends the version line, defines VERTEX_SHADER or FRAGMENT_SHADER, and prepends lamp_light.glsl, with LAMP_LIGHT_FIELD defined in the vertex stage.
 // The glints of diamond dust near the eye, one instance of four corners per point with no vertex data, as DustGlitterField places, culls, and lights them.
 // Each point lives one life after another, each a crystal that starts at a hashed place in a cube of cellSize blocks repeating over the world, falls in a straight line, and is lit once.
 // A life shows only where its crystal could have fallen, at or above the first open height of its column at the middle of its lit window and where it is now.
 // The sky's ice phase toward a glint, as calculated_sky.fsh looks it up without the diffraction peak, sets how many lives show there and tints them.
-// Torches and lamps light the plain share of lives by the block light where the glint is, filtered between blocks, in vanilla's block light color.
+// Torches and lamps light the plain share of lives by the block light of the lamp light field where the glint is, in vanilla's block light color.
 // The vertex stage computes each glint's light, the beam's times the exposure, and spans its sprite, and the fragment stage spreads the light over a round sprite with a Gaussian core and displays it for a screen blend.
 #ifdef VERTEX_SHADER
 // Takes positions relative to the camera, with view bobbing in the projection:
@@ -80,11 +80,7 @@ uniform ivec2 windowOrigin;
 uniform ivec2 eyeInWindow;
 uniform vec2 eyeFraction;
 uniform float eyeY;
-// The block light around the eye as a share of the brightest level at its world position modulo volumeSize, the texel of the volume's first block, the eye's place counted from that block, and the gain on lamp glints, 0 while lamps light none:
-uniform sampler3D blockLight;
-uniform int volumeSize;
-uniform ivec3 volumeOrigin;
-uniform vec3 eyeInVolume;
+// The gain on lamp glints, 0 while lamps light none:
 uniform float lampGain;
 
 flat out vec3 glintLight;
@@ -174,13 +170,7 @@ bool isOpenAbove(vec3 offsetFromEye) {
     return eyeY + offsetFromEye.y >= firstOpenY;
 }
 
-// The block light at an offset from the eye, filtered between blocks, as DustLightVolume.textureCoordinate finds it. The point stays half a block inside the volume, so the filter never reads across its seam:
-float blockLightAt(vec3 offsetFromEye) {
-    vec3 inVolume = clamp(eyeInVolume + offsetFromEye, vec3(0.5), vec3(float(volumeSize) - 0.5));
-    return texture(blockLight, (vec3(volumeOrigin) + inVolume) / float(volumeSize)).r;
-}
-
-// The color of block light at a share of the brightest level, as DustLightVolume.blockLightColor:
+// The color of block light at a share of the brightest level, as DustGlitterField.blockLightColor:
 vec3 blockLightColor(float lightShare) {
     float share = clamp(lightShare, 0.0, 1.0);
     float brightness = 1.5 * share / (4.0 - 3.0 * share);
@@ -283,7 +273,7 @@ void main() {
     if (lampGain > 0.0) {
         float plainShown = shownWeight(plainShare, uniformOf(directionHash));
         if (plainShown > 0.0) {
-            lampLight = lampGain * plainShown * blockLightColor(blockLightAt(offset));
+            lampLight = lampGain * plainShown * blockLightColor(lampShownLevelAt(offset));
         }
     }
     // As DustGlitterField.heightWeight, nearBlur, sizeFactor, spriteRadius, and peakFactor:

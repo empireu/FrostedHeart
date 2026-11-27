@@ -1,5 +1,5 @@
 // FHShaders prepends the version line, the stage's define, weather_fog.glsl, weather_fog_excess.glsl,
-// snow_flakes.glsl and snow_lee.glsl.
+// snow_flakes.glsl, snow_lee.glsl and lamp_light.glsl, with LAMP_LIGHT_FIELD defined in the vertex stage.
 // Draws the snowflakes near the eye as one instanced draw of quads without vertex data. Each instance is the copy of one
 // flake of the periodic box that is nearest the camera, which fades out toward the box's faces. A flake is a soft round
 // sprite stretched along the path it travels while the shutter is open, and its opacity is spread over the streak so a
@@ -7,7 +7,8 @@
 // footprint. A flake a few pixels wide turns into its shape from flakeShapes, on a tile sized so the shape blocks as
 // much light as the dot, averaged over a streak capped at SNOW_LONGEST_SHAPE_STREAK of its radius. The snow share of
 // the fog fades flakes out under cover, each at its own threshold, and the fog between the eye and the flake blends its
-// color toward the fog color, as the fog composite fogs the scene.
+// color toward the fog color, as the fog composite fogs the scene. Torches and lamps light flakes and splats by the
+// lamp light field, in the lightmap's color as vanilla lights snow blocks.
 // A stopped flake is not drawn. With splatPass set, each instance is instead the splat a flake left where it hit a
 // block, a quad on the block's face with the flake's own shape, that fades over the second half of splatSeconds.
 
@@ -41,6 +42,8 @@ uniform float shutterSeconds;
 uniform float flakeBrightness;
 // The snow fog color, as display values:
 uniform vec3 snowColor;
+// Vanilla's lightmap, filtered linearly as for terrain:
+uniform sampler2D lampLightmap;
 // The fog's extinction per block at its eye and its height scale in blocks:
 uniform float eyeExtinction;
 uniform float heightScale;
@@ -96,12 +99,16 @@ const float SNOW_SHAPE_SIZE = 64.0;
 const float SNOW_SHAPE_REACH = 1.1;
 const float SNOW_LONGEST_SHAPE_STREAK = 1.0;
 // How much wider a splat is than its flake, how far it sits off the face against depth fighting, and how far from the
-// face its shelter is read, in blocks:
+// face its shelter and its lamp light are read, in blocks:
 const float SNOW_SPLAT_SPREAD = 1.3;
 const float SNOW_SPLAT_LIFT = 0.01;
 const float SNOW_SPLAT_SHARE_REACH = 0.5;
 // The mean color of vanilla's snow texture:
 const vec3 SNOW_SPLAT_ALBEDO = vec3(0.977, 0.997, 0.997);
+// The lightmap coordinates of light.glsl: the clamp of the block axis and full sky light:
+const float SNOW_LIGHTMAP_LOWEST = 0.5 / 16.0;
+const float SNOW_LIGHTMAP_HIGHEST = 15.5 / 16.0;
+const float SNOW_LIGHTMAP_FULL_SKY = 15.0 / 16.0;
 // The corners of the quad as a triangle strip:
 const vec2 SNOW_CORNERS[4] = vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
 
@@ -172,13 +179,26 @@ float snowShelterWeight(uint flake, vec3 fromFogEye) {
     return clamp((share - snowFlakeShelterThreshold(flake)) / SNOW_SHELTER_SOFTNESS, 0.0, 1.0);
 }
 
-// The color of a flake or splat of the given color relative to the fog color, which the fog between the eye and it
-// brings toward the fog color:
-vec3 snowLitColor(vec3 relativeColor, float distance, float heightFromFogEye, vec2 pixel) {
+// The color of a white top face at full sky light at an offset from the camera, lit by the lamps as light.glsl lights
+// terrain from the lightmap. Without lamp light it is the fog color:
+vec3 snowLampLitColor(vec3 offset) {
+    float level = lampShownLevelAt(offset);
+    if (!(level > 0.0)) {
+        return snowColor;
+    }
+    vec3 lit = texture(lampLightmap, vec2(clamp(15.0 * level / 16.0, SNOW_LIGHTMAP_LOWEST, SNOW_LIGHTMAP_HIGHEST),
+            SNOW_LIGHTMAP_FULL_SKY)).rgb;
+    vec3 unlit = texture(lampLightmap, vec2(SNOW_LIGHTMAP_LOWEST, SNOW_LIGHTMAP_FULL_SKY)).rgb;
+    return snowColor + max(lit - unlit, vec3(0.0));
+}
+
+// The color of a flake or splat of the given color relative to the color of a white top face where it is, which the
+// fog between the eye and it brings toward the fog color:
+vec3 snowLitColor(vec3 litColor, vec3 relativeColor, float distance, float heightFromFogEye, vec2 pixel) {
     vec2 uv = pixel / (float(divisor) * vec2(columnCount, rowCount));
     float tau = clamp(fogOpticalDepth(eyeExtinction, distance, heightFromFogEye, heightScale)
             + froxelExcessAtDistance(distance, uv), 0.0, FOG_MAXIMUM_OPTICAL_DEPTH);
-    return snowColor * mix(vec3(1.0), relativeColor, exp(-tau));
+    return mix(snowColor, litColor * relativeColor, exp(-tau));
 }
 
 // The shade vanilla gives a block face numbered as Direction.get3DDataValue in a world without constant ambient light:
@@ -259,9 +279,10 @@ void drawSplat(int index) {
     spritePosition = corner * reach;
     spriteHalfLength = 0.0;
     spriteRadius = 1.0;
-    // A splat is lit as snow lying on the face, as the fog color J is a white top face at full sky light:
-    spriteColor = vec4(snowLitColor(SNOW_SPLAT_ALBEDO * snowFaceShade(face), distance, fromFogEye.y, middlePixel),
-            weight * energy);
+    // A splat is lit as snow lying on the face, by the light of the air in front of it:
+    vec3 litColor = snowLampLitColor(offset + normal * SNOW_SPLAT_SHARE_REACH);
+    spriteColor = vec4(snowLitColor(litColor, SNOW_SPLAT_ALBEDO * snowFaceShade(face), distance, fromFogEye.y,
+            middlePixel), weight * energy);
     spriteAlong = vec2(1.0, 0.0);
     float turn = SNOW_TWO_PI * snowFlakeUnit(flake, SNOW_SALT_TURN);
     spriteShape = vec4(cos(turn), sin(turn), 1.0, shapeWeight);
@@ -367,8 +388,8 @@ void main() {
     streakLength = min(streakLength, mix(streakLength, SNOW_LONGEST_SHAPE_STREAK * trueRadius, shapeWeight));
     float streakShare = SNOW_PI * drawnRadius / (2.0 * streakLength + SNOW_PI * drawnRadius);
 
-    vec3 color = snowLitColor(vec3(flakeBrightness * snowFlakeBrightnessShare(flake)), distance, fromFogEye.y,
-            middlePixel);
+    vec3 color = snowLitColor(snowLampLitColor(center), vec3(flakeBrightness * snowFlakeBrightnessShare(flake)),
+            distance, fromFogEye.y, middlePixel);
 
     vec2 corner = SNOW_CORNERS[gl_VertexID];
     float reach = (shapeWeight > 0.0 ? max(SNOW_SPRITE_REACH, SNOW_SHAPE_REACH * tileScale) : SNOW_SPRITE_REACH)

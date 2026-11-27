@@ -64,6 +64,8 @@ public final class LampLightGameTests {
     private static final float RELATIVE_TOLERANCE = 1.0e-3F;
     private static final float ABSOLUTE_TOLERANCE = 1.0e-7F;
     private static final float LEVEL_TOLERANCE = 2.0e-3F;
+    private static final int SHADER_PATTERN_REACH = 250;
+    private static final int SHADER_SAMPLES = 20000;
     private static final Pattern GLSL_CONST_PATTERN = Pattern.compile(
             "^\\s*const\\s+(?:int|uint|float)\\s+([A-Z0-9_]+)\\s*=\\s*([^;]+);");
 
@@ -289,6 +291,61 @@ public final class LampLightGameTests {
         helper.succeed();
     }
 
+    @GameTest(template = "phase0a_empty", timeoutTicks = 600)
+    public static void theShadersReadOfTheUniformsMatchesTheField(GameTestHelper helper) {
+        float[] sizes = new float[3 * LampLightField.CASCADE_COUNT];
+        float[] slotOrigins = new float[3 * LampLightField.CASCADE_COUNT];
+        float[] eyes = new float[3 * LampLightField.CASCADE_COUNT];
+        float[] cellsPerBlock = new float[3 * LampLightField.CASCADE_COUNT];
+        float[] inverseReaches = new float[3 * LampLightField.CASCADE_COUNT];
+        LampLightField unplaced = new LampLightField();
+        unplaced.reset(MIN_SECTION, SECTION_COUNT);
+        int unplacedCount = unplaced.shaderUniforms(EYE_X, EYE_Y, EYE_Z, sizes, slotOrigins, eyes, cellsPerBlock,
+                inverseReaches);
+        helper.assertTrue(unplacedCount == 0, "a field that never followed gives the shader " + unplacedCount
+                + " cascades instead of 0");
+
+        FakeSource patterned = new FakeSource();
+        for (int x = BASE_X - SHADER_PATTERN_REACH; x < BASE_X + SHADER_PATTERN_REACH; x++) {
+            for (int z = BASE_Z - SHADER_PATTERN_REACH; z < BASE_Z + SHADER_PATTERN_REACH; z++) {
+                for (int y = GROUND_Y; y < GROUND_Y + 8; y++) {
+                    patterned.setBlockLight(x, y, z, 2 + Math.floorMod(3 * x + 5 * z + y, 13));
+                }
+            }
+        }
+        LampLightField field = filledField(patterned, EYE_X, EYE_Y, EYE_Z);
+        double eyeX = EYE_X + 37.4;
+        double eyeY = EYE_Y + 5.3;
+        double eyeZ = EYE_Z - 21.8;
+        field.follow(eyeX, eyeY, eyeZ);
+        drain(field, patterned);
+        int count = field.shaderUniforms(eyeX, eyeY, eyeZ, sizes, slotOrigins, eyes, cellsPerBlock, inverseReaches);
+        helper.assertTrue(count == LampLightField.CASCADE_COUNT, "a placed field gives the shader " + count
+                + " cascades instead of " + LampLightField.CASCADE_COUNT);
+        float[] shares = new float[2];
+        Random random = new Random(17L);
+        int lit = 0;
+        for (int sample = 0; sample < SHADER_SAMPLES; sample++) {
+            double reach = Math.pow(random.nextDouble(), 2.0) * 500.0;
+            double angle = random.nextDouble() * 2.0 * Math.PI;
+            float offsetX = (float) (reach * Math.cos(angle));
+            float offsetY = (float) (GROUND_Y - 6.0 + random.nextDouble() * 20.0 - eyeY);
+            float offsetZ = (float) (reach * Math.sin(angle));
+            float expected = field.levelAt(eyeX, eyeY, eyeZ, offsetX, offsetY, offsetZ);
+            float read = shaderLevel(field, count, sizes, slotOrigins, eyes, cellsPerBlock, inverseReaches, offsetX,
+                    offsetY, offsetZ, shares);
+            if (!(Math.abs(read - expected) < LEVEL_TOLERANCE)) {
+                helper.fail("the shader reads " + read + " instead of the field's " + expected + " at offset "
+                        + offsetX + " " + offsetY + " " + offsetZ);
+            }
+            if (expected > 0.05F) {
+                lit++;
+            }
+        }
+        helper.assertTrue(lit > SHADER_SAMPLES / 10, "only " + lit + " samples are lit, so the check shows little");
+        helper.succeed();
+    }
+
     @GameTest(template = "phase0a_empty", timeoutTicks = 100)
     public static void lampShaderConstantsMatchTheField(GameTestHelper helper) {
         Map<String, Double> constants = parseShaderConstants(helper, "lamp_light.glsl");
@@ -312,19 +369,22 @@ public final class LampLightGameTests {
         FakeSource source = scene();
         LampLightField field = filledField(source, EYE_X, EYE_Y, EYE_Z);
         float[] shares = new float[2];
-        walk(field, source, shares, 0.0);
+        float[] uniforms = new float[3 * LampLightField.CASCADE_COUNT];
+        walk(field, source, shares, uniforms, 0.0);
         long before = threads.getCurrentThreadAllocatedBytes();
-        walk(field, source, shares, 0.5);
+        walk(field, source, shares, uniforms, 0.5);
         long allocated = threads.getCurrentThreadAllocatedBytes() - before;
         helper.assertTrue(allocated == 0L, "a warm field allocated " + allocated + " bytes in following, marking, "
-                + "reading and sampling");
+                + "reading, sampling and writing the shader's uniforms");
         helper.succeed();
     }
 
     /**
-     * Moves the eye around and back while marking sections, reading them within a budget and sampling.
+     * Moves the eye around and back while marking sections, reading them within a budget, sampling and writing the
+     * shader's uniforms.
      */
-    private static void walk(LampLightField field, FakeSource source, float[] shares, double shift) {
+    private static void walk(LampLightField field, FakeSource source, float[] shares, float[] uniforms,
+            double shift) {
         for (int step = 0; step < 40; step++) {
             double eyeX = EYE_X + shift + (step < 20 ? step : 40 - step) * 1.3;
             double eyeZ = EYE_Z + (step < 20 ? step : 40 - step) * 0.8;
@@ -332,8 +392,78 @@ public final class LampLightGameTests {
             field.markSections(Math.floorDiv(BASE_X, 16), Math.floorDiv(BASE_Z, 16), 3, 5);
             field.process(source, 40, Long.MAX_VALUE);
             field.sharesAt(eyeX, EYE_Y, eyeZ, step * 7.0 - 120.0, -3.0, step * 2.0, shares);
+            field.shaderUniforms(eyeX, EYE_Y, eyeZ, uniforms, uniforms, uniforms, uniforms, uniforms);
         }
         drain(field, source);
+    }
+
+    /**
+     * The level that lampLevelAt in lamp_light.glsl reads from the uniforms, in float as the shader computes it, with
+     * each cascade sampled as a linearly filtered texture repeating on every axis.
+     */
+    private static float shaderLevel(LampLightField field, int count, float[] sizes, float[] slotOrigins,
+            float[] eyes, float[] cellsPerBlock, float[] inverseReaches, float offsetX, float offsetY, float offsetZ,
+            float[] shares) {
+        float bandStart = (float) LampLightField.BAND_START;
+        float bandEnd = (float) LampLightField.BAND_END;
+        float light = 0.0F;
+        float air = 0.0F;
+        float remaining = 1.0F;
+        for (int cascade = 0; cascade < LampLightField.CASCADE_COUNT; cascade++) {
+            if (cascade >= count || remaining <= 0.0F) {
+                break;
+            }
+            int base = 3 * cascade;
+            float distance = Math.max(Math.max(Math.abs(offsetX) * inverseReaches[base],
+                    Math.abs(offsetY) * inverseReaches[base + 1]), Math.abs(offsetZ) * inverseReaches[base + 2]);
+            if (distance >= bandEnd) {
+                continue;
+            }
+            float weight = Math.max(0.0F, Math.min(1.0F, (distance - bandStart) / (bandEnd - bandStart)));
+            float inX = Math.max(0.5F, Math.min(sizes[base] - 0.5F, eyes[base] + offsetX * cellsPerBlock[base]));
+            float inY = Math.max(0.5F, Math.min(sizes[base + 1] - 0.5F,
+                    eyes[base + 1] + offsetY * cellsPerBlock[base + 1]));
+            float inZ = Math.max(0.5F, Math.min(sizes[base + 2] - 0.5F,
+                    eyes[base + 2] + offsetZ * cellsPerBlock[base + 2]));
+            sampleTexture(field.cascade(cascade), (slotOrigins[base] + inX) / sizes[base],
+                    (slotOrigins[base + 1] + inY) / sizes[base + 1], (slotOrigins[base + 2] + inZ) / sizes[base + 2],
+                    shares);
+            light += remaining * (1.0F - weight) * shares[0];
+            air += remaining * (1.0F - weight) * shares[1];
+            remaining *= weight;
+        }
+        air += remaining;
+        return LampLightField.levelOfBrightness(air > LampLightField.NO_AIR ? light / air : 0.0F);
+    }
+
+    /**
+     * Samples a cascade's slots at a texture coordinate as GL_LINEAR with GL_REPEAT does.
+     */
+    private static void sampleTexture(LampLightCascade cascade, float u, float v, float w, float[] shares) {
+        float texelX = u * cascade.sizeX() - 0.5F;
+        float texelY = v * cascade.sizeY() - 0.5F;
+        float texelZ = w * cascade.sizeZ() - 0.5F;
+        int lowX = (int) Math.floor(texelX);
+        int lowY = (int) Math.floor(texelY);
+        int lowZ = (int) Math.floor(texelZ);
+        float fractionX = texelX - lowX;
+        float fractionY = texelY - lowY;
+        float fractionZ = texelZ - lowZ;
+        float light = 0.0F;
+        float air = 0.0F;
+        for (int corner = 0; corner < 8; corner++) {
+            int stepX = corner & 1;
+            int stepY = corner >> 1 & 1;
+            int stepZ = corner >> 2 & 1;
+            float weight = (stepX == 1 ? fractionX : 1.0F - fractionX) * (stepY == 1 ? fractionY : 1.0F - fractionY)
+                    * (stepZ == 1 ? fractionZ : 1.0F - fractionZ);
+            int index = cascade.valueIndex(Math.floorMod(lowX + stepX, cascade.sizeX()),
+                    Math.floorMod(lowY + stepY, cascade.sizeY()), Math.floorMod(lowZ + stepZ, cascade.sizeZ()));
+            light += weight * LampLightField.fromHalf(cascade.values().get(index));
+            air += weight * LampLightField.fromHalf(cascade.values().get(index + 1));
+        }
+        shares[0] = light;
+        shares[1] = air;
     }
 
     private static LampLightField filledField(FakeSource source, double eyeX, double eyeY, double eyeZ) {

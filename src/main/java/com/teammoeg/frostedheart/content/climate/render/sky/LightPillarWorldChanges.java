@@ -53,8 +53,8 @@ import java.util.Locale;
  * received from the server from ClientPacketListener.readSectionList, and chunk columns from the Forge chunk events.
  * The hooks only queue, and the client tick takes the work. The queue follows the level of the latest hook call, and
  * it queues sections only while LightPillarSources tracks. Block changes and chunks that arrive also go to DustColumns
- * and ClientSnowField first, block light computed or received goes to DustLights, and block and sky light computed or
- * received and chunks that unload go to ClientLampLight. Client thread only.
+ * and ClientSnowField first, and block and sky light computed or received and chunks that unload go to
+ * ClientLampLight. Client thread only.
  */
 @OnlyIn(Dist.CLIENT)
 @Mod.EventBusSubscriber(modid = FHMain.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
@@ -118,9 +118,6 @@ public final class LightPillarWorldChanges {
     public static void onLightUpdated(ClientLevel level, LightLayer layer, SectionPos section) {
         followLevel(level);
         ClientLampLight.onLightUpdated(level, section);
-        if (layer == LightLayer.BLOCK) {
-            DustLights.onLightUpdated(level, section);
-        }
         if (layer != LightLayer.SKY || !queue.isTracking()) {
             return;
         }
@@ -138,10 +135,6 @@ public final class LightPillarWorldChanges {
         followLevel(level);
         ClientLampLight.onLightReceived(level, chunkX, chunkZ, dataMask, emptyMask, lowestLightSection,
                 lightSectionCount);
-        if (layer == LightLayer.BLOCK) {
-            DustLights.onLightReceived(level, chunkX, chunkZ, dataMask, emptyMask, lowestLightSection,
-                    lightSectionCount);
-        }
         if (layer != LightLayer.SKY) {
             return;
         }

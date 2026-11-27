@@ -34,6 +34,7 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.logging.LogUtils;
 import com.teammoeg.frostedheart.content.climate.gamedata.climate.ClimateType;
 import com.teammoeg.frostedheart.content.climate.player.PlayerWeatherCompatibilityModel;
+import com.teammoeg.frostedheart.content.climate.render.fog.ClientLampLight;
 import com.teammoeg.frostedheart.infrastructure.config.FHConfig;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
@@ -1059,7 +1060,7 @@ public final class CalculatedSkyScreenshots {
             boolean terrainPending = moveTarget != null && !minecraft.levelRenderer.hasRenderedAllChunks();
             boolean skyDrawn = shot.variant().sky() && CalculatedSkyRenderer.isAllowed(level);
             boolean skyPending = skyDrawn && (!CalculatedSkyRenderer.isSettled(level, event.renderTickTime)
-                    || DustColumns.isReading() || DustLights.isReading());
+                    || DustColumns.isReading() || ClientLampLight.isReading());
             boolean ready = !settling && !moving && !terrainPending && !skyPending;
             if (!ready && waited < TIMEOUT_SECONDS) {
                 return;

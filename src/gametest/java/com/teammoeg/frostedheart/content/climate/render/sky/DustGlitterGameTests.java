@@ -22,6 +22,7 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
 import com.mojang.logging.LogUtils;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
+import net.minecraft.util.Mth;
 import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
 import org.slf4j.Logger;
@@ -206,6 +207,13 @@ public final class DustGlitterGameTests {
     private static final double BELOW_MAP_LOBE = 0.1;
     private static final double BELOW_MAP_EDGE = 2.0;
     private static final double BELOW_MAP_ROW = 0.5;
+    private static final int BRIGHTEST_LEVEL = 15;
+    private static final float COLOR_TOLERANCE = 1.0e-6F;
+    private static final float BRIGHTEST_BRIGHTNESS = 1.5F;
+    private static final float GREEN_GREEN_WEIGHT = 0.6F;
+    private static final float GREEN_RED_WEIGHT = 0.4F;
+    private static final float BLUE_BLUE_WEIGHT = 0.6F;
+    private static final float BLUE_RED_WEIGHT = 0.4F;
 
     @GameTest(template = "phase0a_empty", timeoutTicks = 400)
     public static void glitterPointsStayInTheirBoxAndInTheWorld(GameTestHelper helper) {
@@ -1128,6 +1136,54 @@ public final class DustGlitterGameTests {
                         + " degrees and the depth " + GLINT_DEPTHS[depthEnd] + " is " + transmittance
                         + " in channel " + channel + " instead of 0");
             }
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 200)
+    public static void lampGlintsTakeVanillasBlockLightColor(GameTestHelper helper) {
+        float ambientLight = helper.getLevel().dimensionType().ambientLight();
+        helper.assertTrue(ambientLight == 0.0F, "The GameTest level has the ambient light " + ambientLight
+                + " instead of 0.0");
+        float[] color = new float[3];
+        float[] previous = new float[3];
+        for (int level = 0; level <= BRIGHTEST_LEVEL; level++) {
+            float share = level / (float) BRIGHTEST_LEVEL;
+            DustGlitterField.blockLightColor(share, color);
+            float brightness = Mth.lerp(ambientLight, share / (4.0F - 3.0F * share), 1.0F) * BRIGHTEST_BRIGHTNESS;
+            float[] expected = {
+                    Math.min(1.0F, brightness),
+                    Math.min(1.0F, brightness * ((brightness * GREEN_GREEN_WEIGHT + GREEN_RED_WEIGHT)
+                            * GREEN_GREEN_WEIGHT + GREEN_RED_WEIGHT)),
+                    Math.min(1.0F, brightness * (brightness * brightness * BLUE_BLUE_WEIGHT + BLUE_RED_WEIGHT))
+            };
+            for (int channel = 0; channel < 3; channel++) {
+                helper.assertTrue(Math.abs(color[channel] - expected[channel]) < COLOR_TOLERANCE, "The channel "
+                        + channel + " of the level " + level + " is " + color[channel] + " instead of the vanilla "
+                        + expected[channel]);
+            }
+            if (level == 0) {
+                for (int channel = 0; channel < 3; channel++) {
+                    helper.assertTrue(color[channel] == 0.0F, "The channel " + channel + " of the level 0 is "
+                            + color[channel] + " instead of exactly 0");
+                }
+            }
+            if (level == BRIGHTEST_LEVEL) {
+                for (int channel = 0; channel < 3; channel++) {
+                    helper.assertTrue(color[channel] == 1.0F, "The channel " + channel + " of the level "
+                            + BRIGHTEST_LEVEL + " is " + color[channel] + " instead of exactly 1");
+                }
+            }
+            if (level > 0) {
+                for (int channel = 0; channel < 3; channel++) {
+                    helper.assertTrue(color[channel] >= previous[channel], "The channel " + channel + " falls from "
+                            + previous[channel] + " at the level " + (level - 1) + " to " + color[channel]
+                            + " at the level " + level);
+                }
+            }
+            helper.assertTrue(color[0] >= color[1] && color[1] >= color[2], "The level " + level + " colors red "
+                    + color[0] + ", green " + color[1] + " and blue " + color[2] + " instead of red >= green >= blue");
+            System.arraycopy(color, 0, previous, 0, 3);
         }
         helper.succeed();
     }
