@@ -422,6 +422,8 @@ flat in vec4 spriteShape;
 flat in vec3 spriteTile;
 flat in float spriteStreakShare;
 uniform sampler2DArray flakeShapes;
+uniform sampler2D translucentDepth;
+uniform int clipAgainstTranslucent;
 out vec4 fragColor;
 
 // The soft edge of the sprite in drawn radii, which spreads about the area of a disc of the drawn radius:
@@ -444,6 +446,12 @@ float snowShapeAt(vec2 point) {
 }
 
 void main() {
+    if (clipAgainstTranslucent != 0) {
+        float tDepth = texelFetch(translucentDepth, ivec2(gl_FragCoord.xy), 0).r;
+        if (!(gl_FragCoord.z > tDepth)) {
+            discard;
+        }
+    }
     // The offset from the nearest point of the streak, so a moving dot is smeared along its path:
     vec2 offset = vec2(spritePosition.x - clamp(spritePosition.x, -spriteHalfLength, spriteHalfLength),
             spritePosition.y);

@@ -26,17 +26,29 @@ import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.shaders.FogShape;
 import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.logging.LogUtils;
 import com.teammoeg.frostedheart.FHMain;
 import com.teammoeg.frostedheart.bootstrap.client.FHShaders;
 import com.teammoeg.frostedheart.content.climate.ClientClimateData;
 import com.teammoeg.frostedheart.content.climate.render.sky.CalculatedSkyRenderer;
 import com.teammoeg.frostedheart.content.climate.render.sky.LightPillarSources;
-import com.teammoeg.frostedheart.content.climate.render.sky.SkyDrawTimer;
+import com.teammoeg.frostedheart.content.climate.render.sky.SkyFrame;
 import com.teammoeg.frostedheart.content.climate.render.sky.SkyGlPass;
 import com.teammoeg.frostedheart.content.climate.render.sky.SkySetting;
 import com.teammoeg.frostedheart.infrastructure.config.FHConfig;
 import com.teammoeg.frostedheart.mixin.client.LightTextureAccessor_WeatherFog;
+import com.teammoeg.frostedheart.mixin.client.embeddium.ChunkRenderListAccessor;
+import com.teammoeg.frostedheart.mixin.client.embeddium.SodiumWorldRendererAccessor;
+import com.teammoeg.frostedheart.mixin.client.embeddium.SortedRenderListsAccessor;
+import it.unimi.dsi.fastutil.objects.ObjectArrayList;
+import me.jellysquid.mods.sodium.client.render.SodiumWorldRenderer;
+import me.jellysquid.mods.sodium.client.render.chunk.RenderSectionManager;
+import me.jellysquid.mods.sodium.client.render.chunk.data.SectionRenderDataStorage;
+import me.jellysquid.mods.sodium.client.render.chunk.data.SectionRenderDataUnsafe;
+import me.jellysquid.mods.sodium.client.render.chunk.lists.ChunkRenderList;
+import me.jellysquid.mods.sodium.client.render.chunk.lists.SortedRenderLists;
+import me.jellysquid.mods.sodium.client.render.chunk.terrain.DefaultTerrainRenderPasses;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -165,13 +177,14 @@ public final class WeatherFogRenderer {
     private static final double SELF_TEST_STRUCTURE_TOLERANCE_SHARE = 0.02;
 
     private static final ClientMockWeather mockWeather = new ClientMockWeather();
-    private static final SkyDrawTimer timer = new SkyDrawTimer();
     private static final FogPassTimer passTimer = new FogPassTimer();
     private static final SkyGlPass pass = new SkyGlPass(9);
     private static final ShareProgram sharePass = new ShareProgram();
     private static final InjectProgram injectPass = new InjectProgram();
     private static final IntegrateProgram integratePass = new IntegrateProgram();
     private static final CompositeProgram compositePass = new CompositeProgram();
+    private static final TranslucentCompositeProgram translucentCompositePass = new TranslucentCompositeProgram();
+    private static final TranslucentFogTarget translucentTarget = new TranslucentFogTarget();
     private static final WeatherWind wind = new WeatherWind();
     private static final Matrix4f viewProjection = new Matrix4f();
     private static final Matrix4f inverseViewProjection = new Matrix4f();
@@ -347,6 +360,24 @@ public final class WeatherFogRenderer {
     private static boolean failed;
     private static boolean drawnThisFrame;
     /**
+     * Frame inputs recorded at the start of LevelRenderer.renderLevel and state shared between beforeTranslucentChunks
+     * and afterTranslucentChunks while Embeddium's translucent terrain draws into translucentTarget.
+     */
+    @Nullable
+    private static Camera frameCamera;
+    private static float framePartialTick;
+    private static long translucentPassHandledFrame = -1L;
+    private static boolean translucentCaptured;
+    private static boolean translucentFogActive;
+    private static boolean frameShareVolumeBound;
+    @Nullable
+    private static RenderTarget capturedMainTarget;
+    private static int savedDrawFramebuffer;
+    private static int savedViewportX;
+    private static int savedViewportY;
+    private static int savedViewportWidth;
+    private static int savedViewportHeight;
+    /**
      * The fog start, end and shape that were in force before the fitted fog replaced them for the rest of the frame,
      * and whether the fit is in force.
      */
@@ -448,13 +479,147 @@ public final class WeatherFogRenderer {
     }
 
     /**
-     * Draws the fog over the frame after the translucent terrain and the tripwire layer and before the particles, the
-     * clouds and the weather, in frames where the new fog owns the snow fog and the calculated sky was drawn, and fits
-     * vanilla's fog to the fog at the eye for everything drawn after the pass until the end of the weather stage.
+     * Records the frame's camera and partial tick at the start of LevelRenderer.renderLevel so the translucent terrain
+     * hooks have the same inputs as RenderLevelStageEvent. Allocates nothing.
+     */
+    public static void beginFrame(Camera camera, float partialTick) {
+        frameCamera = camera;
+        framePartialTick = partialTick;
+        translucentCaptured = false;
+        translucentFogActive = false;
+        capturedMainTarget = null;
+    }
+
+    /**
+     * Whether Embeddium's translucent chunk shader should apply weather fog directly while drawing into the offscreen
+     * translucent target.
+     */
+    static boolean isTranslucentFogActive() {
+        return translucentFogActive;
+    }
+
+    /**
+     * Runs before Embeddium draws RenderType.translucent(). Prepares the frame's froxel excesses and, when translucent
+     * chunks are visible, redirects Embeddium's translucent terrain draw into translucentTarget so opaque fog and
+     * behind-translucent snowfall can use opaque-only depth before translucent terrain composites on top. When no
+     * translucent chunks are visible, finishes the fog on mainTarget immediately with zero extra passes.
+     */
+    public static void beforeTranslucentChunks(ClientLevel level, PoseStack poseStack, Matrix4f projectionMatrix) {
+        if (debugMode != 0) {
+            return;
+        }
+        RenderTarget mainTarget = Minecraft.getInstance().getMainRenderTarget();
+        int currentFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
+        if (currentFramebuffer != mainTarget.frameBufferId) {
+            return;
+        }
+        drawnThisFrame = false;
+        fittedLastFrame = false;
+        fogFitted = false;
+        cloudFogFitted = false;
+        translucentCaptured = false;
+        translucentFogActive = false;
+        capturedMainTarget = null;
+        long allocatedBefore = LightPillarSources.allocatedBytes();
+        try {
+            if (level != keptFrameLevel) {
+                FogCavityMap.onLevelChanged(level);
+                nearCavityQuery.clear();
+            }
+            if (level == null || frameCamera == null || !isActive(level) || !CalculatedSkyRenderer.isDrawnThisFrame()) {
+                return;
+            }
+            if (!prepareFrame(level, poseStack, projectionMatrix, frameCamera, framePartialTick, mainTarget)) {
+                translucentPassHandledFrame = SkyFrame.frameNumber();
+                return;
+            }
+            savedDrawFramebuffer = currentFramebuffer;
+            viewportBuffer.clear();
+            GL11.glGetIntegerv(GL11.GL_VIEWPORT, viewportBuffer);
+            savedViewportX = viewportBuffer.get(0);
+            savedViewportY = viewportBuffer.get(1);
+            savedViewportWidth = viewportBuffer.get(2);
+            savedViewportHeight = viewportBuffer.get(3);
+            if (!drawFroxels(mainTarget)) {
+                passTimer.abortFrame();
+                translucentPassHandledFrame = SkyFrame.frameNumber();
+                return;
+            }
+            if (hasVisibleTranslucentChunks() && translucentTarget.beginCapture(mainTarget)) {
+                translucentCaptured = true;
+                translucentFogActive = true;
+                capturedMainTarget = mainTarget;
+                translucentPassHandledFrame = SkyFrame.frameNumber();
+                return;
+            }
+            drawOpaqueAfterTranslucent(mainTarget, 0);
+            passTimer.endFrame();
+            drawnThisFrame = !froxelTargetFailed;
+            keptFrameLevel = level;
+            fitFogAtEye();
+            translucentPassHandledFrame = SkyFrame.frameNumber();
+        } catch (RuntimeException exception) {
+            translucentCaptured = false;
+            translucentFogActive = false;
+            capturedMainTarget = null;
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, currentFramebuffer);
+            passTimer.abortFrame();
+            stopAfterError(exception);
+        } finally {
+            frameAllocatedBytes += LightPillarSources.allocatedBytes() - allocatedBefore;
+        }
+    }
+
+    /**
+     * Runs immediately after Embeddium finishes drawing RenderType.translucent() into translucentTarget. Restores
+     * mainTarget, marches opaque and translucent lamp glow in one MRT pass, composites opaque fog over mainTarget,
+     * draws falling snow behind translucent surfaces, composites translucent terrain with its lamp glow over
+     * mainTarget, blits combined depth back to mainTarget, and fits eye fog for particles, clouds, and foreground snow.
+     */
+    public static void afterTranslucentChunks(ClientLevel level, PoseStack poseStack, Matrix4f projectionMatrix) {
+        if (!translucentCaptured) {
+            return;
+        }
+        translucentCaptured = false;
+        translucentFogActive = false;
+        RenderTarget mainTarget = capturedMainTarget;
+        capturedMainTarget = null;
+        GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, savedDrawFramebuffer);
+        if (mainTarget == null || frameCamera == null || level == null) {
+            passTimer.abortFrame();
+            return;
+        }
+        long allocatedBefore = LightPillarSources.allocatedBytes();
+        try {
+            boolean lampFogDrawn = drawOpaqueAfterTranslucent(mainTarget, translucentTarget.depthTexture());
+            drawnThisFrame = !froxelTargetFailed;
+            keptFrameLevel = level;
+            frameAllocatedBytes += LightPillarSources.allocatedBytes() - allocatedBefore;
+            SnowfallRenderer.renderBehindTranslucent(level, poseStack, projectionMatrix, frameCamera,
+                    translucentTarget.depthTexture());
+            allocatedBefore = LightPillarSources.allocatedBytes();
+            drawTranslucentCompositeAndDepthSync(mainTarget, lampFogDrawn);
+            passTimer.endFrame();
+            fitFogAtEye();
+        } catch (RuntimeException exception) {
+            passTimer.abortFrame();
+            stopAfterError(exception);
+        } finally {
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, savedDrawFramebuffer);
+            frameAllocatedBytes += LightPillarSources.allocatedBytes() - allocatedBefore;
+        }
+    }
+
+    /**
+     * Fallback fog entry at AFTER_TRIPWIRE_BLOCKS used for debug views (debugMode != 0) or frames where Embeddium's
+     * translucent terrain hook did not handle the frame.
      */
     @SubscribeEvent(priority = EventPriority.HIGH)
     public static void onRenderLevelStage(RenderLevelStageEvent event) {
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_TRIPWIRE_BLOCKS) {
+            return;
+        }
+        if (translucentPassHandledFrame == SkyFrame.frameNumber()) {
             return;
         }
         drawnThisFrame = false;
@@ -473,9 +638,17 @@ public final class WeatherFogRenderer {
             if (level == null || !isActive(level) || !CalculatedSkyRenderer.isDrawnThisFrame()) {
                 return;
             }
-            render(level, event);
+            RenderTarget mainTarget = Minecraft.getInstance().getMainRenderTarget();
+            if (!prepareFrame(level, event.getPoseStack(), event.getProjectionMatrix(), event.getCamera(),
+                    event.getPartialTick(), mainTarget)) {
+                return;
+            }
+            drawFallback(mainTarget);
+            drawnThisFrame = !froxelTargetFailed;
+            keptFrameLevel = level;
             fitFogAtEye();
         } catch (RuntimeException exception) {
+            passTimer.abortFrame();
             stopAfterError(exception);
         } finally {
             frameAllocatedBytes += LightPillarSources.allocatedBytes() - allocatedBefore;
@@ -745,24 +918,27 @@ public final class WeatherFogRenderer {
         event.setBlue(snowColor[2]);
     }
 
-    private static void render(ClientLevel level, RenderLevelStageEvent event) {
+    /**
+     * Prepares the frame's weather, camera matrices, snow color, wind structures, and froxel grid parameters.
+     * @return whether the fog should draw in this frame
+     */
+    private static boolean prepareFrame(ClientLevel level, PoseStack poseStack, Matrix4f projectionMatrix,
+            Camera camera, float partialTick, RenderTarget mainTarget) {
         resetPassTimerIfSettingsChanged();
-        float partialTick = event.getPartialTick();
         updateWeather(level, partialTick);
         advanceWind();
         WeatherConditions conditions = weather();
         if (!(conditions.referenceExtinction() > 0.0)) {
-            return;
+            return false;
         }
-        Camera camera = event.getCamera();
         if (camera.getFluidInCamera() != FogType.NONE) {
-            return;
+            return false;
         }
         BlockPos cameraBlock = camera.getBlockPosition();
         if (!level.getBiome(cameraBlock).value().coldEnoughToSnow(cameraBlock)) {
-            return;
+            return false;
         }
-        viewProjection.set(event.getProjectionMatrix()).mul(event.getPoseStack().last().pose());
+        viewProjection.set(projectionMatrix).mul(poseStack.last().pose());
         findEyeOffset();
         viewProjection.translate(eyeOffset);
         inverseViewProjection.set(viewProjection).invert();
@@ -774,12 +950,12 @@ public final class WeatherFogRenderer {
                 conditions.heightScale(), eyeY);
         // The fog draws with the calculated sky, which needs its state built for the frame, as isDrawing tells:
         if (!CalculatedSkyRenderer.isDrawing(level)) {
-            return;
+            return false;
         }
         // The first frames after a join have no field of this level yet, so they are drawn without the fog, which errs
         // toward no fog rather than toward fog in a room.
         if (!ClientSnowField.prepareTextures()) {
-            return;
+            return false;
         }
         updateSnowColor(level, partialTick, true);
         updateEye(eyeX, eyeY, eyeZ);
@@ -792,20 +968,50 @@ public final class WeatherFogRenderer {
         frameCavityDecayLength = conditions.decayLength();
         frameHeightScale = conditions.heightScale();
         frameEyeY = eyeY;
-        RenderTarget mainTarget = Minecraft.getInstance().getMainRenderTarget();
         frameFroxelDivisor = FogFroxelGrid.divisorOf(SkySetting.FOG_FROXEL_DIVISOR.get());
         frameSliceCount = FogFroxelGrid.sliceCountOf(SkySetting.FOG_FROXEL_SLICES.get());
         frameRangeDistance = FogFroxelGrid.rangeOf(SkySetting.FOG_FROXEL_RANGE.get());
         frameColumnCount = FogFroxelGrid.columnCount(mainTarget.width, frameFroxelDivisor);
         frameRowCount = FogFroxelGrid.columnCount(mainTarget.height, frameFroxelDivisor);
-        timer.begin();
-        try {
-            draw(mainTarget);
-        } finally {
-            timer.end();
+        return !froxelTargetFailed;
+    }
+
+    /**
+     * Checks Embeddium's visible chunk render lists for any section with translucent geometry. Allocates nothing.
+     */
+    private static boolean hasVisibleTranslucentChunks() {
+        SodiumWorldRenderer renderer = SodiumWorldRenderer.instanceNullable();
+        if (renderer == null) {
+            return false;
         }
-        drawnThisFrame = !froxelTargetFailed;
-        keptFrameLevel = level;
+        RenderSectionManager sectionManager = ((SodiumWorldRendererAccessor) renderer)
+                .frostedheart$getRenderSectionManager();
+        if (sectionManager == null) {
+            return false;
+        }
+        SortedRenderLists renderLists = sectionManager.getRenderLists();
+        if (renderLists == null) {
+            return false;
+        }
+        ObjectArrayList<ChunkRenderList> lists = ((SortedRenderListsAccessor) renderLists).frostedheart$getLists();
+        int listCount = lists.size();
+        for (int listIndex = 0; listIndex < listCount; listIndex++) {
+            ChunkRenderList renderList = lists.get(listIndex);
+            SectionRenderDataStorage storage = renderList.getRegion()
+                    .getStorage(DefaultTerrainRenderPasses.TRANSLUCENT);
+            if (storage == null) {
+                continue;
+            }
+            byte[] sections = ((ChunkRenderListAccessor) renderList).frostedheart$getSectionsWithGeometry();
+            int sectionCount = renderList.getSectionsWithGeometryCount();
+            for (int index = 0; index < sectionCount; index++) {
+                int sectionIndex = sections[index] & 0xFF;
+                if (SectionRenderDataUnsafe.getSliceMask(storage.getDataPointer(sectionIndex)) != 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -1066,16 +1272,228 @@ public final class WeatherFogRenderer {
     }
 
     /**
-     * Draws the fog over the frame in six stages between the timer's boundaries: the setup that binds the depth and the
-     * fields, the share of every cell of the region cube into its volume, the piece of each froxel of the column grid
-     * into its atlas, the excess of the walked depth over the analytic fog at every slice boundary into its array, the
-     * lamp glow of LampFogPass, and the fog over the frame, which reads the excesses of the columns around each pixel
-     * and adds the lamp glow. The fog blends premultiplied and its debug views by their opacity. The depth of the main
-     * target is read through a color only framebuffer, so that its depth texture is not attached to what it draws to.
-     * Every piece of state the pass changes is set back after it, and the framebuffer holds no texture of the main
-     * target once it is released.
+     * Runs the first half of the fog draw (setup, share volume, inject, and integrate) before Embeddium's translucent
+     * terrain pass so both the translucent chunk shader and the later composites share the frame's froxel excesses.
+     * Restores all GL state it modifies.
+     * @return whether the froxel excesses were built cleanly
      */
-    private static void draw(RenderTarget mainTarget) {
+    private static boolean drawFroxels(RenderTarget mainTarget) {
+        if (froxelTargetFailed) {
+            return false;
+        }
+        pass.begin();
+        boolean blending = GL11.glIsEnabled(GL11.GL_BLEND);
+        boolean culling = GL11.glIsEnabled(GL11.GL_CULL_FACE);
+        boolean scissor = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + FIELD_UNIT);
+        int previousFieldTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + STRUCTURE_UNIT);
+        int previousStructureTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
+        try {
+            RenderSystem.disableCull();
+            RenderSystem.disableScissor();
+            RenderSystem.disableBlend();
+            if (frameCavityFloor < 1.0 || SkySetting.SNOW_ENABLED.isOn()) {
+                int noLeavesTexture = ClientSnowField.prepareNoLeavesHeights();
+                FogCavityMap.step(Minecraft.getInstance().level, ClientSnowField.farHeights(), noLeavesTexture);
+            }
+            frameCavityActive = frameCavityFloor < 1.0 && FogCavityMap.isActive();
+            passTimer.beginFrame();
+            passTimer.beginSegment(FogPassTimer.PASS_SETUP);
+            updateStructureTexture();
+            bindFieldTextures();
+            passTimer.endSegment(FogPassTimer.PASS_SETUP);
+            passTimer.beginSegment(FogPassTimer.PASS_SHARE_VOLUME);
+            frameShareVolumeBound = prepareShareVolume();
+            if (frameShareVolumeBound) {
+                drawShareVolume(mainTarget);
+                bindShareVolume();
+            }
+            passTimer.endSegment(FogPassTimer.PASS_SHARE_VOLUME);
+            passTimer.beginSegment(FogPassTimer.PASS_INJECT);
+            boolean injectDrawn = drawInjectPass(mainTarget, frameShareVolumeBound);
+            passTimer.endSegment(FogPassTimer.PASS_INJECT);
+            if (!injectDrawn) {
+                return false;
+            }
+            passTimer.beginSegment(FogPassTimer.PASS_INTEGRATE);
+            boolean integrateDrawn = drawIntegratePass(mainTarget);
+            passTimer.endSegment(FogPassTimer.PASS_INTEGRATE);
+            return integrateDrawn;
+        } finally {
+            if (blending) {
+                RenderSystem.enableBlend();
+            } else {
+                RenderSystem.disableBlend();
+            }
+            if (culling) {
+                RenderSystem.enableCull();
+            } else {
+                RenderSystem.disableCull();
+            }
+            if (scissor) {
+                GlStateManager._enableScissorTest();
+            } else {
+                RenderSystem.disableScissor();
+            }
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + FIELD_UNIT);
+            GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousFieldTexture);
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + STRUCTURE_UNIT);
+            GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousStructureTexture);
+            RenderSystem.viewport(savedViewportX, savedViewportY, savedViewportWidth, savedViewportHeight);
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, savedDrawFramebuffer);
+            pass.end();
+        }
+    }
+
+    /**
+     * Runs the lamp glow march (single-target when translucentDepthTexture is 0, MRT split march when non-zero) and
+     * composites opaque fog over mainTarget using mainTarget's opaque-only depth. Restores all GL state it modifies.
+     * @return whether lamp glow was drawn for this frame
+     */
+    private static boolean drawOpaqueAfterTranslucent(RenderTarget mainTarget, int translucentDepthTexture) {
+        pass.begin();
+        int sourceColor = GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB);
+        int destinationColor = GL11.glGetInteger(GL14.GL_BLEND_DST_RGB);
+        int sourceAlpha = GL11.glGetInteger(GL14.GL_BLEND_SRC_ALPHA);
+        int destinationAlpha = GL11.glGetInteger(GL14.GL_BLEND_DST_ALPHA);
+        int colorEquation = GL11.glGetInteger(GL20.GL_BLEND_EQUATION_RGB);
+        int alphaEquation = GL11.glGetInteger(GL20.GL_BLEND_EQUATION_ALPHA);
+        boolean blending = GL11.glIsEnabled(GL11.GL_BLEND);
+        boolean culling = GL11.glIsEnabled(GL11.GL_CULL_FACE);
+        boolean scissor = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
+        int previousExcessTexture = GL11.glGetInteger(GL30.GL_TEXTURE_BINDING_2D_ARRAY);
+        try {
+            RenderSystem.disableCull();
+            RenderSystem.disableScissor();
+            RenderSystem.disableBlend();
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SCENE_DEPTH_UNIT);
+            RenderSystem.bindTexture(mainTarget.getDepthTextureId());
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
+            GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, excessTexture);
+            passTimer.beginSegment(FogPassTimer.PASS_LAMP_GLOW);
+            boolean lampFogDrawn = LampFogPass.draw(mainTarget, inverseViewProjection,
+                    eyeBlockX + eyeFractionX, eyeBlockY + eyeFractionY, eyeBlockZ + eyeFractionZ, eyeExtinction,
+                    frameHeightScale, frameColumnCount, frameRowCount, frameSliceCount, frameRangeDistance,
+                    frameFroxelDivisor, snowColorFromLightmap, translucentDepthTexture);
+            passTimer.endSegment(FogPassTimer.PASS_LAMP_GLOW);
+            if (lampFogDrawn) {
+                RenderSystem.activeTexture(GL13.GL_TEXTURE0 + LampFogPass.TARGET_UNIT);
+                RenderSystem.bindTexture(LampFogPass.targetTexture());
+            }
+            passTimer.beginSegment(FogPassTimer.PASS_OPAQUE_COMPOSITE);
+            bindColorFramebuffer(mainTarget);
+            RenderSystem.viewport(savedViewportX, savedViewportY, savedViewportWidth, savedViewportHeight);
+            RenderSystem.enableBlend();
+            RenderSystem.blendEquation(GL14.GL_FUNC_ADD);
+            RenderSystem.blendFuncSeparate(GL11.GL_ONE, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ZERO, GL11.GL_ONE);
+            compositePass.use();
+            compositePass.setFrameUniforms(mainTarget);
+            compositePass.setShareVolumeInUse(frameShareVolumeBound);
+            compositePass.setLampFog(lampFogDrawn ? LampFogPass.divisor() : 0);
+            SkyGlPass.drawFullScreenQuad();
+            passTimer.endSegment(FogPassTimer.PASS_OPAQUE_COMPOSITE);
+            return lampFogDrawn;
+        } finally {
+            GL20.glBlendEquationSeparate(colorEquation, alphaEquation);
+            RenderSystem.blendFuncSeparate(sourceColor, destinationColor, sourceAlpha, destinationAlpha);
+            if (blending) {
+                RenderSystem.enableBlend();
+            } else {
+                RenderSystem.disableBlend();
+            }
+            if (culling) {
+                RenderSystem.enableCull();
+            } else {
+                RenderSystem.disableCull();
+            }
+            if (scissor) {
+                GlStateManager._enableScissorTest();
+            } else {
+                RenderSystem.disableScissor();
+            }
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
+            GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, previousExcessTexture);
+            RenderSystem.viewport(savedViewportX, savedViewportY, savedViewportWidth, savedViewportHeight);
+            releaseColorFramebuffer(savedDrawFramebuffer);
+            pass.end();
+        }
+    }
+
+    /**
+     * Composites translucentTarget (already premultiplied and fogged per-layer) over mainTarget while adding
+     * translucent lamp glow, then copies combined opaque + translucent depth back to mainTarget.
+     */
+    private static void drawTranslucentCompositeAndDepthSync(RenderTarget mainTarget, boolean lampFogDrawn) {
+        pass.begin();
+        int sourceColor = GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB);
+        int destinationColor = GL11.glGetInteger(GL14.GL_BLEND_DST_RGB);
+        int sourceAlpha = GL11.glGetInteger(GL14.GL_BLEND_SRC_ALPHA);
+        int destinationAlpha = GL11.glGetInteger(GL14.GL_BLEND_DST_ALPHA);
+        int colorEquation = GL11.glGetInteger(GL20.GL_BLEND_EQUATION_RGB);
+        int alphaEquation = GL11.glGetInteger(GL20.GL_BLEND_EQUATION_ALPHA);
+        boolean blending = GL11.glIsEnabled(GL11.GL_BLEND);
+        boolean culling = GL11.glIsEnabled(GL11.GL_CULL_FACE);
+        boolean scissor = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
+        int previousExcessTexture = GL11.glGetInteger(GL30.GL_TEXTURE_BINDING_2D_ARRAY);
+        try {
+            passTimer.beginSegment(FogPassTimer.PASS_TRANSLUCENT_COMPOSITE);
+            RenderSystem.disableCull();
+            RenderSystem.disableScissor();
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SCENE_DEPTH_UNIT);
+            RenderSystem.bindTexture(translucentTarget.colorTexture());
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SHARE_VOLUME_UNIT);
+            RenderSystem.bindTexture(translucentTarget.depthTexture());
+            if (lampFogDrawn) {
+                RenderSystem.activeTexture(GL13.GL_TEXTURE0 + LampFogPass.TARGET_UNIT);
+                RenderSystem.bindTexture(LampFogPass.translucentTargetTexture());
+            }
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
+            GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, excessTexture);
+            bindColorFramebuffer(mainTarget);
+            RenderSystem.viewport(savedViewportX, savedViewportY, savedViewportWidth, savedViewportHeight);
+            RenderSystem.enableBlend();
+            RenderSystem.blendEquation(GL14.GL_FUNC_ADD);
+            RenderSystem.blendFuncSeparate(GL11.GL_ONE, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ZERO, GL11.GL_ONE);
+            translucentCompositePass.use();
+            translucentCompositePass.setFrameUniforms(mainTarget, lampFogDrawn ? LampFogPass.divisor() : 0);
+            SkyGlPass.drawFullScreenQuad();
+            releaseColorFramebuffer(savedDrawFramebuffer);
+            translucentTarget.copyDepthToMain(mainTarget);
+            passTimer.endSegment(FogPassTimer.PASS_TRANSLUCENT_COMPOSITE);
+        } finally {
+            GL20.glBlendEquationSeparate(colorEquation, alphaEquation);
+            RenderSystem.blendFuncSeparate(sourceColor, destinationColor, sourceAlpha, destinationAlpha);
+            if (blending) {
+                RenderSystem.enableBlend();
+            } else {
+                RenderSystem.disableBlend();
+            }
+            if (culling) {
+                RenderSystem.enableCull();
+            } else {
+                RenderSystem.disableCull();
+            }
+            if (scissor) {
+                GlStateManager._enableScissorTest();
+            } else {
+                RenderSystem.disableScissor();
+            }
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
+            GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, previousExcessTexture);
+            RenderSystem.viewport(savedViewportX, savedViewportY, savedViewportWidth, savedViewportHeight);
+            releaseColorFramebuffer(savedDrawFramebuffer);
+            pass.end();
+        }
+    }
+
+    /**
+     * Single-pass fallback draw used at AFTER_TRIPWIRE_BLOCKS for debug views (debugMode != 0) or frames where the
+     * translucent terrain hook did not run.
+     */
+    private static void drawFallback(RenderTarget mainTarget) {
         if (froxelTargetFailed) {
             return;
         }
@@ -1111,37 +1529,47 @@ public final class WeatherFogRenderer {
                 FogCavityMap.step(Minecraft.getInstance().level, ClientSnowField.farHeights(), noLeavesTexture);
             }
             frameCavityActive = frameCavityFloor < 1.0 && FogCavityMap.isActive();
-            passTimer.begin();
+            passTimer.beginFrame();
+            passTimer.beginSegment(FogPassTimer.PASS_SETUP);
             updateStructureTexture();
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + SCENE_DEPTH_UNIT);
             RenderSystem.bindTexture(mainTarget.getDepthTextureId());
             bindFieldTextures();
-            passTimer.mark(1);
+            passTimer.endSegment(FogPassTimer.PASS_SETUP);
+            passTimer.beginSegment(FogPassTimer.PASS_SHARE_VOLUME);
             boolean shareVolumeBound = prepareShareVolume();
             if (shareVolumeBound) {
                 drawShareVolume(mainTarget);
                 bindShareVolume();
             }
-            passTimer.mark(2);
-            if (!drawInjectPass(mainTarget, shareVolumeBound)) {
+            passTimer.endSegment(FogPassTimer.PASS_SHARE_VOLUME);
+            passTimer.beginSegment(FogPassTimer.PASS_INJECT);
+            boolean injectDrawn = drawInjectPass(mainTarget, shareVolumeBound);
+            passTimer.endSegment(FogPassTimer.PASS_INJECT);
+            if (!injectDrawn) {
+                passTimer.abortFrame();
                 return;
             }
-            passTimer.mark(3);
-            if (!drawIntegratePass(mainTarget)) {
+            passTimer.beginSegment(FogPassTimer.PASS_INTEGRATE);
+            boolean integrateDrawn = drawIntegratePass(mainTarget);
+            passTimer.endSegment(FogPassTimer.PASS_INTEGRATE);
+            if (!integrateDrawn) {
+                passTimer.abortFrame();
                 return;
             }
-            passTimer.mark(4);
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
             GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, excessTexture);
+            passTimer.beginSegment(FogPassTimer.PASS_LAMP_GLOW);
             boolean lampFogDrawn = debugMode == 0 && LampFogPass.draw(mainTarget, inverseViewProjection,
                     eyeBlockX + eyeFractionX, eyeBlockY + eyeFractionY, eyeBlockZ + eyeFractionZ, eyeExtinction,
                     frameHeightScale, frameColumnCount, frameRowCount, frameSliceCount, frameRangeDistance,
-                    frameFroxelDivisor, snowColorFromLightmap);
+                    frameFroxelDivisor, snowColorFromLightmap, 0);
+            passTimer.endSegment(FogPassTimer.PASS_LAMP_GLOW);
             if (lampFogDrawn) {
                 RenderSystem.activeTexture(GL13.GL_TEXTURE0 + LampFogPass.TARGET_UNIT);
                 RenderSystem.bindTexture(LampFogPass.targetTexture());
             }
-            passTimer.mark(5);
+            passTimer.beginSegment(FogPassTimer.PASS_OPAQUE_COMPOSITE);
             bindColorFramebuffer(mainTarget);
             RenderSystem.viewport(viewportX, viewportY, viewportWidth, viewportHeight);
             RenderSystem.enableBlend();
@@ -1159,7 +1587,8 @@ public final class WeatherFogRenderer {
             compositePass.setShareVolumeInUse(shareVolumeBound);
             compositePass.setLampFog(lampFogDrawn ? LampFogPass.divisor() : 0);
             SkyGlPass.drawFullScreenQuad();
-            passTimer.end();
+            passTimer.endSegment(FogPassTimer.PASS_OPAQUE_COMPOSITE);
+            passTimer.endFrame();
         } finally {
             GL20.glBlendEquationSeparate(colorEquation, alphaEquation);
             RenderSystem.blendFuncSeparate(sourceColor, destinationColor, sourceAlpha, destinationAlpha);
@@ -1770,6 +2199,8 @@ public final class WeatherFogRenderer {
      */
     public static void clearFailure() {
         failed = false;
+        translucentTarget.clearFailure();
+        LampFogPass.clearFailure();
         FogCavityMap.clearFailure();
     }
 
@@ -1865,7 +2296,7 @@ public final class WeatherFogRenderer {
                         + "blocks, fade %.2f, %s, %d of the %d cells of the region cube inside it, lag %d blocks, %s; "
                         + "froxel divisor %d at %d by %d columns, %d slices out to %.1f blocks; %s; %s; wind %.1f "
                         + "blocks per second toward %.0f degrees, displacement (%.1f, %.1f) blocks%s",
-                drawn, timer.describe(), eyeExtinction, visibility, fittedEnd, weather().referenceExtinction(),
+                drawn, passTimer.describeTotal(), eyeExtinction, visibility, fittedEnd, weather().referenceExtinction(),
                 weather().heightScale(), describeSnowColor(), describeEyeShare(), weather().decayLength(), frameRadius,
                 frameHalfWidth, frameFieldFade, hasShownBox ? "a shown box" : "no shown box", insideCells, regionCells,
                 lag, describeShareVolume(), frameFroxelDivisor, frameColumnCount, frameRowCount, frameSliceCount,
@@ -1971,7 +2402,7 @@ public final class WeatherFogRenderer {
      * The draw time of the fog of the last frame, for the client command.
      */
     public static String describeDrawTime() {
-        return timer.describe();
+        return passTimer.describeTotal();
     }
 
     /**
@@ -3124,6 +3555,74 @@ public final class WeatherFogRenderer {
         @Override
         protected void setOwnUniforms(RenderTarget mainTarget) {
             setShareVolumeInUse(false);
+        }
+    }
+
+    /**
+     * Composites the offscreen translucent terrain target over the main target while adding the translucent lamp glow
+     * marched up to translucent depth, with depth-aware upsampling and thin-geometry opacity clamping.
+     */
+    private static final class TranslucentCompositeProgram {
+        @Nullable
+        private ShaderProgram program;
+        @Nullable
+        private Shader fragment;
+        private int lampFogDivisorUniform;
+        private int screenSizeUniform;
+        private int inverseViewProjectionUniform;
+        private int eyeExtinctionUniform;
+        private int heightScaleUniform;
+        private int columnCountUniform;
+        private int rowCountUniform;
+        private int sliceCountUniform;
+        private int rangeDistanceUniform;
+        private int divisorUniform;
+
+        private void use() {
+            Shader newFragment = FHShaders.getWeatherFogTranslucentComposite();
+            if (program == null || fragment != newFragment) {
+                if (program != null) {
+                    program.delete();
+                    program = null;
+                }
+                ShaderProgram created = new ShaderProgram();
+                try {
+                    created.attach(FHShaders.IMAGE_V).attach(newFragment);
+                } catch (RuntimeException exception) {
+                    created.delete();
+                    throw exception;
+                }
+                program = created;
+                fragment = newFragment;
+                program.use();
+                int programId = program.programId;
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "translucentColor"), SCENE_DEPTH_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "translucentDepth"), SHARE_VOLUME_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "lampFog"), LampFogPass.TARGET_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "excesses"), EXCESS_UNIT);
+                lampFogDivisorUniform = GL20.glGetUniformLocation(programId, "lampFogDivisor");
+                screenSizeUniform = GL20.glGetUniformLocation(programId, "screenSize");
+                inverseViewProjectionUniform = GL20.glGetUniformLocation(programId, "inverseViewProjection");
+                eyeExtinctionUniform = GL20.glGetUniformLocation(programId, "eyeExtinction");
+                heightScaleUniform = GL20.glGetUniformLocation(programId, "heightScale");
+                columnCountUniform = GL20.glGetUniformLocation(programId, "columnCount");
+                rowCountUniform = GL20.glGetUniformLocation(programId, "rowCount");
+                sliceCountUniform = GL20.glGetUniformLocation(programId, "sliceCount");
+                rangeDistanceUniform = GL20.glGetUniformLocation(programId, "rangeDistance");
+                divisorUniform = GL20.glGetUniformLocation(programId, "divisor");
+            }
+            program.use();
+        }
+
+        private void setFrameUniforms(RenderTarget mainTarget, int lampFogDivisor) {
+            GL20.glUniform1i(lampFogDivisorUniform, lampFogDivisor);
+            GL20.glUniform2f(screenSizeUniform, (float) mainTarget.width, (float) mainTarget.height);
+            inverseViewProjection.get(matrixBuffer);
+            GL20.glUniformMatrix4fv(inverseViewProjectionUniform, false, matrixBuffer);
+            GL20.glUniform1f(eyeExtinctionUniform, (float) eyeExtinction);
+            GL20.glUniform1f(heightScaleUniform, (float) frameHeightScale);
+            setGridUniforms(columnCountUniform, rowCountUniform, sliceCountUniform, rangeDistanceUniform,
+                    divisorUniform);
         }
     }
 }

@@ -8,6 +8,8 @@
 // the ray's end where that is lower. The pieces are fixed in the world, so the glow does not swim as the eye moves.
 // The pixel holds that light and the distance its ray ended at. LampFogMarch is the Java twin.
 uniform sampler2D sceneDepth;
+uniform sampler2D translucentDepth;
+uniform int hasTranslucent;
 uniform vec2 screenSize;
 uniform mat4 inverseViewProjection;
 uniform float eyeExtinction;
@@ -24,6 +26,7 @@ uniform vec3 lampLitHigh[LAMP_CASCADE_COUNT];
 uniform int selfTest;
 uniform vec3 selfTestOffsets[64];
 out vec4 fragColor;
+out vec4 translucentFragColor;
 
 // The transmittance below which the march stops, 1 / 512, its most pieces per ray, the distance a ray of the sky ends
 // at, and a distance no crossing reaches. These must match LampFogMarch:
@@ -109,12 +112,18 @@ void lampCrossing(float position, float rate, float start, out float next, out f
 }
 
 // The lamp light that the fog adds along a unit direction from the eye out to an end distance, before the scaling of
-// lampFogAlong, and the largest optical depth the march found:
-vec3 lampFogMarched(vec3 direction, float endDistance, vec2 uv, out float runningDepth) {
+// scaleLampLight, with an optional split snapshot at splitDistance (< endDistance) and the largest optical depth found
+// up to each endpoint:
+vec3 lampFogMarched(vec3 direction, float endDistance, float splitDistance, vec2 uv, out float runningDepth,
+        out vec3 splitLight, out float splitRunningDepth) {
     vec3 light = vec3(0.0);
     // The largest optical depth found so far and the distance it was found at, which the pieces carry on:
     runningDepth = 0.0;
     float depthDistance = 0.0;
+    bool splits = splitDistance < endDistance;
+    bool splitCaptured = !splits;
+    splitLight = vec3(0.0);
+    splitRunningDepth = 0.0;
     int steps = 0;
     float regionStart = 0.0;
     for (int cascade = 0; cascade < LAMP_CASCADE_COUNT; cascade++) {
@@ -150,11 +159,21 @@ vec3 lampFogMarched(vec3 direction, float endDistance, vec2 uv, out float runnin
             float start = max(partStart, max(max(lampLastCrossing(spanPosition.x, rate.x, spanStart),
                     lampLastCrossing(spanPosition.y, rate.y, spanStart)),
                     lampLastCrossing(spanPosition.z, rate.z, spanStart)));
+            if (!splitCaptured && !(start < splitDistance)) {
+                splitLight = light;
+                splitRunningDepth = runningDepth;
+                splitCaptured = true;
+            }
             if (depthDistance != start) {
                 runningDepth = max(runningDepth, lampOpticalDepth(start, direction, uv));
                 depthDistance = start;
             }
             if (exp(-runningDepth) < LAMP_LEAST_TRANSMITTANCE) {
+                if (!splitCaptured) {
+                    splitLight = light;
+                    splitRunningDepth = runningDepth;
+                    splitCaptured = true;
+                }
                 return light;
             }
             vec3 position = lampEyeInCascade[cascade] + start * rate;
@@ -168,6 +187,10 @@ vec3 lampFogMarched(vec3 direction, float endDistance, vec2 uv, out float runnin
             while (walking && steps < LAMP_MAXIMUM_STEPS) {
                 steps++;
                 float exit = min(min(nextCrossing.x, nextCrossing.y), min(nextCrossing.z, partEnd));
+                bool splitsHere = !splitCaptured && distance < splitDistance && splitDistance < exit;
+                if (splitsHere) {
+                    exit = splitDistance;
+                }
                 float middle = 0.5 * (distance + exit);
                 vec3 offset = middle * direction;
                 vec2 shares = lampCascadeSharesAt(cascade, offset);
@@ -187,11 +210,21 @@ vec3 lampFogMarched(vec3 direction, float endDistance, vec2 uv, out float runnin
                     light += lampLiftOfLevel(level) * (exp(-runningDepth) - exp(-exitDepth));
                     runningDepth = exitDepth;
                     depthDistance = exit;
-                    if (exp(-runningDepth) < LAMP_LEAST_TRANSMITTANCE) {
-                        return light;
-                    }
                 }
-                if (!(exit < spanEnd)) {
+                if (!splitCaptured && !(exit < splitDistance)) {
+                    splitLight = light;
+                    splitRunningDepth = runningDepth;
+                    splitCaptured = true;
+                }
+                if (exp(-runningDepth) < LAMP_LEAST_TRANSMITTANCE) {
+                    if (!splitCaptured) {
+                        splitLight = light;
+                        splitRunningDepth = runningDepth;
+                        splitCaptured = true;
+                    }
+                    return light;
+                }
+                if (!splitsHere && !(exit < spanEnd)) {
                     walking = false;
                 } else {
                     distance = exit;
@@ -210,16 +243,16 @@ vec3 lampFogMarched(vec3 direction, float endDistance, vec2 uv, out float runnin
         }
         regionStart = max(regionStart, bandEnd);
     }
+    if (!splits || !splitCaptured) {
+        splitLight = light;
+        splitRunningDepth = runningDepth;
+    }
     return light;
 }
 
-// The lamp light that the fog adds along a unit direction from the eye out to an end distance. Where the optical
-// depth at the end lies below the largest the march found, which the interpolation of the froxel excess gives in
-// shelters, the light is scaled to the opacity at the end, which the composite draws the fog with, so the glow never
-// outshines the fog it lights:
-vec3 lampFogAlong(vec3 direction, float endDistance, vec2 uv) {
-    float runningDepth;
-    vec3 light = lampFogMarched(direction, endDistance, uv, runningDepth);
+// Scales marched lamp light down to the opacity at endDistance when the optical depth at the end lies below the
+// largest the march found, so the glow never outshines the fog it lights:
+vec3 scaleLampLight(vec3 light, float runningDepth, float endDistance, vec3 direction, vec2 uv) {
     if (runningDepth > LAMP_LEAST_SCALED_DEPTH && (light.r > 0.0 || light.g > 0.0 || light.b > 0.0)) {
         float endDepth = lampOpticalDepth(endDistance, direction, uv);
         if (endDepth < runningDepth) {
@@ -229,12 +262,34 @@ vec3 lampFogAlong(vec3 direction, float endDistance, vec2 uv) {
     return light;
 }
 
+// Marches the lamp light out to endDistance and, when splitDistance < endDistance, snapshots the light at
+// splitDistance in the same walk:
+void lampFogAlongSplit(vec3 direction, float endDistance, float splitDistance, vec2 uv, out vec3 opaqueLight,
+        out vec3 translucentLight) {
+    float runningDepth;
+    vec3 splitLight;
+    float splitRunningDepth;
+    vec3 light = lampFogMarched(direction, endDistance, splitDistance, uv, runningDepth, splitLight, splitRunningDepth);
+    opaqueLight = scaleLampLight(light, runningDepth, endDistance, direction, uv);
+    if (splitDistance < endDistance) {
+        translucentLight = scaleLampLight(splitLight, splitRunningDepth, splitDistance, direction, uv);
+    } else {
+        translucentLight = opaqueLight;
+    }
+}
+
 void main() {
     if (selfTest != 0) {
         vec3 testOffset = selfTestOffsets[int(gl_FragCoord.x)];
         float testLength = length(testOffset);
-        fragColor = vec4(testLength > 0.0 ? lampFogAlong(testOffset / testLength, testLength, vec2(0.5)) : vec3(0.0),
-                0.0);
+        vec3 opaqueLight = vec3(0.0);
+        vec3 translucentLight = vec3(0.0);
+        if (testLength > 0.0) {
+            lampFogAlongSplit(testOffset / testLength, testLength, testLength, vec2(0.5), opaqueLight,
+                    translucentLight);
+        }
+        fragColor = vec4(opaqueLight, 0.0);
+        translucentFragColor = vec4(0.0);
         return;
     }
     ivec2 framePixel = min(ivec2(gl_FragCoord.xy) * lampDivisor + lampDivisor / 2, ivec2(screenSize) - 1);
@@ -248,9 +303,27 @@ void main() {
     // A depth at the near plane can give no scene point, which then takes no lamp light:
     if (!(offsetLength > 0.0) || isnan(offsetLength) || isinf(offsetLength)) {
         fragColor = vec4(0.0);
+        translucentFragColor = vec4(0.0);
         return;
     }
     float endDistance = isSky ? LAMP_SKY_DISTANCE : min(offsetLength, LAMP_SKY_DISTANCE);
+    float splitDistance = endDistance;
+    if (hasTranslucent != 0) {
+        float tDepth = texelFetch(translucentDepth, framePixel, 0).r;
+        if (tDepth < depth) {
+            vec3 tNdc = vec3(frameCenter / screenSize * 2.0 - 1.0, tDepth * 2.0 - 1.0);
+            vec4 tPosition = inverseViewProjection * vec4(tNdc, 1.0);
+            vec3 tOffset = tPosition.xyz / tPosition.w;
+            float tLength = length(tOffset);
+            if (tLength > 0.0 && !isnan(tLength) && !isinf(tLength)) {
+                splitDistance = min(tLength, endDistance);
+            }
+        }
+    }
     vec2 uv = frameCenter / (float(divisor) * vec2(columnCount, rowCount));
-    fragColor = vec4(lampFogAlong(offset / offsetLength, endDistance, uv), endDistance);
+    vec3 opaqueLight;
+    vec3 translucentLight;
+    lampFogAlongSplit(offset / offsetLength, endDistance, splitDistance, uv, opaqueLight, translucentLight);
+    fragColor = vec4(opaqueLight, endDistance);
+    translucentFragColor = vec4(translucentLight, splitDistance);
 }

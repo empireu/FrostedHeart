@@ -25,14 +25,17 @@ import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.BufferUploader;
+import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.logging.LogUtils;
 import com.teammoeg.frostedheart.FHMain;
 import com.teammoeg.frostedheart.bootstrap.client.FHShaders;
 import com.teammoeg.frostedheart.content.climate.render.sky.LightPillarSources;
 import com.teammoeg.frostedheart.content.climate.render.sky.SkyDrawTimer;
+import com.teammoeg.frostedheart.content.climate.render.sky.SkyFrame;
 import com.teammoeg.frostedheart.content.climate.render.sky.SkyGlPass;
 import com.teammoeg.frostedheart.content.climate.render.sky.SkySetting;
 import com.teammoeg.frostedheart.mixin.client.LightTextureAccessor_WeatherFog;
+import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.util.Mth;
@@ -82,9 +85,11 @@ public final class SnowfallRenderer {
     private static final int SHARE_VOLUME_UNIT = 2;
     private static final int SPLAT_UNIT = 3;
     /**
-     * The unit of the shape ids, a 3D texture.
+     * The unit of the shape ids, a 3D texture in the update pass, reused as a 2D unit for translucent depth in the
+     * behind-translucent draw pass.
      */
     private static final int SHAPE_VOLUME_UNIT = 4;
+    private static final int TRANSLUCENT_DEPTH_UNIT = SHAPE_VOLUME_UNIT;
     private static final int SHAPE_ROWS_UNIT = 5;
     /**
      * The unit of vanilla's lightmap in the draw, which only the update uses for the shape rows.
@@ -127,6 +132,7 @@ public final class SnowfallRenderer {
     private static final IntBuffer updateDrawBuffers = BufferUtils.createIntBuffer(2);
     private static final SkyDrawTimer updateTimer = new SkyDrawTimer();
     private static final SkyDrawTimer drawTimer = new SkyDrawTimer();
+    private static final SkyDrawTimer behindDrawTimer = new SkyDrawTimer();
     private static final UpdateProgram updateProgram = new UpdateProgram();
     private static final DrawProgram drawProgram = new DrawProgram();
 
@@ -168,6 +174,8 @@ public final class SnowfallRenderer {
     private static boolean failed;
     private static int lastInstances;
     private static double lastAskedCount;
+    private static long updatedFrameNumber = -1L;
+    private static long frameAllocatedBytes;
     private static long lastFrameAllocatedBytes;
 
     private SnowfallRenderer() {
@@ -180,6 +188,37 @@ public final class SnowfallRenderer {
      */
     public static boolean ownsPrecipitation() {
         return !failed && SkySetting.SNOW_ENABLED.isOn() && WeatherFogRenderer.isDrawnThisFrame();
+    }
+
+    /**
+     * Draws flakes and splats that sit behind visible translucent terrain (and in front of opaque terrain) onto
+     * mainTarget before translucent terrain is composited over it. Updates the flake simulation once for this frame so
+     * the AFTER_WEATHER foreground pass reuses the updated state.
+     */
+    static void renderBehindTranslucent(ClientLevel level, PoseStack poseStack, Matrix4f projectionMatrix,
+            Camera camera, int translucentDepthTexture) {
+        if (translucentDepthTexture == 0) {
+            return;
+        }
+        if (level != filledLevel) {
+            filledLevel = null;
+            stateFilled = false;
+            SnowLeeMap.onLevelChanged(level);
+        }
+        if (!ownsPrecipitation()) {
+            return;
+        }
+        long allocatedBefore = LightPillarSources.allocatedBytes();
+        try {
+            boolean runUpdate = updatedFrameNumber != SkyFrame.frameNumber();
+            renderPass(level, poseStack, projectionMatrix, camera, translucentDepthTexture, runUpdate, behindDrawTimer);
+        } catch (RuntimeException exception) {
+            failed = true;
+            LOGGER.error("The snowfall is not drawn after an error, so vanilla's snow draws again. It is drawn again "
+                    + "once the calculated sky is turned on again.", exception);
+        } finally {
+            frameAllocatedBytes += LightPillarSources.allocatedBytes() - allocatedBefore;
+        }
     }
 
     @SubscribeEvent
@@ -195,21 +234,28 @@ public final class SnowfallRenderer {
             SnowLeeMap.onLevelChanged(level);
         }
         if (level == null || !ownsPrecipitation()) {
+            lastFrameAllocatedBytes = frameAllocatedBytes;
+            frameAllocatedBytes = 0L;
             return;
         }
         long allocatedBefore = LightPillarSources.allocatedBytes();
         try {
-            render(level, event);
+            boolean runUpdate = updatedFrameNumber != SkyFrame.frameNumber();
+            renderPass(level, event.getPoseStack(), event.getProjectionMatrix(), event.getCamera(), 0, runUpdate,
+                    drawTimer);
         } catch (RuntimeException exception) {
             failed = true;
             LOGGER.error("The snowfall is not drawn after an error, so vanilla's snow draws again. It is drawn again "
                     + "once the calculated sky is turned on again.", exception);
         } finally {
-            lastFrameAllocatedBytes = LightPillarSources.allocatedBytes() - allocatedBefore;
+            frameAllocatedBytes += LightPillarSources.allocatedBytes() - allocatedBefore;
+            lastFrameAllocatedBytes = frameAllocatedBytes;
+            frameAllocatedBytes = 0L;
         }
     }
 
-    private static void render(ClientLevel level, RenderLevelStageEvent event) {
+    private static void renderPass(ClientLevel level, PoseStack poseStack, Matrix4f projectionMatrix, Camera camera,
+            int translucentDepthTexture, boolean runUpdate, SkyDrawTimer activeDrawTimer) {
         double boxSide = 2.0 * SkySetting.SNOW_NEAR_RADIUS.get();
         double flakeSize = SkySetting.SNOW_FLAKE_SIZE.get();
         double flakeShare = SkySetting.SNOW_FLAKE_SHARE.get();
@@ -220,10 +266,10 @@ public final class SnowfallRenderer {
         if (instances <= 0 || !prepareState()) {
             return;
         }
-        viewProjection.set(event.getProjectionMatrix()).mul(event.getPoseStack().last().pose());
-        float pixelsPerBlock = event.getProjectionMatrix().m11()
+        viewProjection.set(projectionMatrix).mul(poseStack.last().pose());
+        float pixelsPerBlock = projectionMatrix.m11()
                 * Minecraft.getInstance().getMainRenderTarget().height * 0.5F;
-        Vec3 camera = event.getCamera().getPosition();
+        Vec3 cameraPosition = camera.getPosition();
         int previousProgram = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
         int previousFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
         int previousVertexArray = GL11.glGetInteger(GL30.GL_VERTEX_ARRAY_BINDING);
@@ -272,25 +318,31 @@ public final class SnowfallRenderer {
             double windDirection = wind.direction();
             boolean wantsNoLeaves = SkySetting.SNOW_LEE.isOn() || FogCavityMap.isActive();
             int noLeavesTexture = wantsNoLeaves ? ClientSnowField.prepareNoLeavesHeights() : 0;
-            SnowLeeMap.step(level, farHeights, noLeavesTexture, windDirection, flakeWindSpeed, flakeFallSpeed);
+            if (runUpdate) {
+                SnowLeeMap.step(level, farHeights, noLeavesTexture, windDirection, flakeWindSpeed, flakeFallSpeed);
+            }
             boolean hasHeights = noLeavesTexture != 0 && farHeights != null && farHeights.isPlaced();
             boolean leeActive = SnowLeeMap.isActive() && hasHeights;
             boolean cavityActive = FogCavityMap.isActive() && hasHeights;
-            updateTimer.begin();
-            try {
-                update(level, camera, boxSide, farHeights, noLeavesTexture, leeActive, cavityActive, windDirection,
-                        flakeWindSpeed, flakeFallSpeed);
-            } finally {
-                updateTimer.end();
+            if (runUpdate) {
+                updateTimer.begin();
+                try {
+                    update(level, cameraPosition, boxSide, farHeights, noLeavesTexture, leeActive, cavityActive,
+                            windDirection, flakeWindSpeed, flakeFallSpeed);
+                    updatedFrameNumber = SkyFrame.frameNumber();
+                } finally {
+                    updateTimer.end();
+                }
             }
             LampLightField lampField = WeatherFogRenderer.isSnowColorFromLightmap() ? ClientLampLight.field(level)
                     : null;
-            drawTimer.begin();
+            activeDrawTimer.begin();
             try {
-                draw(camera, boxSide, flakeSize, drawnCount, instances, pixelsPerBlock, farHeights, noLeavesTexture,
-                        leeActive, cavityActive, windDirection, flakeWindSpeed, flakeFallSpeed, lampField);
+                draw(cameraPosition, boxSide, flakeSize, drawnCount, instances, pixelsPerBlock, farHeights,
+                        noLeavesTexture, leeActive, cavityActive, windDirection, flakeWindSpeed, flakeFallSpeed,
+                        lampField, translucentDepthTexture);
             } finally {
-                drawTimer.end();
+                activeDrawTimer.end();
             }
         } finally {
             GL30.glBindVertexArray(previousVertexArray);
@@ -410,7 +462,7 @@ public final class SnowfallRenderer {
     private static void draw(Vec3 camera, double boxSide, double flakeSize, double drawnCount, int instances,
             float pixelsPerBlock, @Nullable FarHeights farHeights, int noLeavesTexture, boolean leeActive,
             boolean cavityActive, double windDirection, double flakeWindSpeed, double flakeFallSpeed,
-            @Nullable LampLightField lampField) {
+            @Nullable LampLightField lampField, int translucentDepthTexture) {
         RenderTarget mainTarget = Minecraft.getInstance().getMainRenderTarget();
         GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, mainTarget.frameBufferId);
         RenderSystem.viewport(0, 0, mainTarget.width, mainTarget.height);
@@ -422,6 +474,7 @@ public final class SnowfallRenderer {
         RenderSystem.blendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ZERO, GL11.GL_ONE);
         bindTexture(STATE_UNIT, stateTextures[currentState]);
         bindTexture(SPLAT_UNIT, splatTextures[currentState]);
+        bindTexture(TRANSLUCENT_DEPTH_UNIT, translucentDepthTexture);
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
         GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, WeatherFogRenderer.excessTexture());
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + FLAKE_SHAPES_UNIT);
@@ -437,6 +490,7 @@ public final class SnowfallRenderer {
         double splatSeconds = SkySetting.SNOW_SPLAT_SECONDS.get();
         drawProgram.setUniforms(mainTarget, camera, boxSide, flakeSize, drawnCount, pixelsPerBlock, shareVolume != 0,
                 splatSeconds, farHeights, leeActive, cavityActive, windDirection, flakeWindSpeed, flakeFallSpeed);
+        drawProgram.setClipAgainstTranslucent(translucentDepthTexture != 0);
         drawProgram.lamps.bind(lampField, camera, ClientLampLight.fade());
         if (vertexArray == 0) {
             vertexArray = GL30.glGenVertexArrays();
@@ -556,10 +610,10 @@ public final class SnowfallRenderer {
                 ? String.format(Locale.ROOT, "%d bytes allocated in the last frame", lastFrameAllocatedBytes)
                 : "allocations not counted by this JVM";
         return String.format(Locale.ROOT, "Snowfall: %d flakes drawn in the last frame, %.0f asked by snowFlakeShare "
-                        + "of %d at most%s; update %s; draw %s; %s; %s; %s; %s", lastInstances, lastAskedCount,
+                        + "of %d at most%s; update %s; behind %s; draw %s; %s; %s; %s; %s", lastInstances, lastAskedCount,
                 SnowFlakes.CAPACITY, lastAskedCount > SnowFlakes.CAPACITY ? " (capped)" : "", updateTimer.describe(),
-                drawTimer.describe(), allocated, FlakeShapeTexture.describe(), describeCollision(),
-                SnowLeeMap.describe());
+                behindDrawTimer.describe(), drawTimer.describe(), allocated, FlakeShapeTexture.describe(),
+                describeCollision(), SnowLeeMap.describe());
     }
 
     /**
@@ -821,6 +875,7 @@ public final class SnowfallRenderer {
         private int leeBandUniform;
         private int farHeightsMinUniform;
         private int shapeTileScalesUniform;
+        private int clipAgainstTranslucentUniform;
 
         private void use() {
             Shader newVertex = FHShaders.getSnowFlakesVertex();
@@ -852,6 +907,7 @@ public final class SnowfallRenderer {
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "cavityMap"), CAVITY_MAP_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "flakeShapes"), FLAKE_SHAPES_UNIT);
                 GL20.glUniform1i(GL20.glGetUniformLocation(programId, "lampLightmap"), LIGHTMAP_UNIT);
+                GL20.glUniform1i(GL20.glGetUniformLocation(programId, "translucentDepth"), TRANSLUCENT_DEPTH_UNIT);
                 lamps.locate(programId);
                 GL20.glUniform3i(GL20.glGetUniformLocation(programId, "shareLayout"), FogShareVolume.SIDE,
                         FogShareVolume.ORIGIN, FogShareVolume.TILES_ACROSS);
@@ -897,8 +953,17 @@ public final class SnowfallRenderer {
                 leeBandUniform = GL20.glGetUniformLocation(programId, "leeBand");
                 farHeightsMinUniform = GL20.glGetUniformLocation(programId, "farHeightsMin");
                 shapeTileScalesUniform = GL20.glGetUniformLocation(programId, "shapeTileScales");
+                clipAgainstTranslucentUniform = GL20.glGetUniformLocation(programId, "clipAgainstTranslucent");
             }
             program.use();
+        }
+
+        /**
+         * Makes the next draw keep only fragments behind translucentDepth, or draw all fragments in front of main
+         * target depth.
+         */
+        private void setClipAgainstTranslucent(boolean clip) {
+            GL20.glUniform1i(clipAgainstTranslucentUniform, clip ? 1 : 0);
         }
 
         /**

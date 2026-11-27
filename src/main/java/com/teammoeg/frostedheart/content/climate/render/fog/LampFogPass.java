@@ -67,6 +67,7 @@ public final class LampFogPass {
      */
     static final int TARGET_UNIT = 6;
     private static final int SCENE_DEPTH_UNIT = 0;
+    private static final int TRANSLUCENT_DEPTH_UNIT = 1;
     private static final int EXCESS_UNIT = 7;
     private static final int FIRST_CASCADE_UNIT = 9;
     private static final int CASCADES = LampLightField.CASCADE_COUNT;
@@ -101,11 +102,15 @@ public final class LampFogPass {
     private static final FloatBuffer boxBuffer = BufferUtils.createFloatBuffer(3 * CASCADES);
     private static final FloatBuffer selfTestOffsetBuffer = BufferUtils.createFloatBuffer(3 * SELF_TEST_RAYS);
     private static final IntBuffer viewportBuffer = BufferUtils.createIntBuffer(16);
+    private static final IntBuffer drawBuffers = BufferUtils.createIntBuffer(2);
 
     @Nullable
     private static ShaderProgram program;
     @Nullable
     private static Shader fragment;
+    private static int opaqueOutput;
+    private static int translucentOutput;
+    private static int hasTranslucentUniform;
     private static int screenSizeUniform;
     private static int inverseViewProjectionUniform;
     private static int eyeExtinctionUniform;
@@ -122,6 +127,7 @@ public final class LampFogPass {
     private static int selfTestUniform;
     private static int selfTestOffsetsUniform;
     private static int targetTexture;
+    private static int translucentTargetTexture;
     private static int targetFramebuffer;
     private static int targetWidth;
     private static int targetHeight;
@@ -153,26 +159,36 @@ public final class LampFogPass {
     }
 
     /**
-     * The texture the composite reads and the frame pixels per side of one of its texels.
+     * The textures the opaque and translucent composites read and the frame pixels per side of one of their texels.
      */
     static int targetTexture() {
         return targetTexture;
+    }
+
+    static int translucentTargetTexture() {
+        return translucentTargetTexture;
     }
 
     static int divisor() {
         return frameDivisor;
     }
 
+    static void clearFailure() {
+        failed = false;
+    }
+
     /**
-     * Marches the lamp light of the frame into the target, when the field holds any. The caller binds the scene depth
-     * and the excesses on their units, and sets the viewport back after it. The framebuffer bound before is bound
-     * again, and the active unit is left at 0.
+     * Marches the lamp light of the frame into the target, and into the translucent target in the same pass when a
+     * translucent depth texture is supplied. The caller binds the scene depth and the excesses on their units, and sets
+     * the viewport back after it. The framebuffer bound before is bound again, unit 1's 2D binding is restored, and the
+     * active unit is left at 0.
      * @param snowColorFromLightmap whether the fog color of the frame came from the lightmap
-     * @return whether the target holds the frame's lamp light, which the composite then reads
+     * @param translucentDepthTexture the depth texture of the translucent target, or 0 when no translucent chunks drew
+     * @return whether the target holds the frame's lamp light, which the composites then read
      */
     static boolean draw(RenderTarget mainTarget, Matrix4f inverseViewProjection, double eyeX, double eyeY, double eyeZ,
             double eyeExtinction, double heightScale, int columnCount, int rowCount, int sliceCount,
-            double rangeDistance, int froxelDivisor, boolean snowColorFromLightmap) {
+            double rangeDistance, int froxelDivisor, boolean snowColorFromLightmap, int translucentDepthTexture) {
         if (failed || !snowColorFromLightmap || !liftsRead) {
             return false;
         }
@@ -186,14 +202,20 @@ public final class LampFogPass {
         int width = (mainTarget.width + divisor - 1) / divisor;
         int height = (mainTarget.height + divisor - 1) / divisor;
         int previousFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
+        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + TRANSLUCENT_DEPTH_UNIT);
+        int previousTranslucentDepth = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
         lamps.save();
         try {
             if (!prepareTarget(width, height)) {
                 return false;
             }
+            boolean withTranslucent = translucentDepthTexture != 0;
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + TRANSLUCENT_DEPTH_UNIT);
+            RenderSystem.bindTexture(withTranslucent ? translucentDepthTexture : 0);
             GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, targetFramebuffer);
             RenderSystem.viewport(0, 0, width, height);
             use();
+            setDrawBuffers(withTranslucent);
             inverseViewProjection.get(matrixBuffer);
             GL20.glUniformMatrix4fv(inverseViewProjectionUniform, false, matrixBuffer);
             GL20.glUniform2f(screenSizeUniform, (float) mainTarget.width, (float) mainTarget.height);
@@ -205,6 +227,7 @@ public final class LampFogPass {
             GL20.glUniform1f(rangeDistanceUniform, (float) rangeDistance);
             GL20.glUniform1i(divisorUniform, froxelDivisor);
             GL20.glUniform1i(lampDivisorUniform, divisor);
+            GL20.glUniform1i(hasTranslucentUniform, withTranslucent ? 1 : 0);
             GL20.glUniform1i(selfTestUniform, 0);
             setMarchUniforms(strength);
             lamps.bind(field, eyeX, eyeY, eyeZ, fade);
@@ -218,6 +241,8 @@ public final class LampFogPass {
             return false;
         } finally {
             lamps.restore();
+            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + TRANSLUCENT_DEPTH_UNIT);
+            RenderSystem.bindTexture(previousTranslucentDepth);
             RenderSystem.activeTexture(GL13.GL_TEXTURE0);
             GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, previousFramebuffer);
         }
@@ -272,19 +297,34 @@ public final class LampFogPass {
                 program = null;
             }
             ShaderProgram created = new ShaderProgram();
+            int createdOpaqueOutput;
+            int createdTranslucentOutput;
             try {
                 created.attach(FHShaders.IMAGE_V).attach(newFragment);
+                created.linkProgram();
+                // GLSL 1.50 leaves the locations of multiple fragment outputs to the linker:
+                createdOpaqueOutput = GL30.glGetFragDataLocation(created.programId, "fragColor");
+                createdTranslucentOutput = GL30.glGetFragDataLocation(created.programId, "translucentFragColor");
+                if (createdOpaqueOutput < 0 || createdOpaqueOutput > 1 || createdTranslucentOutput < 0
+                        || createdTranslucentOutput > 1 || createdOpaqueOutput == createdTranslucentOutput) {
+                    throw new IllegalStateException("The lamp glow writes its outputs to the locations "
+                            + createdOpaqueOutput + " and " + createdTranslucentOutput + " instead of 0 and 1");
+                }
             } catch (RuntimeException exception) {
                 created.delete();
                 throw exception;
             }
             program = created;
             fragment = newFragment;
+            opaqueOutput = createdOpaqueOutput;
+            translucentOutput = createdTranslucentOutput;
             program.use();
             int programId = program.programId;
             GL20.glUniform1i(GL20.glGetUniformLocation(programId, "sceneDepth"), SCENE_DEPTH_UNIT);
+            GL20.glUniform1i(GL20.glGetUniformLocation(programId, "translucentDepth"), TRANSLUCENT_DEPTH_UNIT);
             GL20.glUniform1i(GL20.glGetUniformLocation(programId, "excesses"), EXCESS_UNIT);
             lamps.locate(programId);
+            hasTranslucentUniform = GL20.glGetUniformLocation(programId, "hasTranslucent");
             screenSizeUniform = GL20.glGetUniformLocation(programId, "screenSize");
             inverseViewProjectionUniform = GL20.glGetUniformLocation(programId, "inverseViewProjection");
             eyeExtinctionUniform = GL20.glGetUniformLocation(programId, "eyeExtinction");
@@ -318,23 +358,34 @@ public final class LampFogPass {
         if (allocate) {
             targetFramebuffer = GL30.glGenFramebuffers();
             targetTexture = GL11.glGenTextures();
+            translucentTargetTexture = GL11.glGenTextures();
         }
         try {
             makeTexture(targetTexture, GL30.GL_RGBA16F, width, height, allocate);
-            attach(targetFramebuffer, targetTexture, "lamp glow");
+            makeTexture(translucentTargetTexture, GL30.GL_RGBA16F, width, height, allocate);
+            attachPair(targetFramebuffer, targetTexture, translucentTargetTexture, "lamp glow");
             targetWidth = width;
             targetHeight = height;
             return true;
         } catch (RuntimeException exception) {
             GL11.glDeleteTextures(targetTexture);
+            GL11.glDeleteTextures(translucentTargetTexture);
             GL30.glDeleteFramebuffers(targetFramebuffer);
             targetTexture = 0;
+            translucentTargetTexture = 0;
             targetFramebuffer = 0;
             failed = true;
             LOGGER.warn("The target of the lamp glow of the weather fog cannot be made, so the fog is drawn without it "
                     + "for the rest of the session.", exception);
             return false;
         }
+    }
+
+    private static void setDrawBuffers(boolean withTranslucent) {
+        drawBuffers.clear();
+        drawBuffers.put(opaqueOutput, GL30.GL_COLOR_ATTACHMENT0);
+        drawBuffers.put(translucentOutput, withTranslucent ? GL30.GL_COLOR_ATTACHMENT1 : GL11.GL_NONE);
+        GL20.glDrawBuffers(drawBuffers);
     }
 
     /**
@@ -355,6 +406,23 @@ public final class LampFogPass {
                     (FloatBuffer) null);
         } finally {
             GL11.glBindTexture(GL11.GL_TEXTURE_2D, previousTexture);
+        }
+    }
+
+    private static void attachPair(int framebuffer, int opaqueTexture, int translucentTexture, String name) {
+        int previousFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
+        try {
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, framebuffer);
+            GL30.glFramebufferTexture2D(GL30.GL_DRAW_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, GL11.GL_TEXTURE_2D,
+                    opaqueTexture, 0);
+            GL30.glFramebufferTexture2D(GL30.GL_DRAW_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT1, GL11.GL_TEXTURE_2D,
+                    translucentTexture, 0);
+            int status = GL30.glCheckFramebufferStatus(GL30.GL_DRAW_FRAMEBUFFER);
+            if (status != GL30.GL_FRAMEBUFFER_COMPLETE) {
+                throw new IllegalStateException("The " + name + " framebuffer is incomplete with status " + status);
+            }
+        } finally {
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, previousFramebuffer);
         }
     }
 
@@ -526,8 +594,10 @@ public final class LampFogPass {
             GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, selfTestFramebuffer);
             RenderSystem.viewport(0, 0, SELF_TEST_RAYS, 1);
             use();
+            setDrawBuffers(false);
             GL20.glUniform1f(eyeExtinctionUniform, SELF_TEST_EXTINCTION);
             GL20.glUniform1f(heightScaleUniform, SELF_TEST_HEIGHT_SCALE);
+            GL20.glUniform1i(hasTranslucentUniform, 0);
             GL20.glUniform1i(selfTestUniform, 1);
             selfTestOffsetBuffer.clear();
             selfTestOffsetBuffer.put(offsets);

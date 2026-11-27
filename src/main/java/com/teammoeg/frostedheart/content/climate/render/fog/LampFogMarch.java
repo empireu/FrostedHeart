@@ -75,7 +75,10 @@ public final class LampFogMarch {
     private int lastSteps;
     private double runningDepth;
     private double depthDistance;
+    private double splitRunningDepth;
+    private boolean splitCaptured;
     private int steps;
+    private final float[] splitScratch = new float[3];
 
     /**
      * Takes a field's uniforms for an eye, as LampFogPass sets them for the shader.
@@ -115,19 +118,60 @@ public final class LampFogMarch {
      */
     public void march(double directionX, double directionY, double directionZ, double endDistance, float fade,
             float[] lifts, OpticalDepth depth, float[] light) {
-        light[0] = 0.0F;
-        light[1] = 0.0F;
-        light[2] = 0.0F;
+        marchSplit(directionX, directionY, directionZ, endDistance, endDistance, fade, lifts, depth, light,
+                splitScratch);
+    }
+
+    /**
+     * Marches a ray from the eye of the last prepare out to endDistance and, when splitDistance is below endDistance,
+     * snapshots the accumulated lamp light at splitDistance in the same walk, scaling both endpoints independently.
+     * Matches lampFogAlongSplit in weather_fog_lamp.fsh.
+     * @param directionX the unit direction of the ray, with directionY and directionZ
+     * @param fade the share the field has faded in by
+     * @param lifts the lamp color of each level from 0 to 15, 3 entries per level
+     * @param opaqueLight receives the red, green and blue the fog adds up to endDistance
+     * @param translucentLight receives the red, green and blue the fog adds up to splitDistance
+     */
+    public void marchSplit(double directionX, double directionY, double directionZ, double endDistance,
+            double splitDistance, float fade, float[] lifts, OpticalDepth depth, float[] opaqueLight,
+            float[] translucentLight) {
+        opaqueLight[0] = 0.0F;
+        opaqueLight[1] = 0.0F;
+        opaqueLight[2] = 0.0F;
+        translucentLight[0] = 0.0F;
+        translucentLight[1] = 0.0F;
+        translucentLight[2] = 0.0F;
         runningDepth = 0.0;
         depthDistance = 0.0;
+        splitRunningDepth = 0.0;
+        boolean splits = splitDistance < endDistance;
+        splitCaptured = !splits;
         steps = 0;
-        marchPieces(directionX, directionY, directionZ, endDistance, fade, lifts, depth, light);
+        marchPieces(directionX, directionY, directionZ, endDistance, splitDistance, fade, lifts, depth, opaqueLight,
+                translucentLight);
         lastSteps = steps;
+        if (!splits || !splitCaptured) {
+            translucentLight[0] = opaqueLight[0];
+            translucentLight[1] = opaqueLight[1];
+            translucentLight[2] = opaqueLight[2];
+            splitRunningDepth = runningDepth;
+        }
+        scaleLight(opaqueLight, runningDepth, endDistance, depth);
+        if (splits) {
+            scaleLight(translucentLight, splitRunningDepth, splitDistance, depth);
+        } else {
+            translucentLight[0] = opaqueLight[0];
+            translucentLight[1] = opaqueLight[1];
+            translucentLight[2] = opaqueLight[2];
+        }
+    }
+
+    private static void scaleLight(float[] light, double peakDepth, double endDistance, OpticalDepth depth) {
         // The light is scaled to the opacity at the ray's end where the depth there lies below the largest found:
-        if (runningDepth > LEAST_SCALED_DEPTH && (light[0] > 0.0F || light[1] > 0.0F || light[2] > 0.0F)) {
+        if (peakDepth > LEAST_SCALED_DEPTH && (light[0] > 0.0F || light[1] > 0.0F || light[2] > 0.0F)) {
             double endDepth = clampedDepth(depth, endDistance);
-            if (endDepth < runningDepth) {
-                double scale = (1.0 - Math.exp(-endDepth)) / (1.0 - Math.exp(-runningDepth));
+            if (endDepth < peakDepth) {
+                double scale = (1.0 - Math.exp(-endDepth)) / (1.0 - Math.exp(-peakDepth));
                 light[0] = (float) (light[0] * scale);
                 light[1] = (float) (light[1] * scale);
                 light[2] = (float) (light[2] * scale);
@@ -136,10 +180,10 @@ public final class LampFogMarch {
     }
 
     /**
-     * Adds the light of the lit pieces along a ray, before the scaling of march.
+     * Adds the light of the lit pieces along a ray, before the scaling of marchSplit.
      */
-    private void marchPieces(double directionX, double directionY, double directionZ, double endDistance, float fade,
-            float[] lifts, OpticalDepth depth, float[] light) {
+    private void marchPieces(double directionX, double directionY, double directionZ, double endDistance,
+            double splitDistance, float fade, float[] lifts, OpticalDepth depth, float[] light, float[] splitLight) {
         double regionStart = 0.0;
         for (int cascade = 0; cascade < count && regionStart < endDistance; cascade++) {
             int base = 3 * cascade;
@@ -176,20 +220,34 @@ public final class LampFogMarch {
                 }
                 double start = Math.max(partStart, pieceStart(cascade, directionX, directionY, directionZ,
                         spanStart));
+                if (!splitCaptured && !(start < splitDistance)) {
+                    captureSplit(light, splitLight);
+                }
                 if (depthDistance != start) {
                     runningDepth = Math.max(runningDepth, clampedDepth(depth, start));
                     depthDistance = start;
                 }
                 if (Math.exp(-runningDepth) < LEAST_TRANSMITTANCE) {
+                    if (!splitCaptured) {
+                        captureSplit(light, splitLight);
+                    }
                     return;
                 }
                 if (!walk(cascade, part == 1, hasNext, bandRate, directionX, directionY, directionZ, start, partEnd,
-                        spanEnd, fade, lifts, depth, light)) {
+                        spanEnd, splitDistance, fade, lifts, depth, light, splitLight)) {
                     return;
                 }
             }
             regionStart = Math.max(regionStart, bandEnd);
         }
+    }
+
+    private void captureSplit(float[] light, float[] splitLight) {
+        splitLight[0] = light[0];
+        splitLight[1] = light[1];
+        splitLight[2] = light[2];
+        splitRunningDepth = runningDepth;
+        splitCaptured = true;
     }
 
     /**
@@ -222,8 +280,8 @@ public final class LampFogMarch {
      * @return whether the march goes on, false once the fog turned opaque or the steps ran out
      */
     private boolean walk(int cascade, boolean inBand, boolean hasNext, double bandRate, double directionX,
-            double directionY, double directionZ, double start, double end, double spanEnd, float fade,
-            float[] lifts, OpticalDepth depth, float[] light) {
+            double directionY, double directionZ, double start, double end, double spanEnd, double splitDistance,
+            float fade, float[] lifts, OpticalDepth depth, float[] light, float[] splitLight) {
         int base = 3 * cascade;
         double rateX = directionX * cellsPerBlock[base];
         double rateY = directionY * cellsPerBlock[base + 1];
@@ -239,6 +297,10 @@ public final class LampFogMarch {
         while (steps < MAXIMUM_STEPS) {
             steps++;
             double exit = Math.min(Math.min(nextX, nextY), Math.min(nextZ, end));
+            boolean splitsHere = !splitCaptured && distance < splitDistance && splitDistance < exit;
+            if (splitsHere) {
+                exit = splitDistance;
+            }
             double middle = 0.5 * (distance + exit);
             double offsetX = middle * directionX;
             double offsetY = middle * directionY;
@@ -268,11 +330,17 @@ public final class LampFogMarch {
                 addLift(lifts, level, absorbed, light);
                 runningDepth = exitDepth;
                 depthDistance = exit;
-                if (Math.exp(-runningDepth) < LEAST_TRANSMITTANCE) {
-                    return false;
-                }
             }
-            if (!(exit < spanEnd)) {
+            if (!splitCaptured && !(exit < splitDistance)) {
+                captureSplit(light, splitLight);
+            }
+            if (Math.exp(-runningDepth) < LEAST_TRANSMITTANCE) {
+                if (!splitCaptured) {
+                    captureSplit(light, splitLight);
+                }
+                return false;
+            }
+            if (!splitsHere && !(exit < spanEnd)) {
                 return true;
             }
             distance = exit;

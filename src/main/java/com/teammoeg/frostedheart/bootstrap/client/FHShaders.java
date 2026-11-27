@@ -79,6 +79,8 @@ public class FHShaders extends Shaders {
     private static boolean weatherFogIntegrateUnloadOnReload;
     private static Shader WEATHER_FOG_COMPOSITE;
     private static boolean weatherFogCompositeUnloadOnReload;
+    private static Shader WEATHER_FOG_TRANSLUCENT_COMPOSITE;
+    private static boolean weatherFogTranslucentCompositeUnloadOnReload;
     private static Shader WEATHER_FOG_LAMP;
     private static boolean weatherFogLampUnloadOnReload;
     private static Shader SNOW_FLAKE_UPDATE;
@@ -345,6 +347,49 @@ public class FHShaders extends Shaders {
             WEATHER_FOG_COMPOSITE.deleteShader();
             WEATHER_FOG_COMPOSITE = null;
         }
+    }
+
+    /**
+     * The fragment stage of the translucent composite of the weather fog, weather_fog.glsl followed by
+     * weather_fog_excess.glsl and weather_fog_translucent_composite.fsh in one source, compiled on first use.
+     */
+    public static Shader getWeatherFogTranslucentComposite() {
+        if (!weatherFogTranslucentCompositeUnloadOnReload) {
+            addReloadListener(FHShaders::unloadWeatherFogTranslucentComposite);
+            weatherFogTranslucentCompositeUnloadOnReload = true;
+        }
+        if (WEATHER_FOG_TRANSLUCENT_COMPOSITE == null) {
+            String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/weather_fog_excess.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/weather_fog_translucent_composite.fsh"));
+            WEATHER_FOG_TRANSLUCENT_COMPOSITE = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
+        }
+        return WEATHER_FOG_TRANSLUCENT_COMPOSITE;
+    }
+
+    /**
+     * Deletes the translucent composite stage of the weather fog after a resource reload, so the next use compiles it
+     * from the new resources.
+     */
+    private static void unloadWeatherFogTranslucentComposite() {
+        if (WEATHER_FOG_TRANSLUCENT_COMPOSITE != null) {
+            WEATHER_FOG_TRANSLUCENT_COMPOSITE.deleteShader();
+            WEATHER_FOG_TRANSLUCENT_COMPOSITE = null;
+        }
+    }
+
+    /**
+     * Reads weather_fog.glsl from the active resource manager for composition into chunk shaders.
+     */
+    public static String readWeatherFogInclude() {
+        return readShaderSource(FHMain.rl("shaders/weather_fog.glsl"));
+    }
+
+    /**
+     * Reads weather_fog_excess.glsl from the active resource manager for composition into chunk shaders.
+     */
+    public static String readWeatherFogExcessInclude() {
+        return readShaderSource(FHMain.rl("shaders/weather_fog_excess.glsl"));
     }
 
     /**

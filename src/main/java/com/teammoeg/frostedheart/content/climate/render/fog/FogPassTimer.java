@@ -27,72 +27,64 @@ import org.lwjgl.opengl.GL33C;
 import org.lwjgl.opengl.GLCapabilities;
 
 import java.util.Arrays;
-import java.util.Locale;
 
 /**
  * Measures the CPU and GPU time of each pass of the fog's draw, as means, medians and maxima over the frames kept. The
  * GPU times come from timestamp queries, read some frames later so that the CPU never waits for them. Without timer
  * queries only the CPU times are measured.
  * <p>
- * The boundaries of a frame split its draw into the passes. begin writes boundary 0, mark writes the boundaries 1 to
- * PASS_COUNT - 1, and end writes boundary PASS_COUNT, so that pass i lasts from boundary i to boundary i + 1 and the
- * total from boundary 0 to the last boundary. The boundaries of a frame form one query set, of which QUERY_SETS are in
- * flight in turn. Nothing that runs every frame allocates.
+ * Passes need not be contiguous: each pass that runs in a frame wraps its work in beginSegment and endSegment, so
+ * work drawn between fog passes (such as Embeddium's translucent terrain or behind-translucent snowfall) is not
+ * charged to the fog, and skipped passes record 0. The total is the sum of the measured fog passes. Nothing that runs
+ * every frame allocates.
  * <p>
  * Render thread only.
  */
 @OnlyIn(Dist.CLIENT)
 public final class FogPassTimer {
+    public static final int PASS_SETUP = FogPassTiming.PASS_SETUP;
+    public static final int PASS_SHARE_VOLUME = FogPassTiming.PASS_SHARE_VOLUME;
+    public static final int PASS_INJECT = FogPassTiming.PASS_INJECT;
+    public static final int PASS_INTEGRATE = FogPassTiming.PASS_INTEGRATE;
+    public static final int PASS_LAMP_GLOW = FogPassTiming.PASS_LAMP_GLOW;
+    public static final int PASS_OPAQUE_COMPOSITE = FogPassTiming.PASS_OPAQUE_COMPOSITE;
+    public static final int PASS_TRANSLUCENT_COMPOSITE = FogPassTiming.PASS_TRANSLUCENT_COMPOSITE;
     /**
-     * The number of passes that the boundaries split the draw into.
+     * The number of passes measured per frame.
      */
-    public static final int PASS_COUNT = 6;
+    public static final int PASS_COUNT = FogPassTiming.PASS_COUNT;
     /**
      * The number of query sets in flight, of which the oldest is collected every frame.
      */
     private static final int QUERY_SETS = 4;
-    private static final int AVERAGED_FRAMES = 120;
-    private static final int BOUNDARY_COUNT = PASS_COUNT + 1;
-    /**
-     * The name of each pass, and of the total, which is the sum of all passes and comes last.
-     */
-    private static final String[] SEGMENT_NAMES = {"setup", "share volume", "inject", "integrate", "lamp glow",
-            "composite", "total"};
+    private static final int QUERIES_PER_SET = PASS_COUNT * 2;
 
-    private final int[][] boundaryQueries = new int[QUERY_SETS][BOUNDARY_COUNT];
+    private final FogPassTiming timing = new FogPassTiming();
+    private final int[][] segmentQueries = new int[QUERY_SETS][QUERIES_PER_SET];
     private final boolean[] pending = new boolean[QUERY_SETS];
-    private final long[] frameCpuNanos = new long[BOUNDARY_COUNT];
-    private final long[] gpuSamples = new long[(PASS_COUNT + 1) * AVERAGED_FRAMES];
-    private final long[] cpuSamples = new long[(PASS_COUNT + 1) * AVERAGED_FRAMES];
-    private final long[] gpuSums = new long[PASS_COUNT + 1];
-    private final long[] cpuSums = new long[PASS_COUNT + 1];
-    private final long[] sortedSamples = new long[AVERAGED_FRAMES];
-    private int gpuCount;
-    private int gpuNext;
-    private int cpuCount;
-    private int cpuNext;
+    private final int[] pendingMask = new int[QUERY_SETS];
+    private final int[] pendingLastQuery = new int[QUERY_SETS];
+    private final long[] collectedGpuNanos = new long[PASS_COUNT];
     private int nextQuerySet;
-    private int nextBoundary;
-    private boolean active;
+    private int frameLastQuery;
     private boolean measuringGpu;
     private boolean checked;
     private boolean supported;
 
     /**
-     * Starts a frame and writes its first boundary. A frame whose end never came is dropped here without its queries
-     * being read. Allocates nothing.
+     * Starts a frame. A frame whose endFrame never came is dropped here without its queries being read. Allocates
+     * nothing.
      */
-    public void begin() {
-        active = true;
+    public void beginFrame() {
+        timing.beginFrame();
+        frameLastQuery = 0;
         measuringGpu = false;
-        nextBoundary = 1;
-        frameCpuNanos[0] = System.nanoTime();
         if (!checked) {
             GLCapabilities capabilities = GL.getCapabilities();
             supported = capabilities.OpenGL33 || capabilities.GL_ARB_timer_query;
             if (supported) {
                 for (int querySet = 0; querySet < QUERY_SETS; querySet++) {
-                    GL15C.glGenQueries(boundaryQueries[querySet]);
+                    GL15C.glGenQueries(segmentQueries[querySet]);
                 }
             }
             checked = true;
@@ -102,102 +94,91 @@ public final class FogPassTimer {
         }
         collect();
         measuringGpu = !pending[nextQuerySet];
+    }
+
+    /**
+     * Starts timing one fog pass. A pass may run at most once per frame, and passes may not overlap. Allocates nothing.
+     * @param pass the pass index, from 0 to PASS_COUNT - 1
+     */
+    public void beginSegment(int pass) {
+        if (!timing.beginSegment(pass, System.nanoTime())) {
+            return;
+        }
         if (measuringGpu) {
-            GL33C.glQueryCounter(boundaryQueries[nextQuerySet][0], GL33C.GL_TIMESTAMP);
+            GL33C.glQueryCounter(segmentQueries[nextQuerySet][2 * pass], GL33C.GL_TIMESTAMP);
         }
     }
 
     /**
-     * Writes the boundary that ends the pass with the index boundary - 1. Every boundary must come every frame, in
-     * order, so that a pass that was not drawn reads about nothing. A call out of order is ignored. Allocates nothing.
-     * @param boundary the index of the boundary, from 1 to PASS_COUNT - 1
+     * Finishes timing the active fog pass. A mismatched call is ignored. Allocates nothing.
+     * @param pass the pass index passed to beginSegment
      */
-    public void mark(int boundary) {
-        if (!active || boundary < 1 || boundary >= PASS_COUNT || boundary != nextBoundary) {
+    public void endSegment(int pass) {
+        if (!timing.endSegment(pass, System.nanoTime())) {
             return;
         }
-        frameCpuNanos[boundary] = System.nanoTime();
         if (measuringGpu) {
-            GL33C.glQueryCounter(boundaryQueries[nextQuerySet][boundary], GL33C.GL_TIMESTAMP);
+            int endQuery = segmentQueries[nextQuerySet][2 * pass + 1];
+            GL33C.glQueryCounter(endQuery, GL33C.GL_TIMESTAMP);
+            frameLastQuery = endQuery;
         }
-        nextBoundary = boundary + 1;
     }
 
     /**
-     * Writes the last boundary, records the times of the frame and hands its query set to the collection. A frame whose
-     * boundaries did not all come, or an end without a begin, is dropped. Allocates nothing.
+     * Records the times of the frame and hands its query set to collection. A frame with an unclosed pass or no
+     * measured pass is dropped. Allocates nothing.
      */
-    public void end() {
-        if (!active) {
-            return;
-        }
-        active = false;
-        if (nextBoundary != PASS_COUNT) {
+    public void endFrame() {
+        int completedMask = timing.endFrame();
+        if (completedMask == 0) {
             measuringGpu = false;
             return;
         }
-        frameCpuNanos[PASS_COUNT] = System.nanoTime();
-        if (measuringGpu) {
-            GL33C.glQueryCounter(boundaryQueries[nextQuerySet][PASS_COUNT], GL33C.GL_TIMESTAMP);
+        if (measuringGpu && frameLastQuery != 0) {
+            pendingMask[nextQuerySet] = completedMask;
+            pendingLastQuery[nextQuerySet] = frameLastQuery;
             pending[nextQuerySet] = true;
             nextQuerySet = (nextQuerySet + 1) % QUERY_SETS;
-            measuringGpu = false;
         }
-        recordCpuSamples();
+        measuringGpu = false;
     }
 
     /**
-     * Reads the queries of every set whose last boundary is available, which makes all its boundaries available, and
-     * keeps the time of each pass and of the total. Allocates nothing.
+     * Drops the in-progress frame without recording samples or queueing GPU queries. Allocates nothing.
+     */
+    public void abortFrame() {
+        timing.abortFrame();
+        frameLastQuery = 0;
+        measuringGpu = false;
+    }
+
+    /**
+     * Reads the queries of every set whose last recorded timestamp is available, which makes all earlier timestamps in
+     * that set available, and keeps the time of each pass and of the total. Allocates nothing.
      */
     private void collect() {
         for (int querySet = 0; querySet < QUERY_SETS; querySet++) {
             if (!pending[querySet]) {
                 continue;
             }
-            if (GL15C.glGetQueryObjecti(boundaryQueries[querySet][PASS_COUNT], GL15C.GL_QUERY_RESULT_AVAILABLE) == 0) {
+            if (GL15C.glGetQueryObjecti(pendingLastQuery[querySet], GL15C.GL_QUERY_RESULT_AVAILABLE) == 0) {
                 continue;
             }
             pending[querySet] = false;
-            long previousNanos = GL33C.glGetQueryObjecti64(boundaryQueries[querySet][0], GL15C.GL_QUERY_RESULT);
-            long firstNanos = previousNanos;
+            int mask = pendingMask[querySet];
             for (int pass = 0; pass < PASS_COUNT; pass++) {
-                long boundaryNanos = GL33C.glGetQueryObjecti64(boundaryQueries[querySet][pass + 1],
-                        GL15C.GL_QUERY_RESULT);
-                recordGpuSample(pass, boundaryNanos - previousNanos);
-                previousNanos = boundaryNanos;
+                long nanos = 0L;
+                if ((mask & (1 << pass)) != 0) {
+                    long startNanos = GL33C.glGetQueryObjecti64(segmentQueries[querySet][2 * pass],
+                            GL15C.GL_QUERY_RESULT);
+                    long endNanos = GL33C.glGetQueryObjecti64(segmentQueries[querySet][2 * pass + 1],
+                            GL15C.GL_QUERY_RESULT);
+                    nanos = endNanos > startNanos ? endNanos - startNanos : 0L;
+                }
+                collectedGpuNanos[pass] = nanos;
             }
-            recordGpuSample(PASS_COUNT, previousNanos - firstNanos);
-            gpuNext = (gpuNext + 1) % AVERAGED_FRAMES;
-            gpuCount = Math.min(gpuCount + 1, AVERAGED_FRAMES);
+            timing.recordGpuFrame(collectedGpuNanos);
         }
-    }
-
-    /**
-     * Keeps the GPU time of one pass of a collected frame in place of the oldest one.
-     */
-    private void recordGpuSample(int pass, long nanos) {
-        int index = pass * AVERAGED_FRAMES + gpuNext;
-        gpuSums[pass] += nanos - gpuSamples[index];
-        gpuSamples[index] = nanos;
-    }
-
-    /**
-     * Keeps the CPU times of the passes and of the total of the frame that just ended, each in place of the oldest one.
-     */
-    private void recordCpuSamples() {
-        for (int pass = 0; pass < PASS_COUNT; pass++) {
-            int index = pass * AVERAGED_FRAMES + cpuNext;
-            long nanos = frameCpuNanos[pass + 1] - frameCpuNanos[pass];
-            cpuSums[pass] += nanos - cpuSamples[index];
-            cpuSamples[index] = nanos;
-        }
-        int totalIndex = PASS_COUNT * AVERAGED_FRAMES + cpuNext;
-        long totalNanos = frameCpuNanos[PASS_COUNT] - frameCpuNanos[0];
-        cpuSums[PASS_COUNT] += totalNanos - cpuSamples[totalIndex];
-        cpuSamples[totalIndex] = totalNanos;
-        cpuNext = (cpuNext + 1) % AVERAGED_FRAMES;
-        cpuCount = Math.min(cpuCount + 1, AVERAGED_FRAMES);
     }
 
     /**
@@ -205,57 +186,26 @@ public final class FogPassTimer {
      * example after a setting changed the passes. The queries are kept and are written again by the following frames.
      */
     public void reset() {
-        Arrays.fill(gpuSamples, 0L);
-        Arrays.fill(cpuSamples, 0L);
-        Arrays.fill(gpuSums, 0L);
-        Arrays.fill(cpuSums, 0L);
+        timing.reset();
         Arrays.fill(pending, false);
-        gpuCount = 0;
-        gpuNext = 0;
-        cpuCount = 0;
-        cpuNext = 0;
+        Arrays.fill(pendingMask, 0);
+        Arrays.fill(pendingLastQuery, 0);
     }
 
     /**
      * The GPU mean, median and maximum and the CPU mean of each pass and of the total, in milliseconds with three
-     * decimals, for the client command. The median of an even number of samples is the upper of the two middle ones,
-     * and a GPU part that is not measured says so instead of giving numbers. Allocates.
+     * decimals, for the client command. Allocates.
      * @return the passes separated by semicolons, then the number of frames they stand for
      */
     public String describe() {
-        if (cpuCount == 0) {
-            return "no pass timed yet";
-        }
-        StringBuilder line = new StringBuilder();
-        for (int pass = 0; pass <= PASS_COUNT; pass++) {
-            if (pass > 0) {
-                line.append("; ");
-            }
-            appendPass(line, pass);
-        }
-        line.append(String.format(Locale.ROOT, "; over %d frames", gpuCount > 0 ? gpuCount : cpuCount));
-        return line.toString();
+        return timing.describe(supported);
     }
 
     /**
-     * Appends the means, the median and the maximum of one pass, or of the total when the pass is PASS_COUNT.
+     * Describes only the total segment of the fog draw in the same format as SkyDrawTimer.describe(), so the total
+     * draw time excludes non-fog passes drawn between froxel build and translucent composite. Allocates.
      */
-    private void appendPass(StringBuilder line, int pass) {
-        line.append(SEGMENT_NAMES[pass]);
-        line.append(' ');
-        if (supported && gpuCount > 0) {
-            for (int sample = 0; sample < gpuCount; sample++) {
-                sortedSamples[sample] = gpuSamples[pass * AVERAGED_FRAMES + sample];
-            }
-            Arrays.sort(sortedSamples, 0, gpuCount);
-            line.append(String.format(Locale.ROOT, "GPU mean %.3f, median %.3f, max %.3f ms",
-                    gpuSums[pass] / 1.0e6 / gpuCount, sortedSamples[gpuCount / 2] / 1.0e6,
-                    sortedSamples[gpuCount - 1] / 1.0e6));
-        } else if (supported) {
-            line.append("GPU not read yet");
-        } else {
-            line.append("GPU not measured without timer queries");
-        }
-        line.append(String.format(Locale.ROOT, ", CPU %.3f ms", cpuSums[pass] / 1.0e6 / cpuCount));
+    public String describeTotal() {
+        return timing.describeTotal(supported);
     }
 }

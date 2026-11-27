@@ -26,6 +26,7 @@ import com.teammoeg.frostedheart.bootstrap.reference.FHParticleTypes;
 import com.teammoeg.frostedheart.bootstrap.reference.FHSoundEvents;
 import com.teammoeg.frostedheart.content.climate.render.InfraredViewRenderer;
 import com.teammoeg.frostedheart.content.climate.render.fog.SnowfallRenderer;
+import com.teammoeg.frostedheart.content.climate.render.fog.WeatherFogRenderer;
 import com.teammoeg.frostedheart.content.climate.render.sky.CalculatedSkyRenderer;
 import com.teammoeg.frostedheart.content.climate.render.weather.ClientWeatherFrame;
 import com.teammoeg.frostedheart.content.climate.render.weather.ClientWeatherState;
@@ -111,6 +112,7 @@ public abstract class LevelRendererMixin {
     @Inject(method = "renderLevel", at = @At(value = "HEAD"))
     private void beforeRenderLever(PoseStack pPoseStack, float pPartialTick, long pFinishNanoTime, boolean pRenderBlockOutline, Camera pCamera, GameRenderer pGameRenderer, LightTexture pLightTexture, Matrix4f pProjectionMatrix, CallbackInfo ci) {
         InfraredViewRenderer.setCameraPose(pPoseStack);
+        WeatherFogRenderer.beginFrame(pCamera, pPartialTick);
         WeatherRenderingMode mode = FHConfig.CLIENT.weatherRenderChanges.get()
                 ? FHConfig.CLIENT.weatherRenderingMode.get()
                 : WeatherRenderingMode.COMPATIBILITY;

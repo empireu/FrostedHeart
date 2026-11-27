@@ -375,6 +375,12 @@ public final class LampLightGameTests {
         Map<String, Double> composite = parseShaderConstants(helper, "weather_fog_composite.fsh");
         checkConstant(helper, "weather_fog_composite.fsh", composite, "LAMP_SKY_DISTANCE",
                 LampFogMarch.SKY_DISTANCE);
+        Map<String, Double> translucentComposite = parseShaderConstants(helper,
+                "weather_fog_translucent_composite.fsh");
+        checkConstant(helper, "weather_fog_translucent_composite.fsh", translucentComposite, "LAMP_SKY_DISTANCE",
+                LampFogMarch.SKY_DISTANCE);
+        checkConstant(helper, "weather_fog_translucent_composite.fsh", translucentComposite, "LEAST_ALPHA",
+                TranslucentFogShader.LEAST_ALPHA);
         helper.succeed();
     }
 
@@ -511,6 +517,99 @@ public final class LampLightGameTests {
         helper.assertTrue(lit > rays / 5, "only " + lit + " rays are lit, so the check shows little");
         helper.assertTrue(clippedSteps < wholeSteps, "keeping to the lit boxes took " + clippedSteps + " pieces, not "
                 + "fewer than the " + wholeSteps + " of walking every piece");
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 600)
+    public static void lampSplitMarchMatchesIndependentMarches(GameTestHelper helper) {
+        FakeSource source = scene();
+        LampLightField field = filledField(source, EYE_X, EYE_Y, EYE_Z);
+        LampFogMarch march = new LampFogMarch();
+        helper.assertTrue(march.prepare(field, EYE_X, EYE_Y, EYE_Z), "the scene holds no light");
+        float[] lifts = testLifts();
+        float[] splitOpaque = new float[3];
+        float[] splitTranslucent = new float[3];
+        float[] singleOpaque = new float[3];
+        float[] singleTranslucent = new float[3];
+        double[][] targets = {{BASE_X + 3, GROUND_Y + 1, BASE_Z + 2}, {BASE_X - 22, GROUND_Y + 2, BASE_Z + 13},
+                {BASE_X + 200, GROUND_Y + 1, BASE_Z + 150}, {BASE_X - 400, GROUND_Y + 2, BASE_Z - 300},
+                {BASE_X + 56, GROUND_Y + 4, BASE_Z + 56}};
+        double[] splitFractions = {0.0, 0.15, 0.45, 0.75, 1.0};
+        Random random = new Random(43L);
+        int litTranslucent = 0;
+        int litOpaque = 0;
+        for (int ray = 0; ray < 200; ray++) {
+            double[] target = targets[ray % targets.length];
+            double dx = target[0] + random.nextGaussian() * 4.0 - EYE_X;
+            double dy = target[1] + random.nextGaussian() * 2.0 - EYE_Y;
+            double dz = target[2] + random.nextGaussian() * 4.0 - EYE_Z;
+            double length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            double unitX = dx / length;
+            double unitY = dy / length;
+            double unitZ = dz / length;
+            double endDistance = length * (0.6 + random.nextDouble());
+            double splitDistance = endDistance * splitFractions[ray % splitFractions.length];
+            LampFogMarch.OpticalDepth depth = distance -> 0.004 * distance;
+            march.marchSplit(unitX, unitY, unitZ, endDistance, splitDistance, 1.0F, lifts, depth, splitOpaque,
+                    splitTranslucent);
+            march.march(unitX, unitY, unitZ, endDistance, 1.0F, lifts, depth, singleOpaque);
+            march.march(unitX, unitY, unitZ, splitDistance, 1.0F, lifts, depth, singleTranslucent);
+            float opaqueBrightest = Math.max(singleOpaque[0], Math.max(singleOpaque[1], singleOpaque[2]));
+            float translucentBrightest = Math.max(singleTranslucent[0],
+                    Math.max(singleTranslucent[1], singleTranslucent[2]));
+            if (opaqueBrightest > 1.0e-3F) {
+                litOpaque++;
+            }
+            if (translucentBrightest > 1.0e-3F) {
+                litTranslucent++;
+            }
+            for (int channel = 0; channel < 3; channel++) {
+                helper.assertTrue(
+                        Math.abs(splitTranslucent[channel] - singleTranslucent[channel])
+                                <= 1.0e-4 * translucentBrightest + 1.0e-6,
+                        "ray " + ray + " translucent split at " + splitDistance + " of " + endDistance
+                                + " gives " + splitTranslucent[channel] + " instead of "
+                                + singleTranslucent[channel]);
+                helper.assertTrue(
+                        Math.abs(splitOpaque[channel] - singleOpaque[channel])
+                                <= 2.0e-2 * opaqueBrightest + 5.0e-4,
+                        "ray " + ray + " opaque split at " + splitDistance + " of " + endDistance
+                                + " gives " + splitOpaque[channel] + " instead of " + singleOpaque[channel]);
+            }
+        }
+        helper.assertTrue(litOpaque > 40 && litTranslucent > 20, "too few lit split rays (" + litOpaque
+                + " opaque, " + litTranslucent + " translucent)");
+
+        // Verify independent end-opacity scaling under falling optical depth (as inside a shelter):
+        LampLightField even = evenField();
+        march.prepare(even, EVEN_EYE_X, EVEN_EYE_Y, EVEN_EYE_Z);
+        LampFogMarch.OpticalDepth fallingDepth = distance -> distance <= 40.0 ? 0.075 * distance : 1.0;
+        double dirX = Math.cos(0.7);
+        double dirZ = Math.sin(0.7);
+        march.marchSplit(dirX, 0.0, dirZ, 200.0, 20.0, 1.0F, lifts, fallingDepth, splitOpaque, splitTranslucent);
+        double expectedOpaque = EVEN_LIFT[0] * (1.0 - Math.exp(-1.0));
+        double expectedTranslucent = EVEN_LIFT[0] * (1.0 - Math.exp(-1.5));
+        helper.assertTrue(Math.abs(splitOpaque[0] - expectedOpaque) <= 1.0e-4 * expectedOpaque,
+                "falling depth split opaque gives " + splitOpaque[0] + " instead of " + expectedOpaque);
+        helper.assertTrue(Math.abs(splitTranslucent[0] - expectedTranslucent) <= 1.0e-4 * expectedTranslucent,
+                "falling depth split translucent gives " + splitTranslucent[0] + " instead of "
+                        + expectedTranslucent);
+
+        // Verify warm split march allocates nothing:
+        com.sun.management.ThreadMXBean threads = ManagementFactory.getThreadMXBean()
+                instanceof com.sun.management.ThreadMXBean counter && counter.isThreadAllocatedMemorySupported()
+                && counter.isThreadAllocatedMemoryEnabled() ? counter : null;
+        if (threads != null) {
+            LampFogMarch.OpticalDepth linear = distance -> 0.005 * distance;
+            march.marchSplit(dirX, 0.0, dirZ, 120.0, 35.0, 1.0F, lifts, linear, splitOpaque, splitTranslucent);
+            long before = threads.getCurrentThreadAllocatedBytes();
+            for (int iteration = 0; iteration < 32; iteration++) {
+                march.marchSplit(dirX, 0.0, dirZ, 120.0, 10.0 + iteration * 3.0, 1.0F, lifts, linear, splitOpaque,
+                        splitTranslucent);
+            }
+            long allocated = threads.getCurrentThreadAllocatedBytes() - before;
+            helper.assertTrue(allocated == 0L, "warm marchSplit allocated " + allocated + " bytes");
+        }
         helper.succeed();
     }
 
