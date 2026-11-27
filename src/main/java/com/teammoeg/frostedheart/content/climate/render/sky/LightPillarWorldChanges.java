@@ -20,6 +20,7 @@
 package com.teammoeg.frostedheart.content.climate.render.sky;
 
 import com.teammoeg.frostedheart.FHMain;
+import com.teammoeg.frostedheart.content.climate.render.fog.ClientLampLight;
 import com.teammoeg.frostedheart.content.climate.render.fog.ClientSnowField;
 import it.unimi.dsi.fastutil.objects.Reference2IntMap;
 import it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap;
@@ -52,7 +53,8 @@ import java.util.Locale;
  * received from the server from ClientPacketListener.readSectionList, and chunk columns from the Forge chunk events.
  * The hooks only queue, and the client tick takes the work. The queue follows the level of the latest hook call, and
  * it queues sections only while LightPillarSources tracks. Block changes and chunks that arrive also go to DustColumns
- * and ClientSnowField first, and block light computed or received goes to DustLights. Client thread only.
+ * and ClientSnowField first, block light computed or received goes to DustLights, and block and sky light computed or
+ * received and chunks that unload go to ClientLampLight. Client thread only.
  */
 @OnlyIn(Dist.CLIENT)
 @Mod.EventBusSubscriber(modid = FHMain.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE, value = Dist.CLIENT)
@@ -115,6 +117,7 @@ public final class LightPillarWorldChanges {
      */
     public static void onLightUpdated(ClientLevel level, LightLayer layer, SectionPos section) {
         followLevel(level);
+        ClientLampLight.onLightUpdated(level, section);
         if (layer == LightLayer.BLOCK) {
             DustLights.onLightUpdated(level, section);
         }
@@ -133,6 +136,8 @@ public final class LightPillarWorldChanges {
     public static void onLightReceived(ClientLevel level, int chunkX, int chunkZ, LightLayer layer, BitSet dataMask,
             BitSet emptyMask, int lowestLightSection, int lightSectionCount) {
         followLevel(level);
+        ClientLampLight.onLightReceived(level, chunkX, chunkZ, dataMask, emptyMask, lowestLightSection,
+                lightSectionCount);
         if (layer == LightLayer.BLOCK) {
             DustLights.onLightReceived(level, chunkX, chunkZ, dataMask, emptyMask, lowestLightSection,
                     lightSectionCount);
@@ -180,6 +185,7 @@ public final class LightPillarWorldChanges {
         }
         followLevel(level);
         ChunkPos chunk = event.getChunk().getPos();
+        ClientLampLight.onChunkUnloaded(level, chunk.x, chunk.z);
         queue.onColumnUnloaded(chunk.toLong());
         if (queue.isTracking()) {
             currentSecond.columnsUnloaded++;

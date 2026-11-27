@@ -60,6 +60,7 @@ public final class FogSettingsGameTests {
         checkNumberSetting(helper, SkySetting.FOG_HEIGHT_SCALE, "fogHeightScale", 128.0, 16.0, 1024.0);
         checkNumberSetting(helper, SkySetting.FOG_LEAF_POROSITY, "fogLeafPorosity", 0.3, 0.0, 1.0);
         checkNumberSetting(helper, SkySetting.FOG_FIELD_BUDGET_MICROS, "fogFieldBudgetMicros", 500.0, 50.0, 5000.0);
+        checkNumberSetting(helper, SkySetting.LAMP_FIELD_BUDGET_MICROS, "lampFieldBudgetMicros", 500.0, 50.0, 5000.0);
         checkNumberSetting(helper, SkySetting.FOG_SNOW_DECAY_LENGTH, "fogSnowDecayLength", 1.5, 0.25, 4.3);
         checkNumberSetting(helper, SkySetting.FOG_BLIZZARD_DECAY_LENGTH, "fogBlizzardDecayLength", 4.0, 0.25, 4.3);
         checkNumberSetting(helper, SkySetting.FOG_FIELD_RADIUS, "fogFieldRadius", 32.0, 12.0, 40.0);
@@ -90,7 +91,7 @@ public final class FogSettingsGameTests {
                 SkySetting.SNOW_CAVITY_BRAKE_LENGTH, SkySetting.SNOW_CAVITY_SWIRL, SkySetting.SNOW_CAVITY_DOWNDRAFT,
                 SkySetting.FOG_ENABLED, SkySetting.FOG_SNOW_VISIBILITY, SkySetting.FOG_BLIZZARD_VISIBILITY,
                 SkySetting.FOG_HEIGHT_SCALE, SkySetting.FOG_LEAF_POROSITY, SkySetting.FOG_FIELD_BUDGET_MICROS,
-                SkySetting.FOG_SNOW_DECAY_LENGTH, SkySetting.FOG_BLIZZARD_DECAY_LENGTH, SkySetting.FOG_FIELD_RADIUS,
+                SkySetting.LAMP_FIELD_BUDGET_MICROS, SkySetting.FOG_SNOW_DECAY_LENGTH, SkySetting.FOG_BLIZZARD_DECAY_LENGTH, SkySetting.FOG_FIELD_RADIUS,
                 SkySetting.FOG_FROXEL_DIVISOR, SkySetting.FOG_FROXEL_SLICES, SkySetting.FOG_FROXEL_RANGE,
                 SkySetting.FOG_SNOW_STRUCTURE_SHARE, SkySetting.FOG_BLIZZARD_STRUCTURE_SHARE,
                 SkySetting.FOG_STRUCTURE_COVERAGE, SkySetting.FOG_STRUCTURE_SIZE, SkySetting.FOG_STRUCTURE_STRETCH,

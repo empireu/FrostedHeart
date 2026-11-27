@@ -193,6 +193,9 @@ public enum SkySetting {
     FOG_FIELD_BUDGET_MICROS("fogFieldBudgetMicros", "Microseconds per frame spent reading blocks and finding where "
             + "snow reaches, for the fog's shelter. More makes the fog settle sooner after a teleport and keep up in "
             + "fast flight, at a cost in frame time.", Rebuilds.NOTHING, 500.0, 50.0, 5000.0),
+    LAMP_FIELD_BUDGET_MICROS("lampFieldBudgetMicros", "Microseconds per frame spent reading the block light of lamps "
+            + "for the light they give the fog, the snow, and diamond dust. More makes far lamps show sooner after a "
+            + "teleport and keep up in fast flight, at a cost in frame time.", Rebuilds.NOTHING, 500.0, 50.0, 5000.0),
     FOG_SNOW_DECAY_LENGTH("fogSnowDecayLength", "Distance in blocks over which the fog of snowfall thins going under "
             + "cover, by a factor of about 2.7. Larger lets snow fog reach deeper under porches and canopies.",
             Rebuilds.NOTHING, 1.5, 0.25, 4.3),

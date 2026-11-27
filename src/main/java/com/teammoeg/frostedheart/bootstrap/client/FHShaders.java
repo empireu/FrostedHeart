@@ -90,6 +90,9 @@ public class FHShaders extends Shaders {
     private static boolean snowSmoothBuildUnloadOnReload;
     private static Shader FOG_CAVITY_BUILD;
     private static boolean fogCavityBuildUnloadOnReload;
+    private static Shader LAMP_LIGHT_DEBUG_VERTEX;
+    private static Shader LAMP_LIGHT_DEBUG_FRAGMENT;
+    private static boolean lampLightDebugUnloadOnReload;
     public static Shader getCalculatedSky() {
         if (CALCULATED_SKY == null) {
             runAndAddReloadListener(() -> CALCULATED_SKY = load(Shader.ShaderType.FRAGMENT, FHMain.rl("calculated_sky")));
@@ -494,6 +497,55 @@ public class FHShaders extends Shaders {
             SNOW_FLAKES_FRAGMENT.deleteShader();
             SNOW_FLAKES_VERTEX = null;
             SNOW_FLAKES_FRAGMENT = null;
+        }
+    }
+
+    /**
+     * The vertex stage of the debug view of the lamp light field. Both stages are lamp_light.glsl followed by
+     * lamp_light_debug.glsl, compiled with a define for each.
+     */
+    public static Shader getLampLightDebugVertex() {
+        loadLampLightDebug();
+        return LAMP_LIGHT_DEBUG_VERTEX;
+    }
+
+    public static Shader getLampLightDebugFragment() {
+        loadLampLightDebug();
+        return LAMP_LIGHT_DEBUG_FRAGMENT;
+    }
+
+    private static void loadLampLightDebug() {
+        if (!lampLightDebugUnloadOnReload) {
+            addReloadListener(FHShaders::unloadLampLightDebug);
+            lampLightDebugUnloadOnReload = true;
+        }
+        if (LAMP_LIGHT_DEBUG_VERTEX == null) {
+            String source = readShaderSource(FHMain.rl("shaders/lamp_light.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/lamp_light_debug.glsl"));
+            Shader vertex = Shader.loadShader(Shader.ShaderType.VERTEX, "#version 150\n#define VERTEX_SHADER\n" + source);
+            Shader fragment;
+            try {
+                fragment = Shader.loadShader(Shader.ShaderType.FRAGMENT,
+                        "#version 150\n#define FRAGMENT_SHADER\n" + source);
+            } catch (RuntimeException exception) {
+                vertex.deleteShader();
+                throw exception;
+            }
+            LAMP_LIGHT_DEBUG_VERTEX = vertex;
+            LAMP_LIGHT_DEBUG_FRAGMENT = fragment;
+        }
+    }
+
+    /**
+     * Deletes the stages of the lamp light debug view after a resource reload, so the next use compiles them from the
+     * new resources.
+     */
+    private static void unloadLampLightDebug() {
+        if (LAMP_LIGHT_DEBUG_VERTEX != null) {
+            LAMP_LIGHT_DEBUG_VERTEX.deleteShader();
+            LAMP_LIGHT_DEBUG_FRAGMENT.deleteShader();
+            LAMP_LIGHT_DEBUG_VERTEX = null;
+            LAMP_LIGHT_DEBUG_FRAGMENT = null;
         }
     }
 

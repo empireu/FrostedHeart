@@ -26,7 +26,11 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.teammoeg.frostedheart.FHMain;
+import com.teammoeg.frostedheart.content.climate.render.fog.ClientLampLight;
 import com.teammoeg.frostedheart.content.climate.render.fog.ClientSnowField;
+import com.teammoeg.frostedheart.content.climate.render.fog.LampLightDebugView;
+import com.teammoeg.frostedheart.content.climate.render.fog.LampLightField;
+import com.teammoeg.frostedheart.content.climate.render.fog.LampLightTextures;
 import com.teammoeg.frostedheart.content.climate.render.fog.SnowFieldTextures;
 import com.teammoeg.frostedheart.content.climate.render.fog.SnowfallRenderer;
 import com.teammoeg.frostedheart.content.climate.render.fog.WeatherFogRenderer;
@@ -82,6 +86,14 @@ public final class CalculatedSkyClientCommand {
                                 .executes(CalculatedSkyClientCommand::setDebugMode))))
                 .then(literal("dust").executes(CalculatedSkyClientCommand::dust))
                 .then(literal("snow").executes(CalculatedSkyClientCommand::snow))
+                .then(literal("lamps").executes(CalculatedSkyClientCommand::lamps)
+                        .then(literal("verify").executes(CalculatedSkyClientCommand::verifyLampTextures))
+                        .then(literal("debug").then(literal("off").executes(context -> showLampCascade(context,
+                                        LampLightDebugView.OFF)))
+                                .then(Commands.argument("cascade",
+                                        IntegerArgumentType.integer(0, LampLightField.CASCADE_COUNT - 1))
+                                        .executes(context -> showLampCascade(context,
+                                                IntegerArgumentType.getInteger(context, "cascade"))))))
                 .then(literal("fog").executes(CalculatedSkyClientCommand::fog)
                         .then(literal("verify").executes(CalculatedSkyClientCommand::verifyFogTextures))
                         .then(literal("selftest").executes(CalculatedSkyClientCommand::fogSelfTest))
@@ -194,6 +206,24 @@ public final class CalculatedSkyClientCommand {
 
     private static int snow(CommandContext<CommandSourceStack> context) {
         send(context, SnowfallRenderer.describe());
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int lamps(CommandContext<CommandSourceStack> context) {
+        send(context, ClientLampLight.describe());
+        send(context, LampLightTextures.describe());
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int verifyLampTextures(CommandContext<CommandSourceStack> context) {
+        for (String line : ClientLampLight.verifyTextures()) {
+            send(context, line);
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int showLampCascade(CommandContext<CommandSourceStack> context, int cascade) {
+        send(context, LampLightDebugView.show(cascade));
         return Command.SINGLE_SUCCESS;
     }
 
