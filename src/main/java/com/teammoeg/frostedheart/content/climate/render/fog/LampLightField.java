@@ -25,6 +25,7 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.DataLayer;
 
 import javax.annotation.Nullable;
+import java.util.Arrays;
 
 /**
  * The block light of the lamps around the eye as it lights outdoor air, kept in up to CASCADE_COUNT cascades of
@@ -42,6 +43,9 @@ import javax.annotation.Nullable;
 public final class LampLightField {
     public static final int CASCADE_COUNT = 5;
     public static final int ACROSS = 64;
+    public static final int COARSE_WORDS_PER_CASCADE = LampLightCascade.COARSE_WORDS_PER_CASCADE;
+    public static final int COARSE_VECS_PER_CASCADE = COARSE_WORDS_PER_CASCADE / 4;
+    public static final int COARSE_VECS_TOTAL = CASCADE_COUNT * COARSE_VECS_PER_CASCADE;
     public static final int FIRST_FAR_CASCADE = 2;
     public static final int OPEN_SKY_LIGHT = 15;
     public static final int BRIGHTEST_LEVEL = 15;
@@ -828,6 +832,21 @@ public final class LampLightField {
             }
         }
         return anyLit;
+    }
+
+    /**
+     * Writes each cascade's 8x8x8 coarse slot occupancy mask for the shader, COARSE_WORDS_PER_CASCADE ints per
+     * cascade, zeroed for cascades that are inactive or not yet placed. Allocates nothing.
+     */
+    public void shaderCoarseMasks(int[] masks) {
+        for (int index = 0; index < CASCADE_COUNT; index++) {
+            int offset = index * COARSE_WORDS_PER_CASCADE;
+            if (index < activeCount && cascades[index].isPlaced()) {
+                cascades[index].writeCoarseMask(masks, offset);
+            } else {
+                Arrays.fill(masks, offset, offset + COARSE_WORDS_PER_CASCADE, 0);
+            }
+        }
     }
 
     /**

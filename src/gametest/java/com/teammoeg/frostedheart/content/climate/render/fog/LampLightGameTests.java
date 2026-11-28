@@ -28,6 +28,7 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
+import org.joml.Matrix4f;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
@@ -372,6 +373,11 @@ public final class LampLightGameTests {
         checkConstant(helper, "weather_fog_lamp.fsh", march, "LAMP_LIFT_LEVELS", LampFogMarch.LIFT_LEVELS);
         checkConstant(helper, "weather_fog_lamp.fsh", march, "LAMP_LEAST_SCALED_DEPTH",
                 LampFogMarch.LEAST_SCALED_DEPTH);
+        checkConstant(helper, "weather_fog_lamp.fsh", march, "LAMP_STEP_CELLS", LampFogMarch.STEP_CELLS);
+        checkConstant(helper, "weather_fog_lamp.fsh", march, "LAMP_COARSE_SHIFT", LampLightCascade.COARSE_SHIFT);
+        checkConstant(helper, "weather_fog_lamp.fsh", march, "LAMP_COARSE_SIZE", LampLightCascade.COARSE_SIZE);
+        checkConstant(helper, "weather_fog_lamp.fsh", march, "LAMP_COARSE_VECS_PER_CASCADE",
+                LampLightField.COARSE_VECS_PER_CASCADE);
         Map<String, Double> composite = parseShaderConstants(helper, "weather_fog_composite.fsh");
         checkConstant(helper, "weather_fog_composite.fsh", composite, "LAMP_SKY_DISTANCE",
                 LampFogMarch.SKY_DISTANCE);
@@ -692,13 +698,215 @@ public final class LampLightGameTests {
         LampLightField field = filledField(source, EYE_X, EYE_Y, EYE_Z);
         float[] shares = new float[2];
         float[] uniforms = new float[3 * LampLightField.CASCADE_COUNT];
-        walk(field, source, shares, uniforms, 0.0);
+        int[] coarseMasks = new int[LampLightField.CASCADE_COUNT * LampLightField.COARSE_WORDS_PER_CASCADE];
+        walk(field, source, shares, uniforms, coarseMasks, 0.0);
         long before = threads.getCurrentThreadAllocatedBytes();
-        walk(field, source, shares, uniforms, 0.5);
+        walk(field, source, shares, uniforms, coarseMasks, 0.5);
         long allocated = threads.getCurrentThreadAllocatedBytes() - before;
         helper.assertTrue(allocated == 0L, "a warm field allocated " + allocated + " bytes in following, marking, "
-                + "reading, sampling and writing the shader's uniforms and lit boxes");
+                + "reading, sampling and writing the shader's uniforms, lit boxes and coarse masks");
         helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 600)
+    public static void coarseOccupancyMatchesLitCells(GameTestHelper helper) {
+        FakeSource source = scene();
+        LampLightField field = filledField(source, EYE_X, EYE_Y, EYE_Z);
+        checkCoarseOccupancy(helper, field, "after a fill");
+        field.follow(EYE_X + 37.4, EYE_Y + 5.3, EYE_Z - 21.8);
+        drain(field, source);
+        checkCoarseOccupancy(helper, field, "after a move");
+        source.clearBlockLight();
+        markTorch(field, BASE_X + 3, GROUND_Y + 1, BASE_Z + 2, TORCH_LEVEL);
+        drain(field, source);
+        checkCoarseOccupancy(helper, field, "after the near torch was broken");
+        LampLightField dark = filledField(new FakeSource(), EYE_X, EYE_Y, EYE_Z);
+        int[] darkMasks = new int[LampLightField.CASCADE_COUNT * LampLightField.COARSE_WORDS_PER_CASCADE];
+        dark.shaderCoarseMasks(darkMasks);
+        for (int word = 0; word < darkMasks.length; word++) {
+            helper.assertTrue(darkMasks[word] == 0, "a dark field reports non-zero coarse mask word " + word);
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 600)
+    public static void litVillageStreetCoarseMarchMatchesUnclipped(GameTestHelper helper) {
+        FakeSource source = new FakeSource();
+        for (int offsetZ = -20; offsetZ <= 160; offsetZ += 12) {
+            placeTorch(source, BASE_X - 5, GROUND_Y + 3, BASE_Z + offsetZ, TORCH_LEVEL, false);
+            placeTorch(source, BASE_X + 5, GROUND_Y + 3, BASE_Z + offsetZ, TORCH_LEVEL, false);
+        }
+        placeTorch(source, BASE_X + 18, GROUND_Y + 20, BASE_Z + 70, TORCH_LEVEL, false);
+        double eyeX = BASE_X + 0.4;
+        double eyeY = GROUND_Y + 2.2;
+        double eyeZ = BASE_Z - 12.6;
+        LampLightField field = filledField(source, eyeX, eyeY, eyeZ);
+        LampFogMarch clipped = new LampFogMarch();
+        LampFogMarch whole = new LampFogMarch();
+        helper.assertTrue(clipped.prepare(field, eyeX, eyeY, eyeZ), "the village street holds no light");
+        whole.prepare(field, eyeX, eyeY, eyeZ);
+        whole.setClipped(false);
+        float[] lifts = testLifts();
+        float[] clippedLight = new float[3];
+        float[] wholeLight = new float[3];
+        Random random = new Random(71L);
+        int lit = 0;
+        int clippedSteps = 0;
+        int wholeSteps = 0;
+        int rays = 200;
+        for (int ray = 0; ray < rays; ray++) {
+            double dirX = ray < 100 ? -0.45 + 0.9 * random.nextDouble() : -1.1 + 2.2 * random.nextDouble();
+            double dirY = ray < 100 ? -0.15 + 0.55 * random.nextDouble() : -0.15 + 0.9 * random.nextDouble();
+            double dirZ = 0.5 + 0.5 * random.nextDouble();
+            double length = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+            double unitX = dirX / length;
+            double unitY = dirY / length;
+            double unitZ = dirZ / length;
+            double endDistance = 25.0 + 250.0 * random.nextDouble();
+            clipped.march(unitX, unitY, unitZ, endDistance, 1.0F, lifts, distance -> 0.005 * distance, clippedLight);
+            whole.march(unitX, unitY, unitZ, endDistance, 1.0F, lifts, distance -> 0.005 * distance, wholeLight);
+            helper.assertTrue(whole.lastSteps() < LampFogMarch.MAXIMUM_STEPS, "village ray " + ray
+                    + " ran out of steps walking every piece");
+            clippedSteps += clipped.lastSteps();
+            wholeSteps += whole.lastSteps();
+            float brightest = Math.max(wholeLight[0], Math.max(wholeLight[1], wholeLight[2]));
+            if (brightest > 1.0e-3F) {
+                lit++;
+            }
+            for (int channel = 0; channel < 3; channel++) {
+                helper.assertTrue(Math.abs(clippedLight[channel] - wholeLight[channel]) <= 1.0e-4 * brightest + 1.0e-6,
+                        "village ray " + ray + " channel " + channel + " gives " + clippedLight[channel]
+                                + " clipped and " + wholeLight[channel] + " unclipped");
+            }
+        }
+        helper.assertTrue(lit > rays / 4, "only " + lit + " village rays are lit");
+        helper.assertTrue(clippedSteps * 3 < wholeSteps * 2, "coarse skipping took " + clippedSteps
+                + " steps instead of less than two thirds of " + wholeSteps);
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 600)
+    public static void frustumCullingClipsOnlyOffScreenLitBoxes(GameTestHelper helper) {
+        Matrix4f viewProjection = new Matrix4f()
+                .perspective((float) Math.toRadians(70.0), 16.0F / 9.0F, 0.05F, 512.0F);
+        float[] litLows = new float[3 * LampLightField.CASCADE_COUNT];
+        float[] litHighs = new float[3 * LampLightField.CASCADE_COUNT];
+
+        // 1. A torch strictly behind the camera (looking down -Z) is culled across every cascade:
+        FakeSource behindSource = new FakeSource();
+        placeTorch(behindSource, BASE_X, GROUND_Y + 1, BASE_Z + 35, TORCH_LEVEL, false);
+        LampLightField behindField = filledField(behindSource, EYE_X, EYE_Y, EYE_Z);
+        helper.assertTrue(behindField.shaderLitBoxes(litLows, litHighs), "behind torch lights no cascade");
+        helper.assertTrue(!LampFogMarch.clipLitBoxesToFrustum(viewProjection, behindField, EYE_X, EYE_Y, EYE_Z,
+                litLows, litHighs), "a torch behind the camera was not culled");
+
+        // 2. Two torches strictly left and right of the frustum whose combined box crosses the view are still culled:
+        FakeSource sideSource = new FakeSource();
+        placeTorch(sideSource, BASE_X - 150, GROUND_Y + 1, BASE_Z - 10, TORCH_LEVEL, false);
+        placeTorch(sideSource, BASE_X + 150, GROUND_Y + 1, BASE_Z - 10, TORCH_LEVEL, false);
+        LampLightField sideField = filledField(sideSource, EYE_X, EYE_Y, EYE_Z);
+        helper.assertTrue(sideField.shaderLitBoxes(litLows, litHighs), "side torches light no cascade");
+        helper.assertTrue(!LampFogMarch.clipLitBoxesToFrustum(viewProjection, sideField, EYE_X, EYE_Y, EYE_Z,
+                litLows, litHighs), "torches strictly outside left and right frustum planes were not culled");
+
+        // 3. With a torch in front and another far behind, frustum culling keeps the front torch and matches whole:
+        FakeSource mixedSource = new FakeSource();
+        placeTorch(mixedSource, BASE_X + 2, GROUND_Y + 1, BASE_Z - 18, TORCH_LEVEL, false);
+        placeTorch(mixedSource, BASE_X - 6, GROUND_Y + 1, BASE_Z - 75, TORCH_LEVEL, false);
+        placeTorch(mixedSource, BASE_X + 4, GROUND_Y + 1, BASE_Z + 120, TORCH_LEVEL, false);
+        LampLightField mixedField = filledField(mixedSource, EYE_X, EYE_Y, EYE_Z);
+        LampFogMarch frustumClipped = new LampFogMarch();
+        LampFogMarch whole = new LampFogMarch();
+        helper.assertTrue(frustumClipped.prepare(mixedField, EYE_X, EYE_Y, EYE_Z), "mixed scene holds no light");
+        helper.assertTrue(frustumClipped.clipToFrustum(viewProjection), "visible front torches were culled");
+        whole.prepare(mixedField, EYE_X, EYE_Y, EYE_Z);
+        whole.setClipped(false);
+        Matrix4f inverseViewProjection = new Matrix4f(viewProjection).invert();
+        org.joml.Vector4f corner = new org.joml.Vector4f();
+        float[] lifts = testLifts();
+        float[] clippedLight = new float[3];
+        float[] wholeLight = new float[3];
+        Random random = new Random(97L);
+        int lit = 0;
+        for (int ray = 0; ray < 100; ray++) {
+            float ndcX = -1.0F + 2.0F * random.nextFloat();
+            float ndcY = -1.0F + 2.0F * random.nextFloat();
+            corner.set(ndcX, ndcY, 1.0F, 1.0F).mul(inverseViewProjection);
+            double offsetX = corner.x / corner.w;
+            double offsetY = corner.y / corner.w;
+            double offsetZ = corner.z / corner.w;
+            double length = Math.sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
+            double endDistance = 20.0 + 200.0 * random.nextDouble();
+            frustumClipped.march(offsetX / length, offsetY / length, offsetZ / length, endDistance, 1.0F, lifts,
+                    distance -> 0.004 * distance, clippedLight);
+            whole.march(offsetX / length, offsetY / length, offsetZ / length, endDistance, 1.0F, lifts,
+                    distance -> 0.004 * distance, wholeLight);
+            float brightest = Math.max(wholeLight[0], Math.max(wholeLight[1], wholeLight[2]));
+            if (brightest > 1.0e-3F) {
+                lit++;
+            }
+            for (int channel = 0; channel < 3; channel++) {
+                helper.assertTrue(Math.abs(clippedLight[channel] - wholeLight[channel]) <= 1.0e-4 * brightest + 1.0e-6,
+                        "frustum ray " + ray + " channel " + channel + " gives " + clippedLight[channel]
+                                + " instead of " + wholeLight[channel]);
+            }
+        }
+        helper.assertTrue(lit > 15, "only " + lit + " frustum rays are lit");
+
+        com.sun.management.ThreadMXBean threads = ManagementFactory.getThreadMXBean()
+                instanceof com.sun.management.ThreadMXBean counter && counter.isThreadAllocatedMemorySupported()
+                && counter.isThreadAllocatedMemoryEnabled() ? counter : null;
+        if (threads != null) {
+            mixedField.shaderLitBoxes(litLows, litHighs);
+            LampFogMarch.clipLitBoxesToFrustum(viewProjection, mixedField, EYE_X, EYE_Y, EYE_Z, litLows, litHighs);
+            long before = threads.getCurrentThreadAllocatedBytes();
+            for (int iteration = 0; iteration < 32; iteration++) {
+                mixedField.shaderLitBoxes(litLows, litHighs);
+                LampFogMarch.clipLitBoxesToFrustum(viewProjection, mixedField, EYE_X, EYE_Y, EYE_Z, litLows, litHighs);
+            }
+            long allocated = threads.getCurrentThreadAllocatedBytes() - before;
+            helper.assertTrue(allocated == 0L, "warm clipLitBoxesToFrustum allocated " + allocated + " bytes");
+        }
+        helper.succeed();
+    }
+
+    private static void checkCoarseOccupancy(GameTestHelper helper, LampLightField field, String when) {
+        int[] masks = new int[LampLightField.CASCADE_COUNT * LampLightField.COARSE_WORDS_PER_CASCADE];
+        field.shaderCoarseMasks(masks);
+        for (int index = 0; index < field.activeCount(); index++) {
+            LampLightCascade cascade = field.cascade(index);
+            int coarseXCount = cascade.coarseX();
+            int coarseYCount = cascade.coarseY();
+            int coarseZCount = cascade.coarseZ();
+            boolean[] expected = new boolean[coarseXCount * coarseYCount * coarseZCount];
+            for (int slotZ = 0; slotZ < cascade.sizeZ(); slotZ++) {
+                for (int slotY = 0; slotY < cascade.sizeY(); slotY++) {
+                    for (int slotX = 0; slotX < cascade.sizeX(); slotX++) {
+                        short light = cascade.values().get(cascade.valueIndex(slotX, slotY, slotZ));
+                        if (LampLightCascade.isLit(light)) {
+                            int coarseIndex = ((slotZ >> LampLightCascade.COARSE_SHIFT) * coarseYCount
+                                    + (slotY >> LampLightCascade.COARSE_SHIFT)) * coarseXCount
+                                    + (slotX >> LampLightCascade.COARSE_SHIFT);
+                            expected[coarseIndex] = true;
+                        }
+                    }
+                }
+            }
+            int baseOffset = index * LampLightField.COARSE_WORDS_PER_CASCADE;
+            for (int coarseZ = 0; coarseZ < coarseZCount; coarseZ++) {
+                for (int coarseY = 0; coarseY < coarseYCount; coarseY++) {
+                    for (int coarseX = 0; coarseX < coarseXCount; coarseX++) {
+                        boolean expectLit = expected[(coarseZ * coarseYCount + coarseY) * coarseXCount + coarseX];
+                        boolean actualLit = cascade.isCoarseSlotLit(coarseX, coarseY, coarseZ);
+                        int word = masks[baseOffset + coarseY * 2 + (coarseZ >> 2)];
+                        boolean maskLit = (word & (1 << (((coarseZ & 3) << 3) | coarseX))) != 0;
+                        helper.assertTrue(actualLit == expectLit && maskLit == expectLit, "cascade " + index + " "
+                                + when + " coarse slot (" + coarseX + ", " + coarseY + ", " + coarseZ + ") reports "
+                                + actualLit + " / mask " + maskLit + " instead of " + expectLit);
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -706,7 +914,7 @@ public final class LampLightGameTests {
      * shader's uniforms.
      */
     private static void walk(LampLightField field, FakeSource source, float[] shares, float[] uniforms,
-            double shift) {
+            int[] coarseMasks, double shift) {
         for (int step = 0; step < 40; step++) {
             double eyeX = EYE_X + shift + (step < 20 ? step : 40 - step) * 1.3;
             double eyeZ = EYE_Z + (step < 20 ? step : 40 - step) * 0.8;
@@ -716,6 +924,7 @@ public final class LampLightGameTests {
             field.sharesAt(eyeX, EYE_Y, eyeZ, step * 7.0 - 120.0, -3.0, step * 2.0, shares);
             field.shaderUniforms(eyeX, EYE_Y, eyeZ, uniforms, uniforms, uniforms, uniforms, uniforms);
             field.shaderLitBoxes(uniforms, uniforms);
+            field.shaderCoarseMasks(coarseMasks);
         }
         drain(field, source);
     }

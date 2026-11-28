@@ -27,6 +27,7 @@ import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL12;
 import org.lwjgl.opengl.GL30;
 
+import java.nio.IntBuffer;
 import java.nio.ShortBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -51,6 +52,7 @@ public final class LampLightTextures {
     private static final int[] planeHighX = new int[LampLightField.ACROSS];
     private static final int[] planeLowY = new int[LampLightField.ACROSS];
     private static final int[] planeHighY = new int[LampLightField.ACROSS];
+    private static final IntBuffer intQueryBuffer = BufferUtils.createIntBuffer(1);
 
     private static int currentUploads;
     private static long currentBytes;
@@ -75,7 +77,8 @@ public final class LampLightTextures {
      */
     public static void upload(LampLightField field) {
         long start = System.nanoTime();
-        int previousTexture = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
+        GL11.glGetIntegerv(GL12.GL_TEXTURE_BINDING_3D, intQueryBuffer);
+        int previousTexture = intQueryBuffer.get(0);
         try {
             for (int index = 0; index < field.activeCount(); index++) {
                 LampLightCascade cascade = field.cascade(index);

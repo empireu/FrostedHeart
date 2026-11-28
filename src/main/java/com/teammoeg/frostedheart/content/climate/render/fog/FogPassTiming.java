@@ -33,13 +33,14 @@ final class FogPassTiming {
     static final int PASS_SHARE_VOLUME = 1;
     static final int PASS_INJECT = 2;
     static final int PASS_INTEGRATE = 3;
-    static final int PASS_LAMP_GLOW = 4;
-    static final int PASS_OPAQUE_COMPOSITE = 5;
-    static final int PASS_TRANSLUCENT_COMPOSITE = 6;
-    static final int PASS_COUNT = 7;
+    static final int PASS_TRANSLUCENT_CAPTURE = 4;
+    static final int PASS_LAMP_GLOW = 5;
+    static final int PASS_OPAQUE_COMPOSITE = 6;
+    static final int PASS_TRANSLUCENT_COMPOSITE = 7;
+    static final int PASS_COUNT = 8;
     private static final int AVERAGED_FRAMES = 120;
-    private static final String[] SEGMENT_NAMES = {"setup", "share volume", "inject", "integrate", "lamp glow",
-            "opaque composite", "translucent composite", "total"};
+    private static final String[] SEGMENT_NAMES = {"setup", "share volume", "inject", "integrate",
+            "translucent capture", "lamp glow", "opaque composite", "translucent composite", "total"};
 
     private final long[] frameCpuStart = new long[PASS_COUNT];
     private final long[] frameCpuNanos = new long[PASS_COUNT];

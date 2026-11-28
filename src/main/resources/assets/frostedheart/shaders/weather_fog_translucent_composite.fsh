@@ -1,8 +1,9 @@
 // FHShaders prepends the version line, weather_fog.glsl and weather_fog_excess.glsl.
 // Composites the translucent terrain target over the main target after the opaque fog and the snow behind translucent
-// surfaces have been drawn. Each translucent pixel already holds its own premultiplied color fogged at its own depth,
-// and this pass adds the premultiplied lamp glow marched up to the translucent surface, with depth-aware upsampling
-// and a thin-geometry opacity clamp so narrow silhouettes do not pick up background lamp glow.
+// surfaces have been drawn, and writes each surviving translucent pixel's depth into the main depth buffer in the same
+// pass. Each translucent pixel already holds its own premultiplied color fogged at its own depth, and this pass adds
+// the premultiplied lamp glow marched up to the translucent surface, with depth-aware upsampling and a thin-geometry
+// opacity clamp so narrow silhouettes do not pick up background lamp glow.
 uniform sampler2D translucentColor;
 uniform sampler2D translucentDepth;
 // The lamp glow that weather_fog_lamp.fsh marched up to translucent surfaces at a share of the resolution, each texel
@@ -63,34 +64,33 @@ void main() {
     if (!(color.a >= LEAST_ALPHA)) {
         discard;
     }
-    if (lampFogDivisor > 0) {
-        float depth = texelFetch(translucentDepth, pixel, 0).r;
-        if (depth < 1.0) {
-            vec3 ndc = vec3(gl_FragCoord.xy / screenSize * 2.0 - 1.0, depth * 2.0 - 1.0);
-            vec4 position = inverseViewProjection * vec4(ndc, 1.0);
-            vec3 offset = position.xyz / position.w;
-            if (!any(isnan(offset)) && !any(isinf(offset))) {
-                float distance = min(length(offset), LAMP_SKY_DISTANCE);
-                float weightedDistance;
-                vec3 glow = lampGlowAt(gl_FragCoord.xy, distance, weightedDistance);
-                if (weightedDistance > distance * LAMP_THIN_DEPTH_RATIO
-                        && (glow.r > 0.0 || glow.g > 0.0 || glow.b > 0.0)) {
-                    float directionY = distance > 0.0 ? offset.y / distance : 0.0;
-                    vec2 uv = gl_FragCoord.xy / (float(divisor) * vec2(columnCount, rowCount));
-                    float tau = clamp(fogOpticalDepth(eyeExtinction, distance, offset.y, heightScale)
-                            + froxelExcessAtDistance(distance, uv), 0.0, FOG_MAXIMUM_OPTICAL_DEPTH);
-                    float sampleTau = clamp(fogOpticalDepth(eyeExtinction, weightedDistance,
-                            weightedDistance * directionY, heightScale)
-                            + froxelExcessAtDistance(weightedDistance, uv), 0.0, FOG_MAXIMUM_OPTICAL_DEPTH);
-                    float sampleOpacity = 1.0 - exp(-sampleTau);
-                    if (sampleOpacity > LAMP_LEAST_SCALED_OPACITY) {
-                        glow *= min(1.0, (1.0 - exp(-tau)) / sampleOpacity);
-                    } else {
-                        glow = vec3(0.0);
-                    }
+    float depth = texelFetch(translucentDepth, pixel, 0).r;
+    gl_FragDepth = depth;
+    if (lampFogDivisor > 0 && depth < 1.0) {
+        vec3 ndc = vec3(gl_FragCoord.xy / screenSize * 2.0 - 1.0, depth * 2.0 - 1.0);
+        vec4 position = inverseViewProjection * vec4(ndc, 1.0);
+        vec3 offset = position.xyz / position.w;
+        if (!any(isnan(offset)) && !any(isinf(offset))) {
+            float distance = min(length(offset), LAMP_SKY_DISTANCE);
+            float weightedDistance;
+            vec3 glow = lampGlowAt(gl_FragCoord.xy, distance, weightedDistance);
+            if (weightedDistance > distance * LAMP_THIN_DEPTH_RATIO
+                    && (glow.r > 0.0 || glow.g > 0.0 || glow.b > 0.0)) {
+                float directionY = distance > 0.0 ? offset.y / distance : 0.0;
+                vec2 uv = gl_FragCoord.xy / (float(divisor) * vec2(columnCount, rowCount));
+                float tau = clamp(fogOpticalDepth(eyeExtinction, distance, offset.y, heightScale)
+                        + froxelExcessAtDistance(distance, uv), 0.0, FOG_MAXIMUM_OPTICAL_DEPTH);
+                float sampleTau = clamp(fogOpticalDepth(eyeExtinction, weightedDistance,
+                        weightedDistance * directionY, heightScale)
+                        + froxelExcessAtDistance(weightedDistance, uv), 0.0, FOG_MAXIMUM_OPTICAL_DEPTH);
+                float sampleOpacity = 1.0 - exp(-sampleTau);
+                if (sampleOpacity > LAMP_LEAST_SCALED_OPACITY) {
+                    glow *= min(1.0, (1.0 - exp(-tau)) / sampleOpacity);
+                } else {
+                    glow = vec3(0.0);
                 }
-                color.rgb += color.a * glow;
             }
+            color.rgb += color.a * glow;
         }
     }
     fragColor = color;

@@ -100,6 +100,17 @@ public final class TranslucentFogGameTests {
         helper.assertTrue(fragmentFailedOnMissingAnchor,
                 "fragment transform did not fail when _linearFog anchor was absent");
 
+        String compositeShader = readResource(helper,
+                "/assets/frostedheart/shaders/weather_fog_translucent_composite.fsh");
+        int discardIndex = compositeShader.indexOf("discard;");
+        int depthWriteIndex = compositeShader.indexOf("gl_FragDepth = depth;");
+        helper.assertTrue(discardIndex >= 0 && depthWriteIndex > discardIndex,
+                "translucent composite shader must write gl_FragDepth after the LEAST_ALPHA discard guard");
+
+        String depthCopyShader = readResource(helper, "/assets/frostedheart/shaders/weather_fog_depth_copy.fsh");
+        helper.assertTrue(depthCopyShader.contains("gl_FragDepth = texelFetch(sceneDepth, ivec2(gl_FragCoord.xy), 0).r;"),
+                "translucent depth copy shader must write gl_FragDepth from sceneDepth");
+
         helper.succeed();
     }
 
@@ -107,7 +118,7 @@ public final class TranslucentFogGameTests {
     public static void fogPassTimerMeasuresNonContiguousSegments(GameTestHelper helper) {
         FogPassTiming timing = new FogPassTiming();
         long clock = 1_000_000L;
-        // Frame 1: all 7 passes with large gaps in between (simulating Embeddium translucent draw and Pass 1 snow):
+        // Frame 1: all passes with large gaps in between (simulating Embeddium translucent draw and Pass 1 snow):
         timing.beginFrame();
         long expectedFrame1Total = 0L;
         for (int pass = 0; pass < FogPassTiming.PASS_COUNT; pass++) {
@@ -116,7 +127,7 @@ public final class TranslucentFogGameTests {
             clock += duration;
             helper.assertTrue(timing.endSegment(pass, clock), "endSegment failed for pass " + pass);
             expectedFrame1Total += duration;
-            if (pass == FogPassTiming.PASS_INTEGRATE || pass == FogPassTiming.PASS_OPAQUE_COMPOSITE) {
+            if (pass == FogPassTiming.PASS_TRANSLUCENT_CAPTURE || pass == FogPassTiming.PASS_OPAQUE_COMPOSITE) {
                 clock += 5_000_000L;
             }
         }
@@ -128,25 +139,32 @@ public final class TranslucentFogGameTests {
                 "total nanos " + timing.cpuSumNanos(FogPassTiming.PASS_COUNT)
                         + " did not match sum of segments " + expectedFrame1Total);
 
-        // Frame 2: opaque-only frame where PASS_TRANSLUCENT_COMPOSITE is skipped:
+        // Frame 2: opaque-only frame where PASS_TRANSLUCENT_CAPTURE and PASS_TRANSLUCENT_COMPOSITE are skipped:
+        long captureBefore = timing.cpuSumNanos(FogPassTiming.PASS_TRANSLUCENT_CAPTURE);
         long translucentBefore = timing.cpuSumNanos(FogPassTiming.PASS_TRANSLUCENT_COMPOSITE);
         timing.beginFrame();
-        for (int pass = 0; pass < FogPassTiming.PASS_TRANSLUCENT_COMPOSITE; pass++) {
+        int expectedOpaqueMask = 0;
+        for (int pass = 0; pass < FogPassTiming.PASS_COUNT; pass++) {
+            if (pass == FogPassTiming.PASS_TRANSLUCENT_CAPTURE || pass == FogPassTiming.PASS_TRANSLUCENT_COMPOSITE) {
+                continue;
+            }
             timing.beginSegment(pass, clock);
             clock += 50_000L;
             timing.endSegment(pass, clock);
+            expectedOpaqueMask |= 1 << pass;
         }
         int frame2Mask = timing.endFrame();
-        helper.assertTrue(frame2Mask == (1 << FogPassTiming.PASS_TRANSLUCENT_COMPOSITE) - 1,
-                "expected opaque-only mask, got " + frame2Mask);
+        helper.assertTrue(frame2Mask == expectedOpaqueMask,
+                "expected opaque-only mask " + expectedOpaqueMask + ", got " + frame2Mask);
         helper.assertTrue(timing.cpuFrameCount() == 2, "expected 2 recorded frames, got " + timing.cpuFrameCount());
-        helper.assertTrue(timing.cpuSumNanos(FogPassTiming.PASS_TRANSLUCENT_COMPOSITE) == translucentBefore,
-                "skipped translucent composite pass changed its accumulated sum");
+        helper.assertTrue(timing.cpuSumNanos(FogPassTiming.PASS_TRANSLUCENT_CAPTURE) == captureBefore
+                && timing.cpuSumNanos(FogPassTiming.PASS_TRANSLUCENT_COMPOSITE) == translucentBefore,
+                "skipped translucent passes changed their accumulated sums");
 
         // GPU sample collection matches sum of per-pass GPU durations:
-        long[] gpuFrame = {10_000L, 20_000L, 30_000L, 40_000L, 50_000L, 60_000L, 70_000L};
+        long[] gpuFrame = {10_000L, 20_000L, 30_000L, 40_000L, 50_000L, 60_000L, 70_000L, 80_000L};
         timing.recordGpuFrame(gpuFrame);
-        helper.assertTrue(timing.gpuFrameCount() == 1 && timing.gpuSumNanos(FogPassTiming.PASS_COUNT) == 280_000L,
+        helper.assertTrue(timing.gpuFrameCount() == 1 && timing.gpuSumNanos(FogPassTiming.PASS_COUNT) == 360_000L,
                 "GPU frame total mismatch: " + timing.gpuSumNanos(FogPassTiming.PASS_COUNT));
 
         // Frame 3: aborted frame must not increment frame count:
@@ -165,7 +183,8 @@ public final class TranslucentFogGameTests {
                 "frame with unclosed segment incremented count to " + timing.cpuFrameCount());
 
         String description = timing.describe(true);
-        helper.assertTrue(description.contains("opaque composite") && description.contains("translucent composite"),
+        helper.assertTrue(description.contains("translucent capture") && description.contains("opaque composite")
+                && description.contains("translucent composite"),
                 "describe() missing expected pass names: " + description);
         String totalDescription = timing.describeTotal(false);
         helper.assertTrue(totalDescription.contains("over 2 frames"),

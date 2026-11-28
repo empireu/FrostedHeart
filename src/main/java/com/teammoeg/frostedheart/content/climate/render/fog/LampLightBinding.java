@@ -19,7 +19,6 @@
 
 package com.teammoeg.frostedheart.content.climate.render.fog;
 
-import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
@@ -31,6 +30,7 @@ import org.lwjgl.opengl.GL20;
 
 import javax.annotation.Nullable;
 import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
 
 /**
  * Binds the cascades of the lamp light field for a program that reads lamp_light.glsl with LAMP_LIGHT_FIELD defined,
@@ -44,6 +44,7 @@ public final class LampLightBinding {
     private static final int CASCADES = LampLightField.CASCADE_COUNT;
     private static final String[] SAMPLERS = {"lampCascade0", "lampCascade1", "lampCascade2", "lampCascade3",
             "lampCascade4"};
+    private static final IntBuffer intQueryBuffer = BufferUtils.createIntBuffer(1);
 
     private final int firstUnit;
     private final int[] previousTextures = new int[CASCADES];
@@ -83,18 +84,23 @@ public final class LampLightBinding {
     }
 
     /**
-     * Remembers the 3D textures bound on the units, leaving the last unit active.
+     * Remembers the 3D textures bound on the units using raw GL, restoring the active texture unit afterwards.
      */
     public void save() {
-        for (int index = 0; index < CASCADES; index++) {
-            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + firstUnit + index);
-            previousTextures[index] = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
+        int previousActive = getInteger(GL13.GL_ACTIVE_TEXTURE);
+        try {
+            for (int index = 0; index < CASCADES; index++) {
+                GL13.glActiveTexture(GL13.GL_TEXTURE0 + firstUnit + index);
+                previousTextures[index] = getInteger(GL12.GL_TEXTURE_BINDING_3D);
+            }
+        } finally {
+            GL13.glActiveTexture(previousActive);
         }
     }
 
     /**
      * Uploads the changes of a field and binds its cascades, or no texture without a field, and sets the uniforms on
-     * the program in use for the camera with the field faded in by fade. Leaves the last unit active.
+     * the program in use for the camera with the field faded in by fade. Restores the active texture unit afterwards.
      */
     public void bind(@Nullable LampLightField field, Vec3 camera, float fade) {
         bind(field, camera.x, camera.y, camera.z, fade);
@@ -110,9 +116,14 @@ public final class LampLightBinding {
             count = field.shaderUniforms(eyeX, eyeY, eyeZ, sizes, slotOrigins, eyesInCascade, cellsPerBlock,
                     inverseReaches);
         }
-        for (int index = 0; index < CASCADES; index++) {
-            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + firstUnit + index);
-            GL11.glBindTexture(GL12.GL_TEXTURE_3D, index < count ? LampLightTextures.texture(index) : 0);
+        int previousActive = getInteger(GL13.GL_ACTIVE_TEXTURE);
+        try {
+            for (int index = 0; index < CASCADES; index++) {
+                GL13.glActiveTexture(GL13.GL_TEXTURE0 + firstUnit + index);
+                GL11.glBindTexture(GL12.GL_TEXTURE_3D, index < count ? LampLightTextures.texture(index) : 0);
+            }
+        } finally {
+            GL13.glActiveTexture(previousActive);
         }
         GL20.glUniform1i(countUniform, count);
         GL20.glUniform1f(fadeUniform, count > 0 ? fade : 0.0F);
@@ -126,13 +137,23 @@ public final class LampLightBinding {
     }
 
     /**
-     * Binds the remembered 3D textures on the units again, leaving the last unit active.
+     * Binds the remembered 3D textures on the units again using raw GL, restoring the active texture unit afterwards.
      */
     public void restore() {
-        for (int index = 0; index < CASCADES; index++) {
-            RenderSystem.activeTexture(GL13.GL_TEXTURE0 + firstUnit + index);
-            GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousTextures[index]);
+        int previousActive = getInteger(GL13.GL_ACTIVE_TEXTURE);
+        try {
+            for (int index = 0; index < CASCADES; index++) {
+                GL13.glActiveTexture(GL13.GL_TEXTURE0 + firstUnit + index);
+                GL11.glBindTexture(GL12.GL_TEXTURE_3D, previousTextures[index]);
+            }
+        } finally {
+            GL13.glActiveTexture(previousActive);
         }
+    }
+
+    private static int getInteger(int parameter) {
+        GL11.glGetIntegerv(parameter, intQueryBuffer);
+        return intQueryBuffer.get(0);
     }
 
     private void setVectors(int location, float[] values) {

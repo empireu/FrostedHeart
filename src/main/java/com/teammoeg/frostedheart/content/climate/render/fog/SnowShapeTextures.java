@@ -29,6 +29,7 @@ import org.lwjgl.opengl.GL30;
 
 import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
+import java.nio.IntBuffer;
 import java.nio.ShortBuffer;
 
 /**
@@ -50,6 +51,7 @@ final class SnowShapeTextures {
 
     private static final ShortBuffer runStaging = BufferUtils.createShortBuffer(RUN_CAPACITY);
     private static final ShortBuffer tileStaging = BufferUtils.createShortBuffer(SnowShapes.ROWS_PER_SHAPE);
+    private static final IntBuffer intQueryBuffer = BufferUtils.createIntBuffer(1);
     private static int volumeTexture;
     private static int rowsTexture;
     /**
@@ -69,8 +71,10 @@ final class SnowShapeTextures {
      * the active unit and binds the earlier textures back.
      */
     static void upload(SnowShapeVolume volume) {
-        int previous3D = GL11.glGetInteger(GL12.GL_TEXTURE_BINDING_3D);
-        int previous2D = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        GL11.glGetIntegerv(GL12.GL_TEXTURE_BINDING_3D, intQueryBuffer);
+        int previous3D = intQueryBuffer.get(0);
+        GL11.glGetIntegerv(GL11.GL_TEXTURE_BINDING_2D, intQueryBuffer);
+        int previous2D = intQueryBuffer.get(0);
         try {
             GlStateManager._pixelStore(GL11.GL_UNPACK_ROW_LENGTH, 0);
             GlStateManager._pixelStore(GL12.GL_UNPACK_IMAGE_HEIGHT, 0);

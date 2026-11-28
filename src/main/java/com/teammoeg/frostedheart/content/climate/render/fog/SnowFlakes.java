@@ -42,6 +42,10 @@ public final class SnowFlakes {
      */
     public static final int CAPACITY = STATE_WIDTH * STATE_HEIGHT;
     /**
+     * Consecutive state texels tested per compaction point in snow_flakes_compact.glsl, dividing STATE_WIDTH evenly.
+     */
+    public static final int COMPACT_GROUP_SIZE = 32;
+    /**
      * The flakes over which the last drawn ones fade as the drawn count changes.
      */
     public static final double COUNT_FADE_FLAKES = 1024.0;
@@ -497,6 +501,39 @@ public final class SnowFlakes {
     public static boolean splatVisible(double offsetX, double offsetY, double offsetZ, double boxSide) {
         double halfSide = 0.5 * boxSide;
         return Math.abs(offsetX) <= halfSide && Math.abs(offsetY) <= halfSide && Math.abs(offsetZ) <= halfSide;
+    }
+
+    /**
+     * Computes the Euclidean normal lengths of the left, right, bottom and top frustum planes from the 3x3 linear part
+     * of a view-projection matrix (row 0, row 1 and row 3). Used with isOutsideFrustum to conservatively cull spheres
+     * in clip space before expensive lookups.
+     */
+    public static void frustumPlaneScales(float m00, float m10, float m20, float m01, float m11, float m21, float m03,
+            float m13, float m23, float[] scalesOut) {
+        scalesOut[0] = vectorLength(m03 + m00, m13 + m10, m23 + m20);
+        scalesOut[1] = vectorLength(m03 - m00, m13 - m10, m23 - m20);
+        scalesOut[2] = vectorLength(m03 + m01, m13 + m11, m23 + m21);
+        scalesOut[3] = vectorLength(m03 - m01, m13 - m11, m23 - m21);
+    }
+
+    /**
+     * Whether a sphere of the given world radius around a clip-space center (expanded by a minimum screen pixel margin)
+     * lies completely outside the left, right, bottom or top frustum plane, matching isOutsideFrustum in
+     * snow_flake_update.fsh.
+     */
+    public static boolean isOutsideFrustum(float clipX, float clipY, float clipW, float radiusBlocks,
+            float[] frustumPlaneScales, float screenWidth, float screenHeight, float minimumRadiusPixels) {
+        float positiveW = Math.max(clipW + radiusBlocks, 0.0F);
+        float padX = (2.0F * minimumRadiusPixels / Math.max(screenWidth, 1.0F)) * positiveW;
+        float padY = (2.0F * minimumRadiusPixels / Math.max(screenHeight, 1.0F)) * positiveW;
+        return clipX < -(clipW + radiusBlocks * frustumPlaneScales[0] + padX)
+                || clipX > clipW + radiusBlocks * frustumPlaneScales[1] + padX
+                || clipY < -(clipW + radiusBlocks * frustumPlaneScales[2] + padY)
+                || clipY > clipW + radiusBlocks * frustumPlaneScales[3] + padY;
+    }
+
+    private static float vectorLength(float x, float y, float z) {
+        return (float) Math.sqrt((double) x * x + (double) y * y + (double) z * z);
     }
 
     private static double mix(double from, double to, double share) {

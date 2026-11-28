@@ -21,11 +21,14 @@ package com.teammoeg.frostedheart.content.climate.render.sky;
 
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+import org.lwjgl.BufferUtils;
 import org.lwjgl.opengl.GL;
 import org.lwjgl.opengl.GL15C;
 import org.lwjgl.opengl.GL33C;
 import org.lwjgl.opengl.GLCapabilities;
 
+import java.nio.IntBuffer;
+import java.nio.LongBuffer;
 import java.util.Locale;
 
 /**
@@ -38,6 +41,8 @@ import java.util.Locale;
 public final class SkyDrawTimer {
     private static final int QUERY_PAIRS = 4;
     private static final int AVERAGED_DRAWS = 120;
+    private static final IntBuffer queryIntBuffer = BufferUtils.createIntBuffer(1);
+    private static final LongBuffer queryLongBuffer = BufferUtils.createLongBuffer(1);
 
     private final int[] startQueries = new int[QUERY_PAIRS];
     private final int[] endQueries = new int[QUERY_PAIRS];
@@ -93,9 +98,16 @@ public final class SkyDrawTimer {
 
     private void collect() {
         for (int pair = 0; pair < QUERY_PAIRS; pair++) {
-            if (pending[pair] && GL15C.glGetQueryObjecti(endQueries[pair], GL15C.GL_QUERY_RESULT_AVAILABLE) != 0) {
-                long nanos = GL33C.glGetQueryObjecti64(endQueries[pair], GL15C.GL_QUERY_RESULT)
-                        - GL33C.glGetQueryObjecti64(startQueries[pair], GL15C.GL_QUERY_RESULT);
+            if (!pending[pair]) {
+                continue;
+            }
+            GL15C.glGetQueryObjectiv(endQueries[pair], GL15C.GL_QUERY_RESULT_AVAILABLE, queryIntBuffer);
+            if (queryIntBuffer.get(0) != 0) {
+                GL33C.glGetQueryObjecti64v(endQueries[pair], GL15C.GL_QUERY_RESULT, queryLongBuffer);
+                long endTimestamp = queryLongBuffer.get(0);
+                GL33C.glGetQueryObjecti64v(startQueries[pair], GL15C.GL_QUERY_RESULT, queryLongBuffer);
+                long startTimestamp = queryLongBuffer.get(0);
+                long nanos = endTimestamp - startTimestamp;
                 pending[pair] = false;
                 gpuSum += nanos - gpuNanos[gpuNext];
                 gpuNanos[gpuNext] = nanos;

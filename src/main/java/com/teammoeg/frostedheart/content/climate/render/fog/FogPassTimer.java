@@ -46,6 +46,7 @@ public final class FogPassTimer {
     public static final int PASS_SHARE_VOLUME = FogPassTiming.PASS_SHARE_VOLUME;
     public static final int PASS_INJECT = FogPassTiming.PASS_INJECT;
     public static final int PASS_INTEGRATE = FogPassTiming.PASS_INTEGRATE;
+    public static final int PASS_TRANSLUCENT_CAPTURE = FogPassTiming.PASS_TRANSLUCENT_CAPTURE;
     public static final int PASS_LAMP_GLOW = FogPassTiming.PASS_LAMP_GLOW;
     public static final int PASS_OPAQUE_COMPOSITE = FogPassTiming.PASS_OPAQUE_COMPOSITE;
     public static final int PASS_TRANSLUCENT_COMPOSITE = FogPassTiming.PASS_TRANSLUCENT_COMPOSITE;

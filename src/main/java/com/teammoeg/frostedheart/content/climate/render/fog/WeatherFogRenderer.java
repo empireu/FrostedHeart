@@ -545,12 +545,17 @@ public final class WeatherFogRenderer {
                 translucentPassHandledFrame = SkyFrame.frameNumber();
                 return;
             }
-            if (hasVisibleTranslucentChunks() && translucentTarget.beginCapture(mainTarget)) {
-                translucentCaptured = true;
-                translucentFogActive = true;
-                capturedMainTarget = mainTarget;
-                translucentPassHandledFrame = SkyFrame.frameNumber();
-                return;
+            if (hasVisibleTranslucentChunks()) {
+                passTimer.beginSegment(FogPassTimer.PASS_TRANSLUCENT_CAPTURE);
+                boolean captured = translucentTarget.beginCapture(mainTarget);
+                passTimer.endSegment(FogPassTimer.PASS_TRANSLUCENT_CAPTURE);
+                if (captured) {
+                    translucentCaptured = true;
+                    translucentFogActive = true;
+                    capturedMainTarget = mainTarget;
+                    translucentPassHandledFrame = SkyFrame.frameNumber();
+                    return;
+                }
             }
             drawOpaqueAfterTranslucent(mainTarget, 0);
             passTimer.endFrame();
@@ -1373,7 +1378,7 @@ public final class WeatherFogRenderer {
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
             GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, excessTexture);
             passTimer.beginSegment(FogPassTimer.PASS_LAMP_GLOW);
-            boolean lampFogDrawn = LampFogPass.draw(mainTarget, inverseViewProjection,
+            boolean lampFogDrawn = LampFogPass.draw(mainTarget, viewProjection, inverseViewProjection,
                     eyeBlockX + eyeFractionX, eyeBlockY + eyeFractionY, eyeBlockZ + eyeFractionZ, eyeExtinction,
                     frameHeightScale, frameColumnCount, frameRowCount, frameSliceCount, frameRangeDistance,
                     frameFroxelDivisor, snowColorFromLightmap, translucentDepthTexture);
@@ -1423,10 +1428,10 @@ public final class WeatherFogRenderer {
 
     /**
      * Composites translucentTarget (already premultiplied and fogged per-layer) over mainTarget while adding
-     * translucent lamp glow, then copies combined opaque + translucent depth back to mainTarget.
+     * translucent lamp glow and writing surviving translucent depth directly into mainTarget's depth buffer in one
+     * pass.
      */
     private static void drawTranslucentCompositeAndDepthSync(RenderTarget mainTarget, boolean lampFogDrawn) {
-        pass.begin();
         int sourceColor = GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB);
         int destinationColor = GL11.glGetInteger(GL14.GL_BLEND_DST_RGB);
         int sourceAlpha = GL11.glGetInteger(GL14.GL_BLEND_SRC_ALPHA);
@@ -1434,8 +1439,12 @@ public final class WeatherFogRenderer {
         int colorEquation = GL11.glGetInteger(GL20.GL_BLEND_EQUATION_RGB);
         int alphaEquation = GL11.glGetInteger(GL20.GL_BLEND_EQUATION_ALPHA);
         boolean blending = GL11.glIsEnabled(GL11.GL_BLEND);
+        boolean depthTest = GL11.glIsEnabled(GL11.GL_DEPTH_TEST);
+        int depthFunction = GL11.glGetInteger(GL11.GL_DEPTH_FUNC);
+        boolean depthWrites = GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK);
         boolean culling = GL11.glIsEnabled(GL11.GL_CULL_FACE);
         boolean scissor = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
+        pass.begin();
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
         int previousExcessTexture = GL11.glGetInteger(GL30.GL_TEXTURE_BINDING_2D_ARRAY);
         try {
@@ -1452,16 +1461,17 @@ public final class WeatherFogRenderer {
             }
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
             GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, excessTexture);
-            bindColorFramebuffer(mainTarget);
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, mainTarget.frameBufferId);
             RenderSystem.viewport(savedViewportX, savedViewportY, savedViewportWidth, savedViewportHeight);
+            RenderSystem.enableDepthTest();
+            RenderSystem.depthFunc(GL11.GL_ALWAYS);
+            RenderSystem.depthMask(true);
             RenderSystem.enableBlend();
             RenderSystem.blendEquation(GL14.GL_FUNC_ADD);
             RenderSystem.blendFuncSeparate(GL11.GL_ONE, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ZERO, GL11.GL_ONE);
             translucentCompositePass.use();
             translucentCompositePass.setFrameUniforms(mainTarget, lampFogDrawn ? LampFogPass.divisor() : 0);
             SkyGlPass.drawFullScreenQuad();
-            releaseColorFramebuffer(savedDrawFramebuffer);
-            translucentTarget.copyDepthToMain(mainTarget);
             passTimer.endSegment(FogPassTimer.PASS_TRANSLUCENT_COMPOSITE);
         } finally {
             GL20.glBlendEquationSeparate(colorEquation, alphaEquation);
@@ -1470,6 +1480,13 @@ public final class WeatherFogRenderer {
                 RenderSystem.enableBlend();
             } else {
                 RenderSystem.disableBlend();
+            }
+            RenderSystem.depthMask(depthWrites);
+            RenderSystem.depthFunc(depthFunction);
+            if (depthTest) {
+                RenderSystem.enableDepthTest();
+            } else {
+                RenderSystem.disableDepthTest();
             }
             if (culling) {
                 RenderSystem.enableCull();
@@ -1484,7 +1501,7 @@ public final class WeatherFogRenderer {
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
             GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, previousExcessTexture);
             RenderSystem.viewport(savedViewportX, savedViewportY, savedViewportWidth, savedViewportHeight);
-            releaseColorFramebuffer(savedDrawFramebuffer);
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, savedDrawFramebuffer);
             pass.end();
         }
     }
@@ -1560,7 +1577,7 @@ public final class WeatherFogRenderer {
             RenderSystem.activeTexture(GL13.GL_TEXTURE0 + EXCESS_UNIT);
             GL11.glBindTexture(GL30.GL_TEXTURE_2D_ARRAY, excessTexture);
             passTimer.beginSegment(FogPassTimer.PASS_LAMP_GLOW);
-            boolean lampFogDrawn = debugMode == 0 && LampFogPass.draw(mainTarget, inverseViewProjection,
+            boolean lampFogDrawn = debugMode == 0 && LampFogPass.draw(mainTarget, viewProjection, inverseViewProjection,
                     eyeBlockX + eyeFractionX, eyeBlockY + eyeFractionY, eyeBlockZ + eyeFractionZ, eyeExtinction,
                     frameHeightScale, frameColumnCount, frameRowCount, frameSliceCount, frameRangeDistance,
                     frameFroxelDivisor, snowColorFromLightmap, 0);

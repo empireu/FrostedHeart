@@ -25,6 +25,8 @@ import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraftforge.gametest.GameTestHolder;
 import net.minecraftforge.gametest.PrefixGameTestTemplate;
+import org.joml.Matrix4f;
+import org.joml.Vector4f;
 import org.slf4j.Logger;
 
 import java.io.IOException;
@@ -1087,10 +1089,12 @@ public final class SnowLeeGameTests {
                 SnowFlakes.MOST_SUBSTEPS, 0.0);
         checkShaderConstant(helper, "snow_flake_update.fsh", updateFsh, "SNOW_HIT_REFINEMENTS",
                 SnowFlakes.HIT_REFINEMENTS, 0.0);
+        checkShaderConstant(helper, "snow_flake_update.fsh", updateFsh, "SNOW_COUNT_FADE",
+                SnowFlakes.COUNT_FADE_FLAKES, 0.0);
+        checkShaderConstant(helper, "snow_flake_update.fsh", updateFsh, "SNOW_SHAPE_REACH", SnowFlakes.SHAPE_REACH,
+                1.0e-6);
 
         // snow_flakes_draw.glsl:
-        checkShaderConstant(helper, "snow_flakes_draw.glsl", drawGlsl, "SNOW_COUNT_FADE",
-                SnowFlakes.COUNT_FADE_FLAKES, 0.0);
         checkShaderConstant(helper, "snow_flakes_draw.glsl", drawGlsl, "SNOW_SHAPE_SIZE", SnowFlakes.SHAPE_SIZE, 0.0);
         checkShaderConstant(helper, "snow_flakes_draw.glsl", drawGlsl, "SNOW_SHAPE_REACH", SnowFlakes.SHAPE_REACH,
                 1.0e-6);
@@ -1763,17 +1767,147 @@ public final class SnowLeeGameTests {
                 SnowLee.NO_HEIGHT_THRESHOLD, 0.0);
     }
 
-    private static Map<String, Double> parseShaderConstants(GameTestHelper helper, String shaderFile) {
+    @GameTest(template = "phase0a_empty", timeoutTicks = 120)
+    public static void snowfallDrawPrecomputeSplit(GameTestHelper helper) {
+        String updateSource = readShaderSource(helper, "snow_flake_update.fsh");
+        String compactSource = readShaderSource(helper, "snow_flakes_compact.glsl");
+        String drawSource = readShaderSource(helper, "snow_flakes_draw.glsl");
+        if (updateSource == null || compactSource == null || drawSource == null) {
+            return;
+        }
+        String[] requiredOutputs = {"out vec4 nextState;", "out vec4 nextSplat;", "out vec4 flakeDrawColor;",
+                "out vec4 flakeDrawPos;", "out vec4 flakeDrawStreak;", "out vec4 splatDrawColor;"};
+        for (String output : requiredOutputs) {
+            helper.assertTrue(updateSource.contains(output),
+                    "snow_flake_update.fsh is missing output declaration: " + output);
+        }
+        helper.assertTrue(SnowFlakes.STATE_WIDTH % SnowFlakes.COMPACT_GROUP_SIZE == 0,
+                "SnowFlakes.COMPACT_GROUP_SIZE must divide STATE_WIDTH evenly");
+        Map<String, Double> compactGlsl = parseShaderConstants(helper, "snow_flakes_compact.glsl");
+        if (compactGlsl == null) {
+            return;
+        }
+        checkShaderConstant(helper, "snow_flakes_compact.glsl", compactGlsl, "SNOW_COMPACT_GROUP_SIZE",
+                SnowFlakes.COMPACT_GROUP_SIZE, 0.0);
+        helper.assertTrue(compactSource.contains("layout(points, max_vertices = 32) out;"),
+                "snow_flakes_compact.glsl is missing batched point compaction geometry output");
+        helper.assertTrue(compactSource.contains("flat out uint visibleEntry;"),
+                "snow_flakes_compact.glsl is missing visibleEntry transform feedback output");
+        helper.assertTrue(drawSource.contains("in uint visibleEntry;"),
+                "snow_flakes_draw.glsl is missing compacted visibleEntry input");
+        helper.assertTrue(drawSource.contains("layout(triangle_strip, max_vertices = 4) out;"),
+                "snow_flakes_draw.glsl is missing quad expansion geometry stage");
+        String[] requiredDrawSamplers = {"uniform sampler2D flakeDrawPos;", "uniform sampler2D flakeDrawColor;",
+                "uniform sampler2D flakeDrawStreak;", "uniform sampler2D splatDrawColor;"};
+        for (String sampler : requiredDrawSamplers) {
+            helper.assertTrue(drawSource.contains(sampler),
+                    "snow_flakes_draw.glsl is missing precomputed sampler: " + sampler);
+        }
+        String[] forbiddenDrawLookups = {"shareVolume", "excesses", "leeMap", "cavityMap", "lampLightmap",
+                "lampShownLevelAt"};
+        for (String lookup : forbiddenDrawLookups) {
+            helper.assertTrue(!drawSource.contains(lookup),
+                    "snow_flakes_draw.glsl should not perform precomputed lookup: " + lookup);
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template = "phase0a_empty", timeoutTicks = 120)
+    public static void snowFlakeFrustumCullConservative(GameTestHelper helper) {
+        float screenWidth = 1920.0F;
+        float screenHeight = 1080.0F;
+        float[] fovs = {(float) Math.toRadians(50.0), (float) Math.toRadians(70.0), (float) Math.toRadians(110.0)};
+        float[] pitches = {0.0F, 0.45F, -0.6F};
+        float[] yaws = {0.0F, 1.1F, -2.3F};
+        float[] radii = {0.05F, 0.5F, 2.0F};
+        float[] minPixelRadii = {0.0F, 1.6F};
+        float[] planeScales = new float[4];
+        Vector4f clipCenter = new Vector4f();
+        Vector4f clipSample = new Vector4f();
+        Matrix4f viewProjection = new Matrix4f();
+        Matrix4f projection = new Matrix4f();
+        Matrix4f view = new Matrix4f();
+        float[][] sampleDirections = {
+                {0.0F, 0.0F, 0.0F},
+                {1.0F, 0.0F, 0.0F}, {-1.0F, 0.0F, 0.0F},
+                {0.0F, 1.0F, 0.0F}, {0.0F, -1.0F, 0.0F},
+                {0.0F, 0.0F, 1.0F}, {0.0F, 0.0F, -1.0F},
+                {0.57735F, 0.57735F, 0.57735F}, {-0.57735F, 0.57735F, 0.57735F},
+                {0.57735F, -0.57735F, 0.57735F}, {-0.57735F, -0.57735F, 0.57735F},
+                {0.57735F, 0.57735F, -0.57735F}, {-0.57735F, 0.57735F, -0.57735F},
+                {0.57735F, -0.57735F, -0.57735F}, {-0.57735F, -0.57735F, -0.57735F}
+        };
+        int culledCount = 0;
+        int visibleCount = 0;
+        for (int angleIndex = 0; angleIndex < fovs.length; angleIndex++) {
+            projection.setPerspective(fovs[angleIndex], screenWidth / screenHeight, 0.05F, 256.0F);
+            view.rotationXYZ(pitches[angleIndex], yaws[angleIndex], 0.15F * angleIndex);
+            viewProjection.set(projection).mul(view);
+            SnowFlakes.frustumPlaneScales(viewProjection.m00(), viewProjection.m10(), viewProjection.m20(),
+                    viewProjection.m01(), viewProjection.m11(), viewProjection.m21(), viewProjection.m03(),
+                    viewProjection.m13(), viewProjection.m23(), planeScales);
+            for (float minPixels : minPixelRadii) {
+                float ndcPadX = 2.0F * minPixels / screenWidth;
+                float ndcPadY = 2.0F * minPixels / screenHeight;
+                for (float radius : radii) {
+                    for (int gx = -3; gx <= 3; gx++) {
+                        for (int gy = -2; gy <= 2; gy++) {
+                            for (int gz = -3; gz <= 3; gz++) {
+                                float cx = gx * 6.0F;
+                                float cy = gy * 6.0F;
+                                float cz = gz * 6.0F;
+                                clipCenter.set(cx, cy, cz, 1.0F).mul(viewProjection);
+                                boolean culled = SnowFlakes.isOutsideFrustum(clipCenter.x, clipCenter.y, clipCenter.w,
+                                        radius, planeScales, screenWidth, screenHeight, minPixels);
+                                if (culled) {
+                                    culledCount++;
+                                    for (float[] direction : sampleDirections) {
+                                        float sx = cx + direction[0] * radius;
+                                        float sy = cy + direction[1] * radius;
+                                        float sz = cz + direction[2] * radius;
+                                        clipSample.set(sx, sy, sz, 1.0F).mul(viewProjection);
+                                        if (clipSample.w > 0.05F) {
+                                            float ndcX = clipSample.x / clipSample.w;
+                                            float ndcY = clipSample.y / clipSample.w;
+                                            boolean onScreen = ndcX >= -1.0F - ndcPadX && ndcX <= 1.0F + ndcPadX
+                                                    && ndcY >= -1.0F - ndcPadY && ndcY <= 1.0F + ndcPadY;
+                                            helper.assertTrue(!onScreen, "False frustum cull for sphere (" + cx + ", "
+                                                    + cy + ", " + cz + ") r=" + radius + " sample NDC=(" + ndcX + ", "
+                                                    + ndcY + ")");
+                                        }
+                                    }
+                                } else {
+                                    visibleCount++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        helper.assertTrue(culledCount > 0 && visibleCount > 0,
+                "Frustum cull test should exercise both culled (" + culledCount + ") and visible (" + visibleCount
+                        + ") spheres");
+        helper.succeed();
+    }
+
+    private static String readShaderSource(GameTestHelper helper, String shaderFile) {
         String resourcePath = "/assets/frostedheart/shaders/" + shaderFile;
-        String source;
         try (InputStream stream = SnowFlakes.class.getResourceAsStream(resourcePath)) {
             if (stream == null) {
                 helper.fail("Shader resource " + resourcePath + " was not found on the classpath");
                 return null;
             }
-            source = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
         } catch (IOException exception) {
             helper.fail("Failed to read shader resource " + resourcePath + ": " + exception.getMessage());
+            return null;
+        }
+    }
+
+    private static Map<String, Double> parseShaderConstants(GameTestHelper helper, String shaderFile) {
+        String source = readShaderSource(helper, shaderFile);
+        if (source == null) {
             return null;
         }
         Map<String, Double> constants = new HashMap<>();

@@ -35,6 +35,14 @@ public final class LampLightCascade {
      * The shorts of one cell, its light share and its air share.
      */
     public static final int CHANNELS = 2;
+    /**
+     * Shift and side length in cells of one coarse occupancy block, and the coarse word layout shared with
+     * weather_fog_lamp.fsh (two 32-bit words per coarse Y layer, up to MAX_COARSE_Y layers).
+     */
+    public static final int COARSE_SHIFT = 3;
+    public static final int COARSE_SIZE = 1 << COARSE_SHIFT;
+    public static final int MAX_COARSE_Y = 12;
+    public static final int COARSE_WORDS_PER_CASCADE = MAX_COARSE_Y * 2;
     private static final int FILL_CELLS = 4096;
 
     private final short[] fillPattern = new short[FILL_CELLS * CHANNELS];
@@ -44,6 +52,9 @@ public final class LampLightCascade {
     private final int sizeX;
     private final int sizeY;
     private final int sizeZ;
+    private final int coarseX;
+    private final int coarseY;
+    private final int coarseZ;
     private final int brickWidth;
     private final int brickHeight;
     private final int bricksX;
@@ -56,6 +67,8 @@ public final class LampLightCascade {
     private final int[] litCellsX;
     private final int[] litCellsY;
     private final int[] litCellsZ;
+    private final short[] coarseLitCells;
+    private final int[] coarseMaskWords = new int[COARSE_WORDS_PER_CASCADE];
     private final long[] dirtyBricks;
     private int dirtyCount;
     private boolean placed;
@@ -74,6 +87,9 @@ public final class LampLightCascade {
         this.sizeX = sizeX;
         this.sizeY = sizeY;
         this.sizeZ = sizeZ;
+        coarseX = sizeX >> COARSE_SHIFT;
+        coarseY = sizeY >> COARSE_SHIFT;
+        coarseZ = sizeZ >> COARSE_SHIFT;
         brickWidth = LampLightField.SECTION_SIZE / cellWidth;
         brickHeight = LampLightField.SECTION_SIZE / cellHeight;
         bricksX = sizeX / brickWidth;
@@ -84,6 +100,7 @@ public final class LampLightCascade {
         litCellsX = new int[sizeX];
         litCellsY = new int[sizeY];
         litCellsZ = new int[sizeZ];
+        coarseLitCells = new short[coarseX * coarseY * coarseZ];
         dirtyBricks = new long[(brickCount() + Long.SIZE - 1) / Long.SIZE];
         clear();
     }
@@ -110,6 +127,18 @@ public final class LampLightCascade {
 
     public int sizeZ() {
         return sizeZ;
+    }
+
+    public int coarseX() {
+        return coarseX;
+    }
+
+    public int coarseY() {
+        return coarseY;
+    }
+
+    public int coarseZ() {
+        return coarseZ;
     }
 
     public int brickWidth() {
@@ -198,6 +227,11 @@ public final class LampLightCascade {
         Arrays.fill(litCellsX, lit ? sizeY * sizeZ : 0);
         Arrays.fill(litCellsY, lit ? sizeX * sizeZ : 0);
         Arrays.fill(litCellsZ, lit ? sizeX * sizeY : 0);
+        Arrays.fill(coarseLitCells, lit ? (short) (COARSE_SIZE * COARSE_SIZE * COARSE_SIZE) : (short) 0);
+        Arrays.fill(coarseMaskWords, 0);
+        if (lit) {
+            Arrays.fill(coarseMaskWords, 0, coarseY * 2, -1);
+        }
         markAllDirty();
     }
 
@@ -248,9 +282,80 @@ public final class LampLightCascade {
             litCellsX[slotX] += change;
             litCellsY[slotY] += change;
             litCellsZ[slotZ] += change;
+            int coarseSlotX = slotX >> COARSE_SHIFT;
+            int coarseSlotY = slotY >> COARSE_SHIFT;
+            int coarseSlotZ = slotZ >> COARSE_SHIFT;
+            int coarseIndex = (coarseSlotZ * coarseY + coarseSlotY) * coarseX + coarseSlotX;
+            int updated = coarseLitCells[coarseIndex] + change;
+            coarseLitCells[coarseIndex] = (short) updated;
+            int wordIndex = coarseSlotY * 2 + (coarseSlotZ >> 2);
+            int bitMask = 1 << (((coarseSlotZ & 3) << 3) | coarseSlotX);
+            if (updated == 1 && change > 0) {
+                coarseMaskWords[wordIndex] |= bitMask;
+            } else if (updated == 0) {
+                coarseMaskWords[wordIndex] &= ~bitMask;
+            }
         }
         values.put(slot, light);
         values.put(slot + 1, air);
+    }
+
+    /**
+     * Whether any cell in the given 8x8x8 coarse slot block holds a light share above 0.
+     */
+    public boolean isCoarseSlotLit(int slotCoarseX, int slotCoarseY, int slotCoarseZ) {
+        if (!placed) {
+            return false;
+        }
+        int wordIndex = slotCoarseY * 2 + (slotCoarseZ >> 2);
+        int bitMask = 1 << (((slotCoarseZ & 3) << 3) | slotCoarseX);
+        return (coarseMaskWords[wordIndex] & bitMask) != 0;
+    }
+
+    /**
+     * Whether any coarse slot block in the 1 to 8 combinations of low and high coarse slot coordinates holds a lit cell.
+     */
+    boolean anyCoarseSlotLit(int lowCoarseX, int lowCoarseY, int lowCoarseZ, int highCoarseX, int highCoarseY,
+            int highCoarseZ) {
+        if (!placed) {
+            return false;
+        }
+        int xMask = (1 << lowCoarseX) | (1 << highCoarseX);
+        int mask0 = 0;
+        int mask1 = 0;
+        if (lowCoarseZ < 4) {
+            mask0 |= xMask << (lowCoarseZ << 3);
+        } else {
+            mask1 |= xMask << ((lowCoarseZ - 4) << 3);
+        }
+        if (highCoarseZ < 4) {
+            mask0 |= xMask << (highCoarseZ << 3);
+        } else {
+            mask1 |= xMask << ((highCoarseZ - 4) << 3);
+        }
+        int lowBase = lowCoarseY * 2;
+        if (((coarseMaskWords[lowBase] & mask0) | (coarseMaskWords[lowBase + 1] & mask1)) != 0) {
+            return true;
+        }
+        if (highCoarseY != lowCoarseY) {
+            int highBase = highCoarseY * 2;
+            if (((coarseMaskWords[highBase] & mask0) | (coarseMaskWords[highBase + 1] & mask1)) != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    int coarseMaskWord(int wordIndex) {
+        return placed ? coarseMaskWords[wordIndex] : 0;
+    }
+
+    void writeCoarseMask(int[] destination, int offset) {
+        if (!placed) {
+            Arrays.fill(destination, offset, offset + COARSE_WORDS_PER_CASCADE, 0);
+            return;
+        }
+        System.arraycopy(coarseMaskWords, 0, destination, offset, COARSE_WORDS_PER_CASCADE);
     }
 
     /**

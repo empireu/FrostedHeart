@@ -97,12 +97,16 @@ public final class LampFogPass {
     private static final float[] shownLifts = new float[3 * LEVELS];
     private static final float[] litLows = new float[3 * CASCADES];
     private static final float[] litHighs = new float[3 * CASCADES];
+    private static final int[] coarseMasks = new int[CASCADES * LampLightField.COARSE_WORDS_PER_CASCADE];
     private static final FloatBuffer matrixBuffer = BufferUtils.createFloatBuffer(16);
     private static final FloatBuffer liftBuffer = BufferUtils.createFloatBuffer(3 * LEVELS);
     private static final FloatBuffer boxBuffer = BufferUtils.createFloatBuffer(3 * CASCADES);
+    private static final IntBuffer coarseMaskBuffer = BufferUtils.createIntBuffer(
+            CASCADES * LampLightField.COARSE_WORDS_PER_CASCADE);
     private static final FloatBuffer selfTestOffsetBuffer = BufferUtils.createFloatBuffer(3 * SELF_TEST_RAYS);
     private static final IntBuffer viewportBuffer = BufferUtils.createIntBuffer(16);
     private static final IntBuffer drawBuffers = BufferUtils.createIntBuffer(2);
+    private static final IntBuffer intQueryBuffer = BufferUtils.createIntBuffer(1);
 
     @Nullable
     private static ShaderProgram program;
@@ -124,6 +128,7 @@ public final class LampFogPass {
     private static int liftUniform;
     private static int litLowUniform;
     private static int litHighUniform;
+    private static int coarseBitsUniform;
     private static int selfTestUniform;
     private static int selfTestOffsetsUniform;
     private static int targetTexture;
@@ -186,9 +191,10 @@ public final class LampFogPass {
      * @param translucentDepthTexture the depth texture of the translucent target, or 0 when no translucent chunks drew
      * @return whether the target holds the frame's lamp light, which the composites then read
      */
-    static boolean draw(RenderTarget mainTarget, Matrix4f inverseViewProjection, double eyeX, double eyeY, double eyeZ,
-            double eyeExtinction, double heightScale, int columnCount, int rowCount, int sliceCount,
-            double rangeDistance, int froxelDivisor, boolean snowColorFromLightmap, int translucentDepthTexture) {
+    static boolean draw(RenderTarget mainTarget, Matrix4f viewProjection, Matrix4f inverseViewProjection, double eyeX,
+            double eyeY, double eyeZ, double eyeExtinction, double heightScale, int columnCount, int rowCount,
+            int sliceCount, double rangeDistance, int froxelDivisor, boolean snowColorFromLightmap,
+            int translucentDepthTexture) {
         if (failed || !snowColorFromLightmap || !liftsRead) {
             return false;
         }
@@ -198,12 +204,16 @@ public final class LampFogPass {
         if (field == null || !(fade > 0.0F) || !(strength > 0.0F) || !field.shaderLitBoxes(litLows, litHighs)) {
             return false;
         }
+        if (!LampFogMarch.clipLitBoxesToFrustum(viewProjection, field, eyeX, eyeY, eyeZ, litLows, litHighs)) {
+            return false;
+        }
+        field.shaderCoarseMasks(coarseMasks);
         int divisor = divisorOf(SkySetting.FOG_LAMP_DIVISOR.get());
         int width = (mainTarget.width + divisor - 1) / divisor;
         int height = (mainTarget.height + divisor - 1) / divisor;
-        int previousFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
+        int previousFramebuffer = getInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + TRANSLUCENT_DEPTH_UNIT);
-        int previousTranslucentDepth = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        int previousTranslucentDepth = getInteger(GL11.GL_TEXTURE_BINDING_2D);
         lamps.save();
         try {
             if (!prepareTarget(width, height)) {
@@ -248,8 +258,13 @@ public final class LampFogPass {
         }
     }
 
+    private static int getInteger(int parameter) {
+        GL11.glGetIntegerv(parameter, intQueryBuffer);
+        return intQueryBuffer.get(0);
+    }
+
     /**
-     * Sets the lamp colors times a strength and the lit boxes of the last shaderLitBoxes on the program in use.
+     * Sets the lamp colors times a strength, the lit boxes, and the coarse occupancy masks on the program in use.
      */
     private static void setMarchUniforms(float strength) {
         for (int entry = 0; entry < shownLifts.length; entry++) {
@@ -267,6 +282,10 @@ public final class LampFogPass {
         boxBuffer.put(litHighs);
         boxBuffer.flip();
         GL20.glUniform3fv(litHighUniform, boxBuffer);
+        coarseMaskBuffer.clear();
+        coarseMaskBuffer.put(coarseMasks);
+        coarseMaskBuffer.flip();
+        GL30.glUniform4uiv(coarseBitsUniform, coarseMaskBuffer);
     }
 
     /**
@@ -338,10 +357,11 @@ public final class LampFogPass {
             liftUniform = GL20.glGetUniformLocation(programId, "lampLift");
             litLowUniform = GL20.glGetUniformLocation(programId, "lampLitLow");
             litHighUniform = GL20.glGetUniformLocation(programId, "lampLitHigh");
+            coarseBitsUniform = GL20.glGetUniformLocation(programId, "lampCoarseBits");
             selfTestUniform = GL20.glGetUniformLocation(programId, "selfTest");
             selfTestOffsetsUniform = GL20.glGetUniformLocation(programId, "selfTestOffsets");
         }
-        program.use();
+        GL20.glUseProgram(program.programId);
     }
 
     /**
@@ -604,6 +624,7 @@ public final class LampFogPass {
             selfTestOffsetBuffer.flip();
             GL20.glUniform3fv(selfTestOffsetsUniform, selfTestOffsetBuffer);
             field.shaderLitBoxes(litLows, litHighs);
+            field.shaderCoarseMasks(coarseMasks);
             setMarchUniforms(1.0F);
             lamps.bind(field, eye.x, eye.y, eye.z, fade);
             SkyGlPass.drawFullScreenQuad();

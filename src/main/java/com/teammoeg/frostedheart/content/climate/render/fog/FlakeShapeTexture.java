@@ -51,6 +51,7 @@ final class FlakeShapeTexture {
     @Nullable
     private static CompletableFuture<FlakeShapeSet> generation;
     private static int texture;
+    private static float maxTileScale;
     private static boolean failed;
 
     private FlakeShapeTexture() {
@@ -108,6 +109,13 @@ final class FlakeShapeTexture {
     }
 
     /**
+     * The largest half side in flake radii across all uploaded shapes, or 0 before the shapes are uploaded.
+     */
+    static float maxTileScale() {
+        return maxTileScale;
+    }
+
+    /**
      * A few words about the state of the shapes, for the client command.
      */
     static String describe() {
@@ -152,8 +160,14 @@ final class FlakeShapeTexture {
             GlStateManager._pixelStore(GL11.GL_UNPACK_ALIGNMENT, 4);
         }
         texture = created;
+        float largest = 0.0F;
         for (int shape = 0; shape < count; shape++) {
-            tileScales.put(shape, (float) SnowFlakes.shapeTileScale(shapes.coverage(shape)));
+            float scale = (float) SnowFlakes.shapeTileScale(shapes.coverage(shape));
+            tileScales.put(shape, scale);
+            if (scale > largest) {
+                largest = scale;
+            }
         }
+        maxTileScale = largest;
     }
 }

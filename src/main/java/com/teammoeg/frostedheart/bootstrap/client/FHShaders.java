@@ -28,6 +28,9 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL20;
+import org.lwjgl.opengl.GL32;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -81,13 +84,19 @@ public class FHShaders extends Shaders {
     private static boolean weatherFogCompositeUnloadOnReload;
     private static Shader WEATHER_FOG_TRANSLUCENT_COMPOSITE;
     private static boolean weatherFogTranslucentCompositeUnloadOnReload;
+    private static Shader WEATHER_FOG_DEPTH_COPY;
+    private static boolean weatherFogDepthCopyUnloadOnReload;
     private static Shader WEATHER_FOG_LAMP;
     private static boolean weatherFogLampUnloadOnReload;
     private static Shader SNOW_FLAKE_UPDATE;
     private static boolean snowFlakeUpdateUnloadOnReload;
     private static Shader SNOW_FLAKES_VERTEX;
+    private static int SNOW_FLAKES_GEOMETRY;
     private static Shader SNOW_FLAKES_FRAGMENT;
     private static boolean snowFlakesUnloadOnReload;
+    private static Shader SNOW_FLAKES_COMPACT_VERTEX;
+    private static int SNOW_FLAKES_COMPACT_GEOMETRY;
+    private static boolean snowFlakesCompactUnloadOnReload;
     private static Shader SNOW_LEE_BUILD;
     private static boolean snowLeeBuildUnloadOnReload;
     private static Shader SNOW_SMOOTH_BUILD;
@@ -379,6 +388,33 @@ public class FHShaders extends Shaders {
     }
 
     /**
+     * The fragment stage that copies opaque scene depth into the translucent fog target's depth attachment, compiled on
+     * first use.
+     */
+    public static Shader getWeatherFogDepthCopy() {
+        if (!weatherFogDepthCopyUnloadOnReload) {
+            addReloadListener(FHShaders::unloadWeatherFogDepthCopy);
+            weatherFogDepthCopyUnloadOnReload = true;
+        }
+        if (WEATHER_FOG_DEPTH_COPY == null) {
+            String source = readShaderSource(FHMain.rl("shaders/weather_fog_depth_copy.fsh"));
+            WEATHER_FOG_DEPTH_COPY = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
+        }
+        return WEATHER_FOG_DEPTH_COPY;
+    }
+
+    /**
+     * Deletes the translucent depth copy stage after a resource reload, so the next use compiles it from the new
+     * resources.
+     */
+    private static void unloadWeatherFogDepthCopy() {
+        if (WEATHER_FOG_DEPTH_COPY != null) {
+            WEATHER_FOG_DEPTH_COPY.deleteShader();
+            WEATHER_FOG_DEPTH_COPY = null;
+        }
+    }
+
+    /**
      * Reads weather_fog.glsl from the active resource manager for composition into chunk shaders.
      */
     public static String readWeatherFogInclude() {
@@ -424,8 +460,9 @@ public class FHShaders extends Shaders {
     }
 
     /**
-     * The fragment stage of the pass that moves the snowflakes, snow_flakes.glsl followed by snow_lee.glsl and
-     * snow_flake_update.fsh in one source, which is compiled on first use.
+     * The fragment stage of the pass that moves the snowflakes and precomputes each flake and splat's look for the
+     * draw passes, weather_fog.glsl, weather_fog_excess.glsl, snow_flakes.glsl, snow_lee.glsl, lamp_light.glsl and
+     * snow_flake_update.fsh in one source, compiled with LAMP_LIGHT_FIELD on first use.
      */
     public static Shader getSnowFlakeUpdate() {
         if (!snowFlakeUpdateUnloadOnReload) {
@@ -433,10 +470,14 @@ public class FHShaders extends Shaders {
             snowFlakeUpdateUnloadOnReload = true;
         }
         if (SNOW_FLAKE_UPDATE == null) {
-            String source = readShaderSource(FHMain.rl("shaders/snow_flakes.glsl")) + "\n"
+            String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/weather_fog_excess.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/snow_flakes.glsl")) + "\n"
                     + readShaderSource(FHMain.rl("shaders/snow_lee.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/lamp_light.glsl")) + "\n"
                     + readShaderSource(FHMain.rl("shaders/snow_flake_update.fsh"));
-            SNOW_FLAKE_UPDATE = Shader.loadShader(Shader.ShaderType.FRAGMENT, "#version 150\n" + source);
+            SNOW_FLAKE_UPDATE = Shader.loadShader(Shader.ShaderType.FRAGMENT,
+                    "#version 150\n#define LAMP_LIGHT_FIELD\n" + source);
         }
         return SNOW_FLAKE_UPDATE;
     }
@@ -531,13 +572,17 @@ public class FHShaders extends Shaders {
     }
 
     /**
-     * The vertex stage of the snowflake draw. Both stages are weather_fog.glsl, weather_fog_excess.glsl,
-     * snow_flakes.glsl, snow_lee.glsl and lamp_light.glsl followed by snow_flakes_draw.glsl, compiled with a define for
-     * each, and the vertex stage also with LAMP_LIGHT_FIELD.
+     * The vertex stage of the snowflake draw. All three stages are snow_flakes.glsl followed by snow_flakes_draw.glsl,
+     * compiled with a define for each.
      */
     public static Shader getSnowFlakesVertex() {
         loadSnowFlakes();
         return SNOW_FLAKES_VERTEX;
+    }
+
+    public static int getSnowFlakesGeometry() {
+        loadSnowFlakes();
+        return SNOW_FLAKES_GEOMETRY;
     }
 
     public static Shader getSnowFlakesFragment() {
@@ -551,23 +596,25 @@ public class FHShaders extends Shaders {
             snowFlakesUnloadOnReload = true;
         }
         if (SNOW_FLAKES_VERTEX == null) {
-            String source = readShaderSource(FHMain.rl("shaders/weather_fog.glsl")) + "\n"
-                    + readShaderSource(FHMain.rl("shaders/weather_fog_excess.glsl")) + "\n"
-                    + readShaderSource(FHMain.rl("shaders/snow_flakes.glsl")) + "\n"
-                    + readShaderSource(FHMain.rl("shaders/snow_lee.glsl")) + "\n"
-                    + readShaderSource(FHMain.rl("shaders/lamp_light.glsl")) + "\n"
+            String source = readShaderSource(FHMain.rl("shaders/snow_flakes.glsl")) + "\n"
                     + readShaderSource(FHMain.rl("shaders/snow_flakes_draw.glsl"));
             Shader vertex = Shader.loadShader(Shader.ShaderType.VERTEX,
-                    "#version 150\n#define VERTEX_SHADER\n#define LAMP_LIGHT_FIELD\n" + source);
+                    "#version 150\n#define VERTEX_SHADER\n" + source);
+            int geometry = 0;
             Shader fragment;
             try {
+                geometry = compileGeometryShader("#version 150\n#define GEOMETRY_SHADER\n" + source);
                 fragment = Shader.loadShader(Shader.ShaderType.FRAGMENT,
                         "#version 150\n#define FRAGMENT_SHADER\n" + source);
             } catch (RuntimeException exception) {
+                if (geometry != 0) {
+                    GL20.glDeleteShader(geometry);
+                }
                 vertex.deleteShader();
                 throw exception;
             }
             SNOW_FLAKES_VERTEX = vertex;
+            SNOW_FLAKES_GEOMETRY = geometry;
             SNOW_FLAKES_FRAGMENT = fragment;
         }
     }
@@ -578,10 +625,74 @@ public class FHShaders extends Shaders {
     private static void unloadSnowFlakes() {
         if (SNOW_FLAKES_VERTEX != null) {
             SNOW_FLAKES_VERTEX.deleteShader();
+            GL20.glDeleteShader(SNOW_FLAKES_GEOMETRY);
             SNOW_FLAKES_FRAGMENT.deleteShader();
             SNOW_FLAKES_VERTEX = null;
+            SNOW_FLAKES_GEOMETRY = 0;
             SNOW_FLAKES_FRAGMENT = null;
         }
+    }
+
+    /**
+     * The vertex stage of the visible-flake compaction pass, snow_flakes.glsl followed by snow_flakes_compact.glsl.
+     */
+    public static Shader getSnowFlakesCompactVertex() {
+        loadSnowFlakesCompact();
+        return SNOW_FLAKES_COMPACT_VERTEX;
+    }
+
+    /**
+     * The geometry stage of the visible-flake compaction pass, snow_flakes.glsl followed by snow_flakes_compact.glsl.
+     */
+    public static int getSnowFlakesCompactGeometry() {
+        loadSnowFlakesCompact();
+        return SNOW_FLAKES_COMPACT_GEOMETRY;
+    }
+
+    private static void loadSnowFlakesCompact() {
+        if (!snowFlakesCompactUnloadOnReload) {
+            addReloadListener(FHShaders::unloadSnowFlakesCompact);
+            snowFlakesCompactUnloadOnReload = true;
+        }
+        if (SNOW_FLAKES_COMPACT_VERTEX == null) {
+            String source = readShaderSource(FHMain.rl("shaders/snow_flakes.glsl")) + "\n"
+                    + readShaderSource(FHMain.rl("shaders/snow_flakes_compact.glsl"));
+            Shader vertex = Shader.loadShader(Shader.ShaderType.VERTEX,
+                    "#version 150\n#define VERTEX_SHADER\n" + source);
+            int geometry;
+            try {
+                geometry = compileGeometryShader("#version 150\n#define GEOMETRY_SHADER\n" + source);
+            } catch (RuntimeException exception) {
+                vertex.deleteShader();
+                throw exception;
+            }
+            SNOW_FLAKES_COMPACT_VERTEX = vertex;
+            SNOW_FLAKES_COMPACT_GEOMETRY = geometry;
+        }
+    }
+
+    private static void unloadSnowFlakesCompact() {
+        if (SNOW_FLAKES_COMPACT_VERTEX != null) {
+            SNOW_FLAKES_COMPACT_VERTEX.deleteShader();
+            GL20.glDeleteShader(SNOW_FLAKES_COMPACT_GEOMETRY);
+            SNOW_FLAKES_COMPACT_VERTEX = null;
+            SNOW_FLAKES_COMPACT_GEOMETRY = 0;
+        }
+    }
+
+    private static int compileGeometryShader(String source) {
+        int shaderId = GL20.glCreateShader(GL32.GL_GEOMETRY_SHADER);
+        if (shaderId == 0) {
+            throw new IllegalStateException("Unable to create geometry shader object");
+        }
+        GL20.glShaderSource(shaderId, source);
+        GL20.glCompileShader(shaderId);
+        if (GL20.glGetShaderi(shaderId, GL20.GL_COMPILE_STATUS) == GL11.GL_FALSE) {
+            String log = GL20.glGetShaderInfoLog(shaderId, GL20.glGetShaderi(shaderId, GL20.GL_INFO_LOG_LENGTH));
+            GL20.glDeleteShader(shaderId);
+            throw new IllegalStateException("Unable to compile geometry shader:\n" + log);
+        }
+        return shaderId;
     }
 
     /**

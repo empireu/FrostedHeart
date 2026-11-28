@@ -29,6 +29,7 @@ import org.lwjgl.opengl.GL30;
 import org.lwjgl.system.MemoryUtil;
 
 import java.nio.ByteBuffer;
+import java.nio.IntBuffer;
 import java.nio.ShortBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -60,6 +61,7 @@ public final class SnowFieldTextures {
      * One tile row of the heights, the 16 rows of texels of the tiles with the same tile z.
      */
     private static final ShortBuffer heightStaging = BufferUtils.createShortBuffer(FarHeights.SIZE * TILE_WIDTH);
+    private static final IntBuffer intQueryBuffer = BufferUtils.createIntBuffer(1);
 
     /**
      * One brick row of the field, the 8 by 8 by size cells of the bricks with the same brick y and brick z, or null
@@ -195,7 +197,8 @@ public final class SnowFieldTextures {
         } else if (heights.dirtyNoLeavesTileCount() == 0) {
             return noLeavesHeightTexture;
         }
-        int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        GL11.glGetIntegerv(GL11.GL_TEXTURE_BINDING_2D, intQueryBuffer);
+        int previousTexture = intQueryBuffer.get(0);
         try {
             GlStateManager._pixelStore(GL11.GL_UNPACK_ROW_LENGTH, FarHeights.SIZE);
             GlStateManager._pixelStore(GL11.GL_UNPACK_SKIP_PIXELS, 0);
